@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Storage Navigator</title>
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" id="hljs-dark">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" id="hljs-light" disabled>
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>Storage Navigator</h1>
+      <div class="header-controls">
+        <select id="storage-select">
+          <option value="">Select storage...</option>
+        </select>
+        <button id="add-storage-btn" class="icon-btn primary" title="Add storage">+</button>
+        <button id="create-btn" class="icon-btn" title="Create new file">&#9998;</button>
+        <button id="refresh-btn" class="icon-btn" title="Refresh">&#8635;</button>
+        <button id="export-btn" class="icon-btn" title="Export storage config">&#8681;</button>
+        <button id="theme-btn" class="icon-btn" title="Toggle theme">&#9788;</button>
+      </div>
+    </header>
+
+    <div id="main">
+      <div id="tree-panel">
+        <div id="tree-header">Explorer</div>
+        <div id="tree-content">
+          <p class="placeholder">Select a storage account to browse</p>
+        </div>
+      </div>
+
+      <div id="resizer"></div>
+
+      <div id="content-panel">
+        <div id="content-header">
+          <span id="content-title">No file selected</span>
+          <span id="content-meta"></span>
+        </div>
+        <div id="content-body">
+          <p class="placeholder">Click a file to view its contents</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add Storage Modal -->
+  <div id="add-modal" class="modal hidden">
+    <div class="modal-content">
+      <h2>Add Storage Account</h2>
+      <label>Display Name<input type="text" id="modal-name" placeholder="e.g. corporateloans"></label>
+      <label>Account Name<input type="text" id="modal-account" placeholder="Azure storage account name"></label>
+      <label>Auth Type
+        <select id="modal-auth-type" style="display:block;width:100%;margin-top:4px;padding:8px;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:13px;">
+          <option value="account-key">Account Key (recommended)</option>
+          <option value="sas-token">SAS Token</option>
+        </select>
+      </label>
+      <label id="modal-key-label">Account Key<textarea id="modal-key" rows="2" placeholder="Azure storage account key"></textarea></label>
+      <div class="modal-actions">
+        <button id="modal-cancel">Cancel</button>
+        <button id="modal-save" class="primary">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Rename Modal -->
+  <div id="rename-modal" class="modal hidden">
+    <div class="modal-content">
+      <h2>Rename File</h2>
+      <label>Current name<input type="text" id="rename-old" readonly></label>
+      <label>New name<input type="text" id="rename-new" placeholder="Enter new file name"></label>
+      <div class="modal-actions">
+        <button id="rename-cancel">Cancel</button>
+        <button id="rename-save" class="primary">Rename</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Delete Confirmation Modal -->
+  <div id="delete-modal" class="modal hidden">
+    <div class="modal-content">
+      <h2>Delete File</h2>
+      <p id="delete-message" style="font-size:13px;color:var(--text);margin-bottom:12px;"></p>
+      <p style="font-size:12px;color:var(--expiry-expired);margin-bottom:16px;">This action cannot be undone.</p>
+      <div class="modal-actions">
+        <button id="delete-cancel">Cancel</button>
+        <button id="delete-confirm" class="primary danger">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Create File Modal -->
+  <div id="create-modal" class="modal hidden">
+    <div class="modal-content">
+      <h2>Create New File</h2>
+      <label>Container
+        <select id="create-container" style="display:block;width:100%;margin-top:4px;padding:8px;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:13px;">
+          <option value="">Select container...</option>
+        </select>
+      </label>
+      <label>File path<input type="text" id="create-path" placeholder="e.g. folder/my-file.json"></label>
+      <label>Content<textarea id="create-content" rows="8" placeholder="File content..."></textarea></label>
+      <div class="modal-actions">
+        <button id="create-cancel">Cancel</button>
+        <button id="create-save" class="primary">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Context Menu -->
+  <div id="context-menu" class="context-menu hidden">
+    <div class="context-menu-item" id="ctx-rename">Rename</div>
+    <div class="context-menu-item ctx-danger" id="ctx-delete">Delete</div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.0/marked.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
