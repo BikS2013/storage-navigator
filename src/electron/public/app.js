@@ -35,10 +35,16 @@
   const createCancel = document.getElementById("create-cancel");
   const createSave = document.getElementById("create-save");
 
+  const syncModal = document.getElementById("sync-modal");
+  const syncInfo = document.getElementById("sync-info");
+  const syncCancel = document.getElementById("sync-cancel");
+  const syncConfirm = document.getElementById("sync-confirm");
+
   let currentStorage = "";
   let currentContainer = "";
   let activeTreeItem = null;
   let contextTarget = null; // { container, blobName, parentEl, prefix, depth }
+  let syncTarget = null; // { container, meta }
 
   // --- Theme ---
   let theme = localStorage.getItem("sn-theme") || "dark";
@@ -168,6 +174,35 @@
 
     try {
       await loadTreeLevel(children, containerName, "", 1);
+
+      // Check for repo sync metadata
+      try {
+        const metaRes = await fetch(`/api/sync-meta/${currentStorage}/${containerName}`);
+        const meta = await metaRes.json();
+        if (meta && meta.provider) {
+          const badge = document.createElement("span");
+          badge.className = "sync-badge";
+          badge.textContent = "\u21BB"; // sync arrow
+          badge.title = `Synced from ${meta.provider}: ${meta.repoUrl} (${meta.branch})`;
+          badge.addEventListener("click", (e) => {
+            e.stopPropagation();
+            syncTarget = { container: containerName, meta };
+            syncInfo.innerHTML = `
+              <p><strong>Repository:</strong> ${meta.repoUrl}</p>
+              <p><strong>Branch:</strong> ${meta.branch}</p>
+              <p><strong>Provider:</strong> ${meta.provider}</p>
+              <p><strong>Last synced:</strong> ${new Date(meta.lastSyncAt).toLocaleString()}</p>
+              <p><strong>Files:</strong> ${Object.keys(meta.fileShas).length}</p>
+            `;
+            syncModal.classList.remove("hidden");
+          });
+          // Add badge to the container's tree-item
+          const containerItem = node.querySelector(".tree-item");
+          if (containerItem && !containerItem.querySelector(".sync-badge")) {
+            containerItem.appendChild(badge);
+          }
+        }
+      } catch { /* not a synced container */ }
     } catch (e) {
       children.innerHTML = `<div style="padding:4px 24px;color:var(--expiry-expired);font-size:12px">Error: ${e.message}</div>`;
     }
@@ -550,6 +585,34 @@
     } finally {
       createSave.disabled = false;
       createSave.textContent = "Create";
+    }
+  });
+
+  // --- Sync ---
+  syncCancel.addEventListener("click", () => {
+    syncModal.classList.add("hidden");
+    syncTarget = null;
+  });
+
+  syncConfirm.addEventListener("click", async () => {
+    if (!syncTarget) return;
+    syncConfirm.disabled = true;
+    syncConfirm.textContent = "Syncing...";
+
+    try {
+      const res = await apiJson(`/api/sync/${currentStorage}/${syncTarget.container}`, {
+        method: "POST",
+      });
+      syncModal.classList.add("hidden");
+      alert(`Sync complete!\nUploaded: ${res.uploaded.length}\nDeleted: ${res.deleted.length}\nSkipped: ${res.skipped.length}\nErrors: ${res.errors.length}`);
+      // Refresh the tree to reflect changes
+      await buildTree();
+    } catch (e) {
+      alert("Sync failed: " + e.message);
+    } finally {
+      syncConfirm.disabled = false;
+      syncConfirm.textContent = "Sync Now";
+      syncTarget = null;
     }
   });
 

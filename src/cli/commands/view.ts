@@ -1,31 +1,13 @@
-import { CredentialStore } from "../../core/credential-store.js";
 import { BlobClient } from "../../core/blob-client.js";
 import mammoth from "mammoth";
-
-function resolveStorage(storageName?: string) {
-  const store = new CredentialStore();
-  if (storageName) {
-    const entry = store.getStorage(storageName);
-    if (!entry) {
-      console.error(`Storage '${storageName}' not found.`);
-      process.exit(1);
-    }
-    return entry;
-  }
-  const first = store.getFirstStorage();
-  if (!first) {
-    console.error('No storage accounts configured. Use "storage-nav add" first.');
-    process.exit(1);
-  }
-  return first;
-}
+import { resolveStorageEntry, type StorageOpts } from "./shared.js";
 
 export async function viewBlob(
-  storageName: string | undefined,
+  storageOpts: StorageOpts,
   container: string,
   blobName: string
 ): Promise<void> {
-  const entry = resolveStorage(storageName);
+  const { entry } = await resolveStorageEntry(storageOpts);
   const client = new BlobClient(entry);
 
   console.log(`Fetching ${entry.accountName}/${container}/${blobName}...\n`);
@@ -59,8 +41,8 @@ export async function viewBlob(
   }
 }
 
-export async function listContainers(storageName?: string): Promise<void> {
-  const entry = resolveStorage(storageName);
+export async function listContainers(storageOpts: StorageOpts): Promise<void> {
+  const { entry } = await resolveStorageEntry(storageOpts);
   const client = new BlobClient(entry);
 
   const containers = await client.listContainers();
@@ -71,11 +53,11 @@ export async function listContainers(storageName?: string): Promise<void> {
 }
 
 export async function listBlobs(
-  storageName: string | undefined,
+  storageOpts: StorageOpts,
   container: string,
   prefix?: string
 ): Promise<void> {
-  const entry = resolveStorage(storageName);
+  const { entry } = await resolveStorageEntry(storageOpts);
   const client = new BlobClient(entry);
 
   const items = await client.listBlobs(container, prefix);
@@ -93,12 +75,12 @@ export async function listBlobs(
 }
 
 export async function downloadBlob(
-  storageName: string | undefined,
+  storageOpts: StorageOpts,
   container: string,
   blobName: string,
   outputPath: string
 ): Promise<void> {
-  const entry = resolveStorage(storageName);
+  const { entry } = await resolveStorageEntry(storageOpts);
   const client = new BlobClient(entry);
 
   console.log(`Downloading ${entry.accountName}/${container}/${blobName}...`);

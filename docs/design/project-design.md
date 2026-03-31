@@ -423,3 +423,2050 @@ import mammoth from "mammoth";
 | Embedded images inflate HTML response | Low | mammoth embeds as inline base64 by default; leave as-is (free functionality) |
 | HTML injection from malicious `.docx` | Low | mammoth produces HTML from OOXML structure, not arbitrary user HTML; add DOMPurify later if needed |
 | Breaking change to blob endpoint | None | `?format=` parameter is opt-in; omitting preserves all existing behavior |
+
+---
+
+## Technical Design: Repository-to-Container Synchronization
+
+**Date:** 2026-03-31
+**Status:** Ready for implementation
+**References:**
+- `docs/reference/refined-request-repo-sync.md` (requirements)
+- `docs/reference/investigation-repo-sync.md` (technical investigation)
+- `docs/design/plan-002-repo-sync.md` (implementation plan)
+
+### Feature Overview
+
+Replicate GitHub and Azure DevOps repositories into Azure Blob Storage containers via REST APIs (no `git clone`), and keep them synchronized over time. PATs are stored in the existing encrypted credential store. Containers that mirror a repository carry a `.repo-sync-meta.json` metadata blob enabling on-demand sync from CLI and UI. No new npm dependencies required -- uses Node 18+ built-in `fetch`.
+
+---
+
+### Implementation Unit A: Types + Credential Store Extensions
+
+**Files modified:** `src/core/types.ts`, `src/core/credential-store.ts`
+**Dependencies:** None (foundation for all subsequent units)
+
+#### A.1 New Interfaces in `src/core/types.ts`
+
+Add after the existing `BlobContent` interface (after line 42):
+
+```typescript
+/** A stored Personal Access Token for repository access */
+export interface TokenEntry {
+  name: string;                          // user-chosen display name (e.g. "my-github-pat")
+  provider: "github" | "azure-devops";   // which service this PAT authenticates against
+  token: string;                         // PAT value (encrypted at rest with everything else)
+  addedAt: string;                       // ISO timestamp of when the token was stored
+  expiresAt?: string;                    // optional ISO timestamp for PAT expiry warning
+}
+
+/** Expiry status for a token */
+export type TokenExpiryStatus = "valid" | "expiring-soon" | "expired" | "no-expiry";
+
+/** Display-safe token info (no raw token) */
+export interface TokenListItem {
+  name: string;
+  provider: "github" | "azure-devops";
+  maskedToken: string;                   // first 4 chars + "****"
+  addedAt: string;
+  expiresAt?: string;
+  expiryStatus: TokenExpiryStatus;
+}
+
+/** A single sync history entry */
+export interface SyncHistoryEntry {
+  syncedAt: string;                      // ISO timestamp
+  commitSha: string;                     // commit SHA at time of sync
+  filesAdded: number;
+  filesUpdated: number;
+  filesDeleted: number;
+  durationMs?: number;
+}
+
+/** Metadata blob stored at {prefix}.repo-sync-meta.json in mirrored containers */
+export interface RepoSyncMeta {
+  provider: "github" | "azure-devops";
+  repository: string;                    // "owner/repo" or "org/project/repo"
+  branch: string;
+  prefix: string;                        // "" or "some/path/" (trailing slash)
+  tokenName: string;                     // name of the PAT used for sync
+  lastSyncedAt: string;                  // ISO timestamp
+  lastSyncCommitSha: string;             // commit SHA of last sync
+  lastSyncTreeSha?: string;              // tree SHA for quick "anything changed?" check (GitHub only)
+  fileCount: number;
+  fileShas: Record<string, string>;      // blob-path -> git-object-SHA map
+  syncHistory: SyncHistoryEntry[];       // last 20 entries (FIFO)
+}
+
+/** Result object returned by sync operations */
+export interface SyncResult {
+  filesAdded: number;
+  filesUpdated: number;
+  filesDeleted: number;
+  filesUnchanged: number;
+  durationMs: number;
+  errors: Array<{ path: string; error: string }>;
+}
+
+/** File entry from a repository tree listing */
+export interface RepoFileEntry {
+  path: string;        // relative path from repo root
+  sha: string;         // git object SHA (content hash)
+  size?: number;       // file size in bytes
+}
+```
+
+#### A.2 Extend `CredentialData` in `src/core/types.ts`
+
+**Current code (lines 11-13):**
+```typescript
+export interface CredentialData {
+  storages: StorageEntry[];
+}
+```
+
+**Replacement:**
+```typescript
+export interface CredentialData {
+  storages: StorageEntry[];
+  tokens?: TokenEntry[];        // optional for backward compat on load
+}
+```
+
+The `tokens` field is optional so that existing credential files without it still deserialize correctly.
+
+#### A.3 Credential Store Extensions in `src/core/credential-store.ts`
+
+**A.3.1 Update import** (line 5):
+
+**Current:**
+```typescript
+import type { CredentialData, EncryptedPayload, StorageEntry } from "./types.js";
+```
+
+**Replacement:**
+```typescript
+import type { CredentialData, EncryptedPayload, StorageEntry, TokenEntry, TokenListItem, TokenExpiryStatus } from "./types.js";
+```
+
+**A.3.2 Backward compatibility normalization in `load()`**
+
+Add at the end of the `load()` method, inside the `try` block, immediately after `this.data = JSON.parse(decrypted) as CredentialData;` (after line 80):
+
+```typescript
+      if (!this.data.tokens) this.data.tokens = [];
+```
+
+Also add the same normalization after the migration path. After `this.data = JSON.parse(decrypted) as CredentialData;` inside `tryMigrateFromHostnameKey()` (after line 119):
+
+```typescript
+        if (!this.data.tokens) this.data.tokens = [];
+```
+
+And after the fallback assignment `this.data = { storages: [] };` (line 88):
+
+```typescript
+      this.data = { storages: [], tokens: [] };
+```
+
+And at the class property initialization (line 65):
+
+**Current:**
+```typescript
+  private data: CredentialData = { storages: [] };
+```
+
+**Replacement:**
+```typescript
+  private data: CredentialData = { storages: [], tokens: [] };
+```
+
+Also update the initial assignment in `load()` when no store file exists (line 73):
+
+**Current:**
+```typescript
+      this.data = { storages: [] };
+```
+
+**Replacement:**
+```typescript
+      this.data = { storages: [], tokens: [] };
+```
+
+**A.3.3 Add helper function** before the `CredentialStore` class (after line 10, before `const ALGORITHM`):
+
+```typescript
+/** Determine token expiry status */
+function getExpiryStatus(expiresAt?: string): TokenExpiryStatus {
+  if (!expiresAt) return "no-expiry";
+  const expiry = new Date(expiresAt);
+  const now = new Date();
+  if (expiry < now) return "expired";
+  const daysLeft = (expiry.getTime() - now.getTime()) / (1000 * 60 * 60 * 24);
+  if (daysLeft <= 14) return "expiring-soon";
+  return "valid";
+}
+```
+
+**A.3.4 Add token methods** to `CredentialStore` class, after `getFirstStorage()` (after line 223, before the closing `}`):
+
+```typescript
+  // ==================== Token Management ====================
+
+  /** Add or update a PAT token */
+  addToken(entry: Omit<TokenEntry, "addedAt">): void {
+    if (!entry.name || !entry.name.trim()) {
+      throw new Error("Token name is required.");
+    }
+    if (!entry.token || !entry.token.trim()) {
+      throw new Error("Token value is required.");
+    }
+    if (entry.provider !== "github" && entry.provider !== "azure-devops") {
+      throw new Error(`Invalid provider "${entry.provider}". Must be "github" or "azure-devops".`);
+    }
+    const tokens = this.data.tokens!;
+    const existing = tokens.findIndex((t) => t.name === entry.name);
+    const full: TokenEntry = { ...entry, addedAt: new Date().toISOString() };
+    if (existing >= 0) {
+      tokens[existing] = full;
+    } else {
+      tokens.push(full);
+    }
+    this.save();
+  }
+
+  /** Get a token by name */
+  getToken(name: string): TokenEntry | undefined {
+    return this.data.tokens!.find((t) => t.name === name);
+  }
+
+  /** Get the first token matching a provider */
+  getTokenByProvider(provider: "github" | "azure-devops"): TokenEntry | undefined {
+    return this.data.tokens!.find((t) => t.provider === provider);
+  }
+
+  /** List all tokens with masked values and expiry status */
+  listTokens(): TokenListItem[] {
+    return this.data.tokens!.map((t) => ({
+      name: t.name,
+      provider: t.provider,
+      maskedToken: t.token.substring(0, 4) + "****",
+      addedAt: t.addedAt,
+      expiresAt: t.expiresAt,
+      expiryStatus: getExpiryStatus(t.expiresAt),
+    }));
+  }
+
+  /** Remove a token by name */
+  removeToken(name: string): boolean {
+    const tokens = this.data.tokens!;
+    const before = tokens.length;
+    this.data.tokens = tokens.filter((t) => t.name !== name);
+    if (this.data.tokens.length < before) {
+      this.save();
+      return true;
+    }
+    return false;
+  }
+
+  /** Check if any tokens are configured */
+  hasTokens(): boolean {
+    return this.data.tokens!.length > 0;
+  }
+```
+
+#### A.4 Validation Rules
+
+- `addToken` throws if `name` is empty, `token` is empty, or `provider` is not `"github"` or `"azure-devops"`. No fallback values.
+- `removeToken` returns false if name not found (caller decides behavior).
+- All token arrays are non-null at runtime thanks to `load()` normalization.
+
+---
+
+### Implementation Unit B: GitHub Client
+
+**New file:** `src/core/github-client.ts`
+**Dependencies:** Unit A (for `RepoFileEntry` type)
+**Can run in parallel with:** Unit C
+
+#### B.1 Shared Utilities: `src/core/repo-utils.ts` (NEW FILE)
+
+Create this file first since both Unit B and Unit C depend on it.
+
+```typescript
+import type { RepoFileEntry } from "./types.js";
+
+/** Sleep for a given number of milliseconds */
+export function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Rate-limited fetch with Retry-After handling.
+ *
+ * 1. Execute fetch.
+ * 2. If 429, read Retry-After header, sleep, retry once.
+ * 3. After success, check X-RateLimit-Remaining. If < 100, sleep until reset.
+ * 4. Return the response.
+ */
+export async function rateLimitedFetch(
+  url: string,
+  headers: Record<string, string>
+): Promise<Response> {
+  let res = await fetch(url, { headers });
+
+  if (res.status === 429) {
+    const retryAfter = parseInt(res.headers.get("retry-after") || "60", 10);
+    await sleep(retryAfter * 1000);
+    res = await fetch(url, { headers });
+  }
+
+  const remaining = parseInt(res.headers.get("x-ratelimit-remaining") || "999", 10);
+  if (remaining < 100) {
+    const resetAt = parseInt(res.headers.get("x-ratelimit-reset") || "0", 10);
+    if (resetAt > 0) {
+      const waitMs = Math.max(0, resetAt * 1000 - Date.now()) + 1000;
+      await sleep(waitMs);
+    }
+  }
+
+  return res;
+}
+
+/**
+ * Process items in batches with controlled concurrency.
+ * Default batch size: 10.
+ */
+export async function processInBatches<T>(
+  items: T[],
+  batchSize: number,
+  processor: (item: T) => Promise<void>
+): Promise<void> {
+  for (let i = 0; i < items.length; i += batchSize) {
+    const batch = items.slice(i, i + batchSize);
+    await Promise.all(batch.map(processor));
+  }
+}
+
+/**
+ * Infer content-type from file extension.
+ * Covers common programming, web, document, and media file types.
+ */
+export function inferContentType(filePath: string): string {
+  const ext = filePath.split(".").pop()?.toLowerCase();
+  const map: Record<string, string> = {
+    // Text / source code
+    ts: "text/plain", js: "text/plain", jsx: "text/plain", tsx: "text/plain",
+    py: "text/plain", go: "text/plain", rs: "text/plain", java: "text/plain",
+    c: "text/plain", cpp: "text/plain", h: "text/plain", hpp: "text/plain",
+    cs: "text/plain", rb: "text/plain", php: "text/plain", sh: "text/plain",
+    bash: "text/plain", zsh: "text/plain", ps1: "text/plain",
+    txt: "text/plain", log: "text/plain", csv: "text/plain",
+    md: "text/plain", rst: "text/plain",
+    // Web
+    html: "text/html", htm: "text/html",
+    css: "text/css", scss: "text/css", less: "text/css",
+    // Data
+    json: "application/json",
+    xml: "application/xml",
+    yaml: "text/yaml", yml: "text/yaml",
+    toml: "text/plain",
+    // Images
+    png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
+    gif: "image/gif", svg: "image/svg+xml", ico: "image/x-icon",
+    webp: "image/webp",
+    // Documents
+    pdf: "application/pdf",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    // Fonts
+    woff: "font/woff", woff2: "font/woff2", ttf: "font/ttf", otf: "font/otf",
+    // Archives
+    zip: "application/zip", gz: "application/gzip", tar: "application/x-tar",
+  };
+  return map[ext ?? ""] ?? "application/octet-stream";
+}
+```
+
+#### B.2 GitHub Client: `src/core/github-client.ts` (NEW FILE)
+
+```typescript
+import type { RepoFileEntry } from "./types.js";
+import { rateLimitedFetch } from "./repo-utils.js";
+
+/**
+ * GitHub REST API client for repository file access.
+ * Uses the Git Trees API for listing and Contents API for downloading.
+ * All requests use PAT Bearer authentication.
+ */
+export class GitHubClient {
+  private pat: string;
+  private baseUrl = "https://api.github.com";
+
+  constructor(pat: string) {
+    this.pat = pat;
+  }
+
+  private get headers(): Record<string, string> {
+    return {
+      Authorization: `Bearer ${this.pat}`,
+      Accept: "application/json",
+      "User-Agent": "storage-navigator",
+    };
+  }
+
+  /**
+   * Get the default branch name for a repository.
+   * GET /repos/{owner}/{repo}
+   */
+  async getDefaultBranch(owner: string, repo: string): Promise<string> {
+    const url = `${this.baseUrl}/repos/${owner}/${repo}`;
+    const res = await rateLimitedFetch(url, this.headers);
+    this.handleError(res, "getDefaultBranch");
+    const data = await res.json();
+    return data.default_branch;
+  }
+
+  /**
+   * Get the latest commit SHA for a branch.
+   * GET /repos/{owner}/{repo}/git/ref/heads/{branch}
+   * Returns the commit SHA (not the tree SHA).
+   */
+  async getCommitSha(owner: string, repo: string, branch: string): Promise<string> {
+    const url = `${this.baseUrl}/repos/${owner}/${repo}/git/ref/heads/${branch}`;
+    const res = await rateLimitedFetch(url, this.headers);
+    this.handleError(res, "getCommitSha");
+    const data = await res.json();
+    return data.object.sha;
+  }
+
+  /**
+   * Get the tree SHA for a commit.
+   * GET /repos/{owner}/{repo}/git/commits/{commitSha}
+   */
+  async getTreeSha(owner: string, repo: string, commitSha: string): Promise<string> {
+    const url = `${this.baseUrl}/repos/${owner}/${repo}/git/commits/${commitSha}`;
+    const res = await rateLimitedFetch(url, this.headers);
+    this.handleError(res, "getTreeSha");
+    const data = await res.json();
+    return data.tree.sha;
+  }
+
+  /**
+   * List all files in a repository branch (recursive tree).
+   *
+   * Flow:
+   * 1. Resolve branch -> commit SHA via Refs API
+   * 2. Resolve commit SHA -> tree SHA via Commits API
+   * 3. Fetch full recursive tree via Trees API
+   * 4. Filter to type === "blob" entries only
+   *
+   * Returns commitSha and treeSha for metadata tracking.
+   */
+  async listFiles(owner: string, repo: string, branch: string): Promise<{
+    commitSha: string;
+    treeSha: string;
+    files: RepoFileEntry[];
+  }> {
+    // Step 1: branch -> commit SHA
+    const commitSha = await this.getCommitSha(owner, repo, branch);
+
+    // Step 2: commit SHA -> tree SHA
+    const treeSha = await this.getTreeSha(owner, repo, commitSha);
+
+    // Step 3: fetch recursive tree
+    const url = `${this.baseUrl}/repos/${owner}/${repo}/git/trees/${treeSha}?recursive=1`;
+    const res = await rateLimitedFetch(url, this.headers);
+    this.handleError(res, "listFiles");
+    const data = await res.json();
+
+    // Truncation warning (repos with >100k files)
+    if (data.truncated) {
+      console.warn(
+        "WARNING: GitHub tree response was truncated. Some files may be missing. " +
+        "This happens for repositories with >100,000 files."
+      );
+    }
+
+    // Step 4: filter to blobs only
+    const files: RepoFileEntry[] = data.tree
+      .filter((entry: any) => entry.type === "blob")
+      .map((entry: any) => ({
+        path: entry.path,
+        sha: entry.sha,
+        size: entry.size,
+      }));
+
+    return { commitSha, treeSha, files };
+  }
+
+  /**
+   * Download raw file content by path.
+   * GET /repos/{owner}/{repo}/contents/{path}?ref={branch}
+   * Accept: application/vnd.github.raw+json
+   * Returns raw bytes as a Buffer.
+   */
+  async downloadFile(owner: string, repo: string, path: string, ref: string): Promise<Buffer> {
+    const url = `${this.baseUrl}/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}?ref=${ref}`;
+    const headers = {
+      ...this.headers,
+      Accept: "application/vnd.github.raw+json",
+    };
+    const res = await rateLimitedFetch(url, headers);
+
+    // Fallback to Blobs API for files that fail via Contents API (e.g. >100 MB)
+    if (!res.ok && res.status === 403) {
+      // Cannot use blob SHA fallback without the SHA; caller should handle.
+      // For now, throw with actionable message.
+      throw new Error(
+        `File "${path}" is too large for the Contents API. ` +
+        `Use downloadBlobBySha() with the file's SHA from the tree listing.`
+      );
+    }
+    this.handleError(res, `downloadFile(${path})`);
+
+    const arrayBuffer = await res.arrayBuffer();
+    return Buffer.from(arrayBuffer);
+  }
+
+  /**
+   * Download raw file content by blob SHA (fallback for large files).
+   * GET /repos/{owner}/{repo}/git/blobs/{sha}
+   * Accept: application/vnd.github.raw+json
+   */
+  async downloadBlobBySha(owner: string, repo: string, sha: string): Promise<Buffer> {
+    const url = `${this.baseUrl}/repos/${owner}/${repo}/git/blobs/${sha}`;
+    const headers = {
+      ...this.headers,
+      Accept: "application/vnd.github.raw+json",
+    };
+    const res = await rateLimitedFetch(url, headers);
+    this.handleError(res, `downloadBlobBySha(${sha})`);
+
+    const arrayBuffer = await res.arrayBuffer();
+    return Buffer.from(arrayBuffer);
+  }
+
+  /**
+   * Parse "owner/repo" string into { owner, repo }.
+   * Throws if format is invalid.
+   */
+  static parseRepoUrl(repoStr: string): { owner: string; repo: string } {
+    // Handle full URLs: https://github.com/owner/repo or git@github.com:owner/repo.git
+    let cleaned = repoStr.replace(/\.git$/, "");
+    if (cleaned.includes("github.com")) {
+      const match = cleaned.match(/github\.com[:/]([^/]+)\/([^/]+)/);
+      if (match) return { owner: match[1], repo: match[2] };
+    }
+    // Handle "owner/repo" format
+    const parts = cleaned.split("/");
+    if (parts.length !== 2 || !parts[0] || !parts[1]) {
+      throw new Error(
+        `Invalid GitHub repository format: "${repoStr}". Expected "owner/repo" or a GitHub URL.`
+      );
+    }
+    return { owner: parts[0], repo: parts[1] };
+  }
+
+  /**
+   * Translate HTTP error codes into actionable error messages.
+   */
+  private handleError(res: Response, context: string): void {
+    if (res.ok) return;
+    switch (res.status) {
+      case 401:
+        throw new Error("GitHub PAT is invalid or expired.");
+      case 403:
+        throw new Error(
+          "GitHub PAT lacks required permissions. " +
+          "Classic PATs need the 'repo' scope; fine-grained PATs need 'contents: read'."
+        );
+      case 404:
+        throw new Error("Repository not found, or the PAT has no access to it.");
+      default:
+        throw new Error(`GitHub API error ${res.status} in ${context}: ${res.statusText}`);
+    }
+  }
+}
+```
+
+#### B.3 Key Design Decisions
+
+- **Three-step resolution** (branch -> commit SHA -> tree SHA -> tree) is preferred over the shortcut (`GET /trees/{branch}`) because it returns the commit SHA needed for sync tracking.
+- **`parseRepoUrl`** is a static method so it can be called before instantiation (needed for CLI argument validation).
+- **`downloadFile` fallback:** If the Contents API returns 403 for a large file, the error message directs the caller to use `downloadBlobBySha()`. The sync engine handles this fallback.
+
+---
+
+### Implementation Unit C: Azure DevOps Client
+
+**New file:** `src/core/devops-client.ts`
+**Dependencies:** Unit A (for `RepoFileEntry` type)
+**Can run in parallel with:** Unit B
+
+#### C.1 Azure DevOps Client: `src/core/devops-client.ts` (NEW FILE)
+
+```typescript
+import type { RepoFileEntry } from "./types.js";
+import { rateLimitedFetch, sleep } from "./repo-utils.js";
+
+/**
+ * Azure DevOps REST API client for repository file access.
+ * Uses Basic auth with PAT (empty username + PAT as password).
+ * API version: 7.1
+ */
+export class DevOpsClient {
+  private pat: string;
+  private org: string;
+  private baseUrl: string;
+
+  constructor(pat: string, org: string) {
+    this.pat = pat;
+    this.org = org;
+    this.baseUrl = `https://dev.azure.com/${org}`;
+  }
+
+  private get headers(): Record<string, string> {
+    const auth = Buffer.from(`:${this.pat}`).toString("base64");
+    return {
+      Authorization: `Basic ${auth}`,
+      Accept: "application/json",
+    };
+  }
+
+  /**
+   * Get the default branch for a repository.
+   * GET /{project}/_apis/git/repositories/{repo}?api-version=7.1
+   * Returns branch name without "refs/heads/" prefix.
+   */
+  async getDefaultBranch(project: string, repo: string): Promise<string> {
+    const url = `${this.baseUrl}/${project}/_apis/git/repositories/${repo}?api-version=7.1`;
+    const res = await rateLimitedFetch(url, this.headers);
+    this.handleError(res, "getDefaultBranch");
+    const data = await res.json();
+    const defaultBranch = data.defaultBranch as string;
+    // Strip "refs/heads/" prefix
+    return defaultBranch.replace(/^refs\/heads\//, "");
+  }
+
+  /**
+   * Get the latest commit SHA for a branch.
+   * GET /{project}/_apis/git/repositories/{repo}/commits
+   *   ?searchCriteria.itemVersion.version={branch}&$top=1&api-version=7.1
+   */
+  async getCommitSha(project: string, repo: string, branch: string): Promise<string> {
+    const url =
+      `${this.baseUrl}/${project}/_apis/git/repositories/${repo}/commits` +
+      `?searchCriteria.itemVersion.version=${encodeURIComponent(branch)}&$top=1&api-version=7.1`;
+    const res = await rateLimitedFetch(url, this.headers);
+    this.handleError(res, "getCommitSha");
+    const data = await res.json();
+    if (!data.value || data.value.length === 0) {
+      throw new Error(`No commits found on branch "${branch}".`);
+    }
+    return data.value[0].commitId;
+  }
+
+  /**
+   * List all files in a repository branch.
+   *
+   * Flow:
+   * 1. Get latest commit SHA
+   * 2. List all items recursively
+   * 3. Filter to non-folder entries
+   * 4. Map objectId -> sha, strip leading "/" from path
+   */
+  async listFiles(project: string, repo: string, branch: string): Promise<{
+    commitSha: string;
+    files: RepoFileEntry[];
+  }> {
+    const commitSha = await this.getCommitSha(project, repo, branch);
+
+    const url =
+      `${this.baseUrl}/${project}/_apis/git/repositories/${repo}/items` +
+      `?recursionLevel=Full` +
+      `&versionDescriptor.version=${encodeURIComponent(branch)}` +
+      `&versionDescriptor.versionType=branch` +
+      `&api-version=7.1`;
+    const res = await rateLimitedFetch(url, this.headers);
+    this.handleError(res, "listFiles");
+    const data = await res.json();
+
+    const files: RepoFileEntry[] = data.value
+      .filter((item: any) => !item.isFolder)
+      .map((item: any) => ({
+        path: item.path.replace(/^\//, ""),   // strip leading "/"
+        sha: item.objectId,
+        size: item.contentMetadata?.fileSize,
+      }));
+
+    return { commitSha, files };
+  }
+
+  /**
+   * Download raw file content.
+   * GET /{project}/_apis/git/repositories/{repo}/items
+   *   ?path={filePath}&$format=octetStream
+   *   &versionDescriptor.version={branch}&versionDescriptor.versionType=branch
+   *   &api-version=7.1
+   *
+   * Includes a 50ms inter-request delay to avoid Azure DevOps throttling (~200 req/min).
+   */
+  async downloadFile(
+    project: string,
+    repo: string,
+    path: string,
+    branch: string
+  ): Promise<Buffer> {
+    // Small delay to respect Azure DevOps rate limits
+    await sleep(50);
+
+    const url =
+      `${this.baseUrl}/${project}/_apis/git/repositories/${repo}/items` +
+      `?path=${encodeURIComponent(path)}` +
+      `&$format=octetStream` +
+      `&versionDescriptor.version=${encodeURIComponent(branch)}` +
+      `&versionDescriptor.versionType=branch` +
+      `&api-version=7.1`;
+
+    const headers = { ...this.headers, Accept: "application/octet-stream" };
+    const res = await rateLimitedFetch(url, headers);
+    this.handleError(res, `downloadFile(${path})`);
+
+    const arrayBuffer = await res.arrayBuffer();
+    return Buffer.from(arrayBuffer);
+  }
+
+  /**
+   * Parse Azure DevOps repository URL into { org, project, repo }.
+   * Accepts:
+   *   - "https://dev.azure.com/{org}/{project}/_git/{repo}"
+   *   - Or separate --org, --project, --repo CLI args (handled by caller).
+   * Throws if URL format is invalid.
+   */
+  static parseRepoUrl(repoUrl: string): { org: string; project: string; repo: string } {
+    const match = repoUrl.match(
+      /dev\.azure\.com\/([^/]+)\/([^/]+)\/_git\/([^/]+)/
+    );
+    if (!match) {
+      throw new Error(
+        `Invalid Azure DevOps URL: "${repoUrl}". ` +
+        `Expected "https://dev.azure.com/{org}/{project}/_git/{repo}" ` +
+        `or use --org, --project, --repo separately.`
+      );
+    }
+    return { org: match[1], project: match[2], repo: match[3] };
+  }
+
+  /**
+   * Translate HTTP error codes into actionable error messages.
+   */
+  private handleError(res: Response, context: string): void {
+    if (res.ok) return;
+    switch (res.status) {
+      case 401:
+        throw new Error("Azure DevOps PAT is invalid or expired.");
+      case 403:
+        throw new Error("Azure DevOps PAT lacks the required 'Code (Read)' scope.");
+      case 404:
+        throw new Error(
+          "Repository not found. Check that the organization, project, and repository names are correct."
+        );
+      default:
+        throw new Error(`Azure DevOps API error ${res.status} in ${context}: ${res.statusText}`);
+    }
+  }
+}
+```
+
+#### C.2 Key Design Decisions
+
+- **50ms inter-request delay** in `downloadFile()` to stay under Azure DevOps' ~200 req/min throttle. Combined with batch-of-10 concurrency, this yields ~200 req/min effective throughput.
+- **`parseRepoUrl`** supports full DevOps URLs. The CLI also accepts `--org`, `--project`, `--repo` separately for flexibility.
+- **`objectId`** in Azure DevOps is the same Git SHA-1 hash as GitHub, so the same comparison logic works.
+
+---
+
+### Implementation Unit D: Sync Engine
+
+**New file:** `src/core/sync-engine.ts`
+**Modified file:** `src/core/blob-client.ts`
+**Dependencies:** Units A, B, C
+
+#### D.1 Add `listBlobsFlat()` to `src/core/blob-client.ts`
+
+Add after the existing `listBlobs()` method (after line 68):
+
+```typescript
+  /**
+   * List all blobs recursively under a prefix (flat listing, no delimiter).
+   * Used by the sync engine to detect deleted files.
+   */
+  async listBlobsFlat(containerName: string, prefix?: string): Promise<BlobItem[]> {
+    const containerClient = this.serviceClient.getContainerClient(containerName);
+    const items: BlobItem[] = [];
+
+    for await (const blob of containerClient.listBlobsFlat({ prefix })) {
+      items.push({
+        name: blob.name,
+        isPrefix: false,
+        size: blob.properties.contentLength,
+        lastModified: blob.properties.lastModified?.toISOString(),
+        contentType: blob.properties.contentType,
+      });
+    }
+
+    return items;
+  }
+```
+
+#### D.2 Sync Engine: `src/core/sync-engine.ts` (NEW FILE)
+
+```typescript
+import type { BlobClient } from "./blob-client.js";
+import type { RepoSyncMeta, SyncResult, SyncHistoryEntry, RepoFileEntry } from "./types.js";
+import { processInBatches, inferContentType } from "./repo-utils.js";
+
+const META_FILENAME = ".repo-sync-meta.json";
+const MAX_SYNC_HISTORY = 20;
+const BATCH_SIZE = 10;
+
+/**
+ * Provider-agnostic sync engine.
+ *
+ * Accepts pre-fetched file lists and a download callback.
+ * Does not know about GitHub or Azure DevOps -- only about
+ * blob storage and file SHA comparisons.
+ */
+export class SyncEngine {
+
+  /**
+   * Read .repo-sync-meta.json from a container.
+   * Returns null if the metadata blob does not exist.
+   */
+  async readMeta(
+    blobClient: BlobClient,
+    container: string,
+    prefix: string
+  ): Promise<RepoSyncMeta | null> {
+    const metaPath = prefix ? `${prefix}${META_FILENAME}` : META_FILENAME;
+    try {
+      const blob = await blobClient.getBlobContent(container, metaPath);
+      const text = Buffer.isBuffer(blob.content)
+        ? blob.content.toString("utf-8")
+        : blob.content;
+      return JSON.parse(text) as RepoSyncMeta;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Write .repo-sync-meta.json to a container.
+   */
+  async writeMeta(
+    blobClient: BlobClient,
+    container: string,
+    prefix: string,
+    meta: RepoSyncMeta
+  ): Promise<void> {
+    const metaPath = prefix ? `${prefix}${META_FILENAME}` : META_FILENAME;
+    const content = JSON.stringify(meta, null, 2);
+    await blobClient.createBlob(container, metaPath, content, "application/json");
+  }
+
+  /**
+   * Clone (full initial copy) a repository into a blob container.
+   *
+   * Downloads all files via the provided callback and uploads them.
+   * Creates .repo-sync-meta.json with complete metadata.
+   */
+  async clone(params: {
+    blobClient: BlobClient;
+    container: string;
+    prefix: string;
+    provider: "github" | "azure-devops";
+    repository: string;
+    branch: string;
+    tokenName: string;
+    repoFiles: { commitSha: string; treeSha?: string; files: RepoFileEntry[] };
+    downloadFile: (path: string) => Promise<Buffer>;
+    onProgress?: (msg: string) => void;
+  }): Promise<SyncResult> {
+    const startTime = Date.now();
+    const { blobClient, container, prefix, repoFiles, downloadFile, onProgress } = params;
+    const log = onProgress ?? (() => {});
+
+    const result: SyncResult = {
+      filesAdded: 0,
+      filesUpdated: 0,
+      filesDeleted: 0,
+      filesUnchanged: 0,
+      durationMs: 0,
+      errors: [],
+    };
+
+    const fileShas: Record<string, string> = {};
+    const total = repoFiles.files.length;
+    let processed = 0;
+
+    log(`Uploading ${total} files...`);
+
+    await processInBatches(repoFiles.files, BATCH_SIZE, async (file) => {
+      try {
+        const content = await downloadFile(file.path);
+        const blobPath = prefix ? `${prefix}${file.path}` : file.path;
+        const contentType = inferContentType(file.path);
+        await blobClient.createBlob(container, blobPath, content, contentType);
+
+        fileShas[file.path] = file.sha;
+        result.filesAdded++;
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        result.errors.push({ path: file.path, error: msg });
+      }
+      processed++;
+      log(`[${processed}/${total}] ${file.path}`);
+    });
+
+    // Build metadata
+    const syncEntry: SyncHistoryEntry = {
+      syncedAt: new Date().toISOString(),
+      commitSha: repoFiles.commitSha,
+      filesAdded: result.filesAdded,
+      filesUpdated: 0,
+      filesDeleted: 0,
+      durationMs: Date.now() - startTime,
+    };
+
+    const meta: RepoSyncMeta = {
+      provider: params.provider,
+      repository: params.repository,
+      branch: params.branch,
+      prefix: prefix,
+      tokenName: params.tokenName,
+      lastSyncedAt: syncEntry.syncedAt,
+      lastSyncCommitSha: repoFiles.commitSha,
+      lastSyncTreeSha: repoFiles.treeSha,
+      fileCount: result.filesAdded,
+      fileShas,
+      syncHistory: [syncEntry],
+    };
+
+    await this.writeMeta(blobClient, container, prefix, meta);
+
+    result.durationMs = Date.now() - startTime;
+    return result;
+  }
+
+  /**
+   * Incremental sync: compare SHAs, upload changes, delete removals.
+   *
+   * Quick check: if commit SHA matches and !force, returns early.
+   * Dry-run mode: reports diff without modifying blobs.
+   */
+  async sync(params: {
+    blobClient: BlobClient;
+    container: string;
+    prefix: string;
+    meta: RepoSyncMeta;
+    repoFiles: { commitSha: string; treeSha?: string; files: RepoFileEntry[] };
+    downloadFile: (path: string) => Promise<Buffer>;
+    force?: boolean;
+    dryRun?: boolean;
+    onProgress?: (msg: string) => void;
+  }): Promise<SyncResult> {
+    const startTime = Date.now();
+    const { blobClient, container, prefix, meta, repoFiles, downloadFile, onProgress } = params;
+    const force = params.force ?? false;
+    const dryRun = params.dryRun ?? false;
+    const log = onProgress ?? (() => {});
+
+    const result: SyncResult = {
+      filesAdded: 0,
+      filesUpdated: 0,
+      filesDeleted: 0,
+      filesUnchanged: 0,
+      durationMs: 0,
+      errors: [],
+    };
+
+    // Quick check: if commit SHA matches and not forcing, nothing to do
+    if (!force && meta.lastSyncCommitSha === repoFiles.commitSha) {
+      log("Already up to date.");
+      result.durationMs = Date.now() - startTime;
+      return result;
+    }
+
+    // Build new SHA map from current tree
+    const newShas: Record<string, string> = {};
+    for (const file of repoFiles.files) {
+      newShas[file.path] = file.sha;
+    }
+
+    // Diff calculation
+    const added: string[] = [];
+    const modified: string[] = [];
+    const deleted: string[] = [];
+    const unchanged: string[] = [];
+
+    if (force) {
+      // Force: treat all current files as modified (re-upload everything)
+      for (const file of repoFiles.files) {
+        modified.push(file.path);
+      }
+      // Still detect deletions
+      for (const oldPath of Object.keys(meta.fileShas)) {
+        if (!(oldPath in newShas)) {
+          deleted.push(oldPath);
+        }
+      }
+    } else {
+      // Incremental: compare SHAs
+      for (const [path, sha] of Object.entries(newShas)) {
+        if (!(path in meta.fileShas)) {
+          added.push(path);
+        } else if (meta.fileShas[path] !== sha) {
+          modified.push(path);
+        } else {
+          unchanged.push(path);
+        }
+      }
+      for (const oldPath of Object.keys(meta.fileShas)) {
+        if (!(oldPath in newShas)) {
+          deleted.push(oldPath);
+        }
+      }
+    }
+
+    result.filesUnchanged = unchanged.length;
+
+    log(
+      `${added.length} new, ${modified.length} modified, ` +
+      `${deleted.length} deleted, ${unchanged.length} unchanged`
+    );
+
+    // Dry-run: report and exit
+    if (dryRun) {
+      for (const p of added) log(`  + ${p}`);
+      for (const p of modified) log(`  ~ ${p}`);
+      for (const p of deleted) log(`  - ${p}`);
+      log("No changes applied (dry run).");
+      result.filesAdded = added.length;
+      result.filesUpdated = modified.length;
+      result.filesDeleted = deleted.length;
+      result.durationMs = Date.now() - startTime;
+      return result;
+    }
+
+    // Apply changes: upload added + modified
+    const toUpload = [...added.map((p) => ({ path: p, type: "add" as const })),
+                      ...modified.map((p) => ({ path: p, type: "update" as const }))];
+    const totalOps = toUpload.length + deleted.length;
+    let opsProcessed = 0;
+
+    await processInBatches(toUpload, BATCH_SIZE, async (item) => {
+      try {
+        const content = await downloadFile(item.path);
+        const blobPath = prefix ? `${prefix}${item.path}` : item.path;
+        const contentType = inferContentType(item.path);
+        await blobClient.createBlob(container, blobPath, content, contentType);
+
+        if (item.type === "add") result.filesAdded++;
+        else result.filesUpdated++;
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        result.errors.push({ path: item.path, error: msg });
+      }
+      opsProcessed++;
+      log(`[${opsProcessed}/${totalOps}] ${item.type === "add" ? "+" : "~"} ${item.path}`);
+    });
+
+    // Apply deletions
+    await processInBatches(deleted, BATCH_SIZE, async (path) => {
+      try {
+        const blobPath = prefix ? `${prefix}${path}` : path;
+        await blobClient.deleteBlob(container, blobPath);
+        result.filesDeleted++;
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        result.errors.push({ path, error: msg });
+      }
+      opsProcessed++;
+      log(`[${opsProcessed}/${totalOps}] - ${path}`);
+    });
+
+    // Update metadata
+    const updatedFileShas: Record<string, string> = { ...newShas };
+
+    const syncEntry: SyncHistoryEntry = {
+      syncedAt: new Date().toISOString(),
+      commitSha: repoFiles.commitSha,
+      filesAdded: result.filesAdded,
+      filesUpdated: result.filesUpdated,
+      filesDeleted: result.filesDeleted,
+      durationMs: Date.now() - startTime,
+    };
+
+    const updatedHistory = [...meta.syncHistory, syncEntry];
+    while (updatedHistory.length > MAX_SYNC_HISTORY) {
+      updatedHistory.shift();
+    }
+
+    const updatedMeta: RepoSyncMeta = {
+      ...meta,
+      lastSyncedAt: syncEntry.syncedAt,
+      lastSyncCommitSha: repoFiles.commitSha,
+      lastSyncTreeSha: repoFiles.treeSha,
+      fileCount: repoFiles.files.length,
+      fileShas: updatedFileShas,
+      syncHistory: updatedHistory,
+    };
+
+    await this.writeMeta(blobClient, container, prefix, updatedMeta);
+
+    result.durationMs = Date.now() - startTime;
+    return result;
+  }
+}
+```
+
+#### D.3 Key Design Decisions
+
+- **Provider-agnostic:** The engine receives file lists and a `downloadFile` callback. It never imports `GitHubClient` or `DevOpsClient`.
+- **Non-fatal per-file errors:** If one file fails to download or upload, the error is recorded in `SyncResult.errors` and processing continues.
+- **SHA-based diffing:** Uses the `fileShas` map from `.repo-sync-meta.json` to determine changes without downloading existing blobs.
+- **Metadata cap:** `syncHistory` is capped at 20 entries (FIFO), per specification.
+- **Batch concurrency of 10:** Balances speed against API rate limits and memory.
+
+---
+
+### Implementation Unit E: CLI Token Commands
+
+**New files:** `src/cli/commands/token-ops.ts`, `src/cli/commands/shared.ts`
+**Modified files:** `src/cli/index.ts`, `src/cli/commands/blob-ops.ts`, `src/cli/commands/view.ts`
+**Dependencies:** Unit A
+
+#### E.1 Shared Helpers: `src/cli/commands/shared.ts` (NEW FILE)
+
+Extract `resolveStorage()` and `confirm()` into a shared module. Currently these are duplicated in `blob-ops.ts` and `view.ts`.
+
+```typescript
+import * as readline from "readline";
+import { CredentialStore } from "../../core/credential-store.js";
+import type { StorageEntry, TokenEntry } from "../../core/types.js";
+
+/**
+ * Resolve a storage account by name, or return the first configured storage.
+ * Throws if no storages are configured or the named storage is not found.
+ */
+export function resolveStorage(storageName?: string): StorageEntry {
+  const store = new CredentialStore();
+  if (storageName) {
+    const entry = store.getStorage(storageName);
+    if (!entry) throw new Error(`Storage "${storageName}" not found. Use "list" to see configured storages.`);
+    return entry;
+  }
+  const first = store.getFirstStorage();
+  if (!first) throw new Error("No storage accounts configured. Use the 'add' command first.");
+  return first;
+}
+
+/**
+ * Ask a yes/no confirmation question.
+ */
+export function confirm(question: string): Promise<boolean> {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    rl.question(`${question} (y/N) `, (answer) => {
+      rl.close();
+      resolve(answer.toLowerCase() === "y");
+    });
+  });
+}
+
+/**
+ * Resolve a PAT token for a given provider.
+ *
+ * Resolution order:
+ * 1. If tokenName is provided, look up by name. Throw if not found.
+ * 2. Otherwise, get the first token for the provider.
+ * 3. Check expiry and warn if expired or expiring soon.
+ * 4. If no token found, throw with actionable message.
+ */
+export function resolveToken(
+  provider: "github" | "azure-devops",
+  tokenName?: string
+): TokenEntry {
+  const store = new CredentialStore();
+
+  let token: TokenEntry | undefined;
+
+  if (tokenName) {
+    token = store.getToken(tokenName);
+    if (!token) {
+      throw new Error(
+        `Token "${tokenName}" not found. Use "list-tokens" to see configured tokens.`
+      );
+    }
+    if (token.provider !== provider) {
+      throw new Error(
+        `Token "${tokenName}" is for provider "${token.provider}", not "${provider}".`
+      );
+    }
+  } else {
+    token = store.getTokenByProvider(provider);
+  }
+
+  if (!token) {
+    throw new Error(
+      `No ${provider} PAT found. Use "add-token --name <name> --provider ${provider} --token <pat>" to register one.`
+    );
+  }
+
+  // Expiry warning
+  if (token.expiresAt) {
+    const expiry = new Date(token.expiresAt);
+    const now = new Date();
+    if (expiry < now) {
+      console.warn(`WARNING: Token "${token.name}" has EXPIRED (${token.expiresAt}).`);
+    } else {
+      const daysLeft = (expiry.getTime() - now.getTime()) / (1000 * 60 * 60 * 24);
+      if (daysLeft <= 14) {
+        console.warn(
+          `WARNING: Token "${token.name}" expires in ${Math.ceil(daysLeft)} days (${token.expiresAt}).`
+        );
+      }
+    }
+  }
+
+  return token;
+}
+```
+
+After creating `shared.ts`, update `blob-ops.ts` and `view.ts` to import `resolveStorage` and `confirm` from `./shared.js` instead of defining them locally. This is a minor refactor that removes duplication.
+
+#### E.2 Token Operations: `src/cli/commands/token-ops.ts` (NEW FILE)
+
+```typescript
+import chalk from "chalk";
+import { CredentialStore } from "../../core/credential-store.js";
+import { confirm } from "./shared.js";
+
+/**
+ * Add or update a PAT token in the credential store.
+ */
+export function addToken(
+  name: string,
+  provider: string,
+  token: string,
+  expiresAt?: string
+): void {
+  if (provider !== "github" && provider !== "azure-devops") {
+    throw new Error(`Invalid provider "${provider}". Must be "github" or "azure-devops".`);
+  }
+
+  if (expiresAt) {
+    const d = new Date(expiresAt);
+    if (isNaN(d.getTime())) {
+      throw new Error(`Invalid --expires-at date: "${expiresAt}". Use ISO format (YYYY-MM-DD).`);
+    }
+  }
+
+  const store = new CredentialStore();
+  store.addToken({
+    name,
+    provider: provider as "github" | "azure-devops",
+    token,
+    expiresAt,
+  });
+
+  const masked = token.substring(0, 4) + "****";
+  console.log(chalk.green(`Token "${name}" saved (${provider}, ${masked}).`));
+
+  // Expiry warning
+  if (expiresAt) {
+    const expiry = new Date(expiresAt);
+    const now = new Date();
+    if (expiry < now) {
+      console.log(chalk.red(`WARNING: This token is already EXPIRED (${expiresAt}).`));
+    } else {
+      const daysLeft = (expiry.getTime() - now.getTime()) / (1000 * 60 * 60 * 24);
+      if (daysLeft <= 14) {
+        console.log(chalk.yellow(`WARNING: This token expires in ${Math.ceil(daysLeft)} days.`));
+      }
+    }
+  }
+}
+
+/**
+ * List all stored PAT tokens with masked values and expiry status.
+ */
+export function listTokens(): void {
+  const store = new CredentialStore();
+  const tokens = store.listTokens();
+
+  if (tokens.length === 0) {
+    console.log("No tokens configured. Use 'add-token' to register a PAT.");
+    return;
+  }
+
+  console.log(chalk.bold("Stored tokens:\n"));
+  for (const t of tokens) {
+    const statusColor =
+      t.expiryStatus === "valid" ? chalk.green :
+      t.expiryStatus === "expiring-soon" ? chalk.yellow :
+      t.expiryStatus === "expired" ? chalk.red :
+      chalk.gray;
+
+    const statusLabel =
+      t.expiryStatus === "no-expiry" ? "no expiry set" : t.expiryStatus;
+
+    console.log(
+      `  ${chalk.bold(t.name)}  ${t.provider}  ${t.maskedToken}  ` +
+      `added ${t.addedAt.substring(0, 10)}  ` +
+      (t.expiresAt ? `expires ${t.expiresAt.substring(0, 10)}  ` : "") +
+      statusColor(`[${statusLabel}]`)
+    );
+  }
+}
+
+/**
+ * Remove a token by name (with confirmation).
+ */
+export async function removeToken(name: string): Promise<void> {
+  const store = new CredentialStore();
+  const token = store.getToken(name);
+  if (!token) {
+    console.log(chalk.red(`Token "${name}" not found.`));
+    return;
+  }
+
+  const ok = await confirm(`Remove token "${name}" (${token.provider})?`);
+  if (!ok) {
+    console.log("Cancelled.");
+    return;
+  }
+
+  store.removeToken(name);
+  console.log(chalk.green(`Token "${name}" removed.`));
+}
+```
+
+#### E.3 CLI Registration in `src/cli/index.ts`
+
+Add imports and commands. After the existing imports (after line 7):
+
+```typescript
+import { addToken, listTokens, removeToken } from "./commands/token-ops.js";
+```
+
+Add commands before the `ui` command (before line 124):
+
+```typescript
+// Token management
+program
+  .command("add-token")
+  .description("Register a Personal Access Token (GitHub or Azure DevOps)")
+  .requiredOption("--name <name>", "Display name for this token")
+  .requiredOption("--provider <provider>", "Provider: github or azure-devops")
+  .requiredOption("--token <token>", "The PAT value")
+  .option("--expires-at <date>", "Expiry date (ISO format, e.g. 2026-12-31)")
+  .action((opts) => {
+    addToken(opts.name, opts.provider, opts.token, opts.expiresAt);
+  });
+
+program
+  .command("list-tokens")
+  .description("List stored Personal Access Tokens")
+  .action(() => {
+    listTokens();
+  });
+
+program
+  .command("remove-token")
+  .description("Remove a stored Personal Access Token")
+  .requiredOption("--name <name>", "Name of the token to remove")
+  .action(async (opts) => {
+    await removeToken(opts.name);
+  });
+```
+
+---
+
+### Implementation Unit F: CLI Sync Commands
+
+**New file:** `src/cli/commands/repo-sync.ts`
+**Modified file:** `src/cli/index.ts`
+**Dependencies:** Units D, E
+
+#### F.1 Sync Commands: `src/cli/commands/repo-sync.ts` (NEW FILE)
+
+```typescript
+import chalk from "chalk";
+import { BlobClient } from "../../core/blob-client.js";
+import { GitHubClient } from "../../core/github-client.js";
+import { DevOpsClient } from "../../core/devops-client.js";
+import { SyncEngine } from "../../core/sync-engine.js";
+import type { SyncResult } from "../../core/types.js";
+import { resolveStorage, resolveToken } from "./shared.js";
+
+/**
+ * Print a SyncResult summary to the console.
+ */
+function printResult(result: SyncResult, verb: string): void {
+  const duration = (result.durationMs / 1000).toFixed(1);
+  console.log(
+    chalk.green(
+      `\n${verb} complete: ${result.filesAdded} added, ${result.filesUpdated} updated, ` +
+      `${result.filesDeleted} deleted (${duration}s)`
+    )
+  );
+  if (result.errors.length > 0) {
+    console.log(chalk.red(`\n${result.errors.length} errors:`));
+    for (const e of result.errors) {
+      console.log(chalk.red(`  ${e.path}: ${e.error}`));
+    }
+  }
+}
+
+/**
+ * Clone a GitHub repository into a blob container.
+ */
+export async function cloneGithub(
+  repoStr: string,
+  container: string,
+  branch?: string,
+  prefix?: string,
+  storageName?: string,
+  tokenName?: string
+): Promise<void> {
+  const storage = resolveStorage(storageName);
+  const token = resolveToken("github", tokenName);
+  const { owner, repo } = GitHubClient.parseRepoUrl(repoStr);
+  const client = new GitHubClient(token.token);
+
+  // Resolve branch
+  const resolvedBranch = branch ?? await client.getDefaultBranch(owner, repo);
+  console.log(`Cloning ${owner}/${repo} (${resolvedBranch}) -> ${container}`);
+
+  // Fetch file tree
+  console.log("Fetching file tree...");
+  const repoFiles = await client.listFiles(owner, repo, resolvedBranch);
+  console.log(`${repoFiles.files.length} files found`);
+
+  // Clone
+  const blobClient = new BlobClient(storage);
+  const engine = new SyncEngine();
+  const normalizedPrefix = prefix ? (prefix.endsWith("/") ? prefix : prefix + "/") : "";
+
+  const result = await engine.clone({
+    blobClient,
+    container,
+    prefix: normalizedPrefix,
+    provider: "github",
+    repository: `${owner}/${repo}`,
+    branch: resolvedBranch,
+    tokenName: token.name,
+    repoFiles,
+    downloadFile: (path) => client.downloadFile(owner, repo, path, resolvedBranch),
+    onProgress: (msg) => console.log(msg),
+  });
+
+  printResult(result, "Clone");
+}
+
+/**
+ * Clone an Azure DevOps repository into a blob container.
+ */
+export async function cloneDevops(
+  org: string,
+  project: string,
+  repo: string,
+  container: string,
+  branch?: string,
+  prefix?: string,
+  storageName?: string,
+  tokenName?: string
+): Promise<void> {
+  const storage = resolveStorage(storageName);
+  const token = resolveToken("azure-devops", tokenName);
+  const client = new DevOpsClient(token.token, org);
+
+  // Resolve branch
+  const resolvedBranch = branch ?? await client.getDefaultBranch(project, repo);
+  console.log(`Cloning ${org}/${project}/${repo} (${resolvedBranch}) -> ${container}`);
+
+  // Fetch file tree
+  console.log("Fetching file tree...");
+  const repoFiles = await client.listFiles(project, repo, resolvedBranch);
+  console.log(`${repoFiles.files.length} files found`);
+
+  // Clone
+  const blobClient = new BlobClient(storage);
+  const engine = new SyncEngine();
+  const normalizedPrefix = prefix ? (prefix.endsWith("/") ? prefix : prefix + "/") : "";
+
+  const result = await engine.clone({
+    blobClient,
+    container,
+    prefix: normalizedPrefix,
+    provider: "azure-devops",
+    repository: `${org}/${project}/${repo}`,
+    branch: resolvedBranch,
+    tokenName: token.name,
+    repoFiles,
+    downloadFile: (path) => client.downloadFile(project, repo, path, resolvedBranch),
+    onProgress: (msg) => console.log(msg),
+  });
+
+  printResult(result, "Clone");
+}
+
+/**
+ * Sync a previously cloned container with its source repository.
+ */
+export async function syncContainer(
+  container: string,
+  prefix?: string,
+  storageName?: string,
+  dryRun?: boolean,
+  force?: boolean
+): Promise<void> {
+  const storage = resolveStorage(storageName);
+  const blobClient = new BlobClient(storage);
+  const engine = new SyncEngine();
+  const normalizedPrefix = prefix ? (prefix.endsWith("/") ? prefix : prefix + "/") : "";
+
+  // Read metadata
+  const meta = await engine.readMeta(blobClient, container, normalizedPrefix);
+  if (!meta) {
+    throw new Error(
+      `Container "${container}" is not a repository mirror (no .repo-sync-meta.json found).`
+    );
+  }
+
+  // Resolve PAT
+  const token = resolveToken(meta.provider, meta.tokenName);
+
+  console.log(
+    `${dryRun ? "Dry run:" : "Syncing"} ${meta.repository} (${meta.branch}) -> ${container}`
+  );
+
+  // Fetch current tree based on provider
+  let repoFiles: { commitSha: string; treeSha?: string; files: import("../../core/types.js").RepoFileEntry[] };
+
+  if (meta.provider === "github") {
+    const { owner, repo } = GitHubClient.parseRepoUrl(meta.repository);
+    const client = new GitHubClient(token.token);
+    console.log("Fetching file tree...");
+    repoFiles = await client.listFiles(owner, repo, meta.branch);
+  } else {
+    const parts = meta.repository.split("/");
+    if (parts.length !== 3) {
+      throw new Error(`Invalid Azure DevOps repository format in metadata: "${meta.repository}".`);
+    }
+    const [org, project, repo] = parts;
+    const client = new DevOpsClient(token.token, org);
+    console.log("Fetching file tree...");
+    repoFiles = await client.listFiles(project, repo, meta.branch);
+  }
+
+  console.log(`${repoFiles.files.length} files found`);
+
+  // Sync
+  const result = await engine.sync({
+    blobClient,
+    container,
+    prefix: normalizedPrefix,
+    meta,
+    repoFiles,
+    downloadFile: async (path) => {
+      if (meta.provider === "github") {
+        const { owner, repo } = GitHubClient.parseRepoUrl(meta.repository);
+        const client = new GitHubClient(token.token);
+        return client.downloadFile(owner, repo, path, meta.branch);
+      } else {
+        const parts = meta.repository.split("/");
+        const [org, project, repo] = parts;
+        const client = new DevOpsClient(token.token, org);
+        return client.downloadFile(project, repo, path, meta.branch);
+      }
+    },
+    force,
+    dryRun,
+    onProgress: (msg) => console.log(msg),
+  });
+
+  printResult(result, dryRun ? "Dry run" : "Sync");
+}
+```
+
+#### F.2 CLI Registration in `src/cli/index.ts`
+
+Add import (after the token-ops import):
+
+```typescript
+import { cloneGithub, cloneDevops, syncContainer } from "./commands/repo-sync.js";
+```
+
+Add commands (after the token commands, before the `ui` command):
+
+```typescript
+// Repository sync
+program
+  .command("clone-github")
+  .description("Clone a GitHub repository into a blob container")
+  .requiredOption("--repo <repo>", "GitHub repository (owner/repo or URL)")
+  .requiredOption("--container <name>", "Target blob container")
+  .option("--branch <branch>", "Branch (defaults to repo default)")
+  .option("--prefix <path>", "Blob path prefix for repo files")
+  .option("--storage <name>", "Storage account (uses first if omitted)")
+  .option("--token-name <name>", "Name of stored GitHub PAT to use")
+  .action(async (opts) => {
+    await cloneGithub(opts.repo, opts.container, opts.branch, opts.prefix, opts.storage, opts.tokenName);
+  });
+
+program
+  .command("clone-devops")
+  .description("Clone an Azure DevOps repository into a blob container")
+  .requiredOption("--org <org>", "Azure DevOps organization")
+  .requiredOption("--project <project>", "Azure DevOps project")
+  .requiredOption("--repo <repo>", "Repository name")
+  .requiredOption("--container <name>", "Target blob container")
+  .option("--branch <branch>", "Branch (defaults to repo default)")
+  .option("--prefix <path>", "Blob path prefix for repo files")
+  .option("--storage <name>", "Storage account (uses first if omitted)")
+  .option("--token-name <name>", "Name of stored Azure DevOps PAT to use")
+  .action(async (opts) => {
+    await cloneDevops(opts.org, opts.project, opts.repo, opts.container, opts.branch, opts.prefix, opts.storage, opts.tokenName);
+  });
+
+program
+  .command("sync")
+  .description("Sync a previously cloned container with its source repository")
+  .requiredOption("--container <name>", "Container to sync")
+  .option("--prefix <path>", "Blob prefix (if multiple mirrors under different prefixes)")
+  .option("--storage <name>", "Storage account (uses first if omitted)")
+  .option("--dry-run", "Show changes without applying them")
+  .option("--force", "Re-upload all files regardless of changes")
+  .action(async (opts) => {
+    await syncContainer(opts.container, opts.prefix, opts.storage, opts.dryRun, opts.force);
+  });
+```
+
+---
+
+### Implementation Unit G: Server API + UI
+
+**Modified files:** `src/electron/server.ts`, `src/electron/public/app.js`, `src/electron/public/index.html`, `src/electron/public/styles.css`
+**Dependencies:** Unit D
+
+#### G.1 New API Endpoints in `src/electron/server.ts`
+
+Add imports at the top of the file (after the existing imports):
+
+```typescript
+import { SyncEngine } from "../core/sync-engine.js";
+import { GitHubClient } from "../core/github-client.js";
+import { DevOpsClient } from "../core/devops-client.js";
+```
+
+Add the following endpoints before `app.listen(port, ...)` (before line 183):
+
+```typescript
+  // API: List tokens (masked, no raw values)
+  app.get("/api/tokens", (_req, res) => {
+    const store = new CredentialStore();
+    res.json(store.listTokens());
+  });
+
+  // API: Get repo sync metadata for a container
+  app.get("/api/repo-meta/:storage/:container", async (req, res) => {
+    try {
+      const store = new CredentialStore();
+      const entry = store.getStorage(req.params.storage);
+      if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
+
+      const blobClient = new BlobClient(entry);
+      const engine = new SyncEngine();
+      const prefix = (req.query.prefix as string) || "";
+      const meta = await engine.readMeta(blobClient, req.params.container, prefix);
+
+      if (!meta) { res.status(404).json({ error: "Not a repository mirror" }); return; }
+      res.json(meta);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  // API: Trigger sync for a container
+  app.post("/api/sync/:storage/:container", async (req, res) => {
+    try {
+      const store = new CredentialStore();
+      const entry = store.getStorage(req.params.storage);
+      if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
+
+      const blobClient = new BlobClient(entry);
+      const engine = new SyncEngine();
+      const prefix = (req.query.prefix as string) || "";
+      const dryRun = req.query.dryRun === "true";
+      const force = req.query.force === "true";
+
+      // Read metadata
+      const meta = await engine.readMeta(blobClient, req.params.container, prefix);
+      if (!meta) { res.status(404).json({ error: "Not a repository mirror" }); return; }
+
+      // Resolve PAT
+      const token = store.getToken(meta.tokenName);
+      if (!token) {
+        res.status(400).json({ error: `Token "${meta.tokenName}" not found in credential store.` });
+        return;
+      }
+
+      // Fetch current tree
+      let repoFiles: { commitSha: string; treeSha?: string; files: any[] };
+
+      if (meta.provider === "github") {
+        const { owner, repo } = GitHubClient.parseRepoUrl(meta.repository);
+        const client = new GitHubClient(token.token);
+        repoFiles = await client.listFiles(owner, repo, meta.branch);
+      } else {
+        const parts = meta.repository.split("/");
+        if (parts.length !== 3) {
+          res.status(400).json({ error: `Invalid repository format in metadata: "${meta.repository}"` });
+          return;
+        }
+        const [org, project, repo] = parts;
+        const client = new DevOpsClient(token.token, org);
+        repoFiles = await client.listFiles(project, repo, meta.branch);
+      }
+
+      // Build download callback
+      const downloadFile = async (path: string): Promise<Buffer> => {
+        if (meta.provider === "github") {
+          const { owner, repo } = GitHubClient.parseRepoUrl(meta.repository);
+          const client = new GitHubClient(token.token);
+          return client.downloadFile(owner, repo, path, meta.branch);
+        } else {
+          const parts = meta.repository.split("/");
+          const [org, project, repo] = parts;
+          const client = new DevOpsClient(token.token, org);
+          return client.downloadFile(project, repo, path, meta.branch);
+        }
+      };
+
+      // Run sync
+      const result = await engine.sync({
+        blobClient,
+        container: req.params.container,
+        prefix,
+        meta,
+        repoFiles,
+        downloadFile,
+        force,
+        dryRun,
+      });
+
+      res.json(result);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: msg });
+    }
+  });
+```
+
+#### G.2 UI: Sync Modal in `src/electron/public/index.html`
+
+Add after the Create File Modal closing `</div>` (after line 112, before the Context Menu):
+
+```html
+  <!-- Sync Confirmation Modal -->
+  <div id="sync-modal" class="modal hidden">
+    <div class="modal-content">
+      <h2>Sync with Repository</h2>
+      <div class="sync-details">
+        <p><strong>Provider:</strong> <span id="sync-provider"></span></p>
+        <p><strong>Repository:</strong> <span id="sync-repository"></span></p>
+        <p><strong>Branch:</strong> <span id="sync-branch"></span></p>
+        <p><strong>Last Synced:</strong> <span id="sync-last-time"></span></p>
+        <p><strong>Commit:</strong> <span id="sync-last-commit"></span></p>
+        <p><strong>Files:</strong> <span id="sync-file-count"></span></p>
+      </div>
+      <label style="display:flex;align-items:center;gap:6px;margin-top:12px;cursor:pointer;">
+        <input type="checkbox" id="sync-dry-run"> Dry run (preview changes only)
+      </label>
+      <div id="sync-progress" style="display:none;margin-top:12px;font-size:13px;color:var(--text-dim);">
+        <span class="sync-spinner">&#8635;</span> Syncing...
+      </div>
+      <div id="sync-result" style="display:none;margin-top:12px;font-size:13px;"></div>
+      <div class="modal-actions">
+        <button id="sync-cancel-btn">Cancel</button>
+        <button id="sync-confirm-btn" class="primary">Sync Now</button>
+      </div>
+    </div>
+  </div>
+```
+
+#### G.3 UI: Sync Detection and Button Logic in `src/electron/public/app.js`
+
+Add the following variables after `let contextTarget = null;` (after line 41):
+
+```javascript
+  let syncMetaCache = {}; // { "storage/container": RepoSyncMeta }
+```
+
+Modify the `loadTreeLevel` function. After the line `if (shortName === ".keep") continue;` (line 185), add detection logic:
+
+```javascript
+      // Detect .repo-sync-meta.json at root level for sync indicator
+      if (shortName === ".repo-sync-meta.json" && depth === 1) {
+        // Mark the container as a repo mirror
+        const containerNode = parentEl.parentElement;
+        if (containerNode && !containerNode.querySelector(".sync-badge")) {
+          const badge = document.createElement("span");
+          badge.className = "sync-badge";
+          badge.textContent = "\u21BB";
+          badge.title = "Repository mirror (click to sync)";
+          containerNode.querySelector(".tree-item").appendChild(badge);
+
+          // Fetch and cache metadata
+          const cacheKey = `${currentStorage}/${item.name.replace(".repo-sync-meta.json", "")}`;
+          fetchSyncMeta(currentStorage, container, "").then((meta) => {
+            if (meta) syncMetaCache[`${currentStorage}/${container}`] = meta;
+          });
+
+          // Add click handler for sync badge
+          badge.addEventListener("click", (e) => {
+            e.stopPropagation();
+            openSyncModal(container);
+          });
+        }
+        continue; // hide .repo-sync-meta.json from the tree
+      }
+```
+
+Add the following functions before `// --- Init ---` (before line 565):
+
+```javascript
+  // --- Sync ---
+  async function fetchSyncMeta(storage, container, prefix) {
+    try {
+      let url = `/api/repo-meta/${storage}/${container}`;
+      if (prefix) url += `?prefix=${encodeURIComponent(prefix)}`;
+      const res = await fetch(url);
+      if (!res.ok) return null;
+      return await res.json();
+    } catch { return null; }
+  }
+
+  function openSyncModal(container) {
+    const meta = syncMetaCache[`${currentStorage}/${container}`];
+    if (!meta) { alert("Sync metadata not loaded yet. Try expanding the container first."); return; }
+
+    document.getElementById("sync-provider").textContent = meta.provider;
+    document.getElementById("sync-repository").textContent = meta.repository;
+    document.getElementById("sync-branch").textContent = meta.branch;
+    document.getElementById("sync-last-time").textContent = meta.lastSyncedAt
+      ? new Date(meta.lastSyncedAt).toLocaleString()
+      : "Never";
+    document.getElementById("sync-last-commit").textContent =
+      meta.lastSyncCommitSha ? meta.lastSyncCommitSha.substring(0, 12) + "..." : "N/A";
+    document.getElementById("sync-file-count").textContent = String(meta.fileCount || 0);
+    document.getElementById("sync-dry-run").checked = false;
+    document.getElementById("sync-progress").style.display = "none";
+    document.getElementById("sync-result").style.display = "none";
+    document.getElementById("sync-confirm-btn").disabled = false;
+    document.getElementById("sync-confirm-btn").textContent = "Sync Now";
+    document.getElementById("sync-modal").classList.remove("hidden");
+
+    // Store container for the confirm handler
+    document.getElementById("sync-confirm-btn").dataset.container = container;
+  }
+
+  document.getElementById("sync-cancel-btn").addEventListener("click", () => {
+    document.getElementById("sync-modal").classList.add("hidden");
+  });
+
+  document.getElementById("sync-confirm-btn").addEventListener("click", async () => {
+    const btn = document.getElementById("sync-confirm-btn");
+    const container = btn.dataset.container;
+    const dryRun = document.getElementById("sync-dry-run").checked;
+
+    btn.disabled = true;
+    btn.textContent = "Syncing...";
+    document.getElementById("sync-progress").style.display = "block";
+    document.getElementById("sync-result").style.display = "none";
+
+    try {
+      let url = `/api/sync/${currentStorage}/${container}`;
+      const params = [];
+      if (dryRun) params.push("dryRun=true");
+      if (params.length) url += "?" + params.join("&");
+
+      const res = await fetch(url, { method: "POST" });
+      const result = await res.json();
+
+      document.getElementById("sync-progress").style.display = "none";
+
+      if (result.error) {
+        document.getElementById("sync-result").style.display = "block";
+        document.getElementById("sync-result").innerHTML =
+          `<span style="color:var(--expiry-expired)">${escapeHtml(result.error)}</span>`;
+      } else {
+        const duration = (result.durationMs / 1000).toFixed(1);
+        document.getElementById("sync-result").style.display = "block";
+        document.getElementById("sync-result").innerHTML =
+          `<span style="color:var(--expiry-ok)">` +
+          `${dryRun ? "Dry run" : "Sync"} complete: ` +
+          `${result.filesAdded} added, ${result.filesUpdated} updated, ` +
+          `${result.filesDeleted} deleted` +
+          (result.filesUnchanged ? `, ${result.filesUnchanged} unchanged` : "") +
+          ` (${duration}s)</span>` +
+          (result.errors?.length ? `<br><span style="color:var(--expiry-expired)">${result.errors.length} errors</span>` : "");
+
+        // Refresh the tree if not a dry run
+        if (!dryRun) {
+          // Invalidate cache
+          delete syncMetaCache[`${currentStorage}/${container}`];
+          await buildTree();
+        }
+      }
+    } catch (e) {
+      document.getElementById("sync-progress").style.display = "none";
+      document.getElementById("sync-result").style.display = "block";
+      document.getElementById("sync-result").innerHTML =
+        `<span style="color:var(--expiry-expired)">Sync failed: ${escapeHtml(e.message)}</span>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Sync Now";
+    }
+  });
+```
+
+#### G.4 CSS Additions in `src/electron/public/styles.css`
+
+Add after the `.context-menu-item.ctx-danger:hover` rule (after line 324), before the danger button section:
+
+```css
+/* ===== Sync ===== */
+.sync-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  font-size: 12px;
+  color: var(--text-accent);
+  background: transparent;
+  border-radius: 3px;
+  margin-left: 4px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.sync-badge:hover {
+  background: var(--btn-primary);
+  color: white;
+}
+
+.sync-details p {
+  margin: 4px 0;
+  font-size: 13px;
+}
+.sync-details strong {
+  color: var(--text-dim);
+  display: inline-block;
+  min-width: 100px;
+}
+
+.sync-spinner {
+  display: inline-block;
+  animation: spin 1s linear infinite;
+}
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+```
+
+---
+
+### Implementation Unit Dependency Graph
+
+```
+Unit A: Types + Credential Store
+    |
+    +---> Unit B: GitHub Client  ----\
+    |                                 |---> Unit D: Sync Engine ---> Unit F: CLI Sync Commands
+    +---> Unit C: DevOps Client ----/                          \
+    |                                                           +---> Unit G: Server API + UI
+    +---> Unit E: CLI Token Commands
+```
+
+| Unit | Depends on | Can run in parallel with |
+|---|---|---|
+| Unit A | None | -- |
+| Unit B | Unit A | Unit C, Unit E |
+| Unit C | Unit A | Unit B, Unit E |
+| Unit D | Units A, B, C | -- |
+| Unit E | Unit A | Units B, C |
+| Unit F | Units D, E | -- |
+| Unit G | Unit D | Unit F |
+
+**Critical path:** A -> B/C -> D -> F (and G)
+
+---
+
+### New Files Summary
+
+| File | Unit | Purpose |
+|------|------|---------|
+| `src/core/repo-utils.ts` | B | Shared utilities: rate-limited fetch, batch processing, content-type inference |
+| `src/core/github-client.ts` | B | GitHub REST API client (Trees + Contents APIs) |
+| `src/core/devops-client.ts` | C | Azure DevOps REST API client (Items API) |
+| `src/core/sync-engine.ts` | D | Provider-agnostic clone and incremental sync engine |
+| `src/cli/commands/shared.ts` | E | Shared CLI helpers: resolveStorage, confirm, resolveToken |
+| `src/cli/commands/token-ops.ts` | E | CLI commands: add-token, list-tokens, remove-token |
+| `src/cli/commands/repo-sync.ts` | F | CLI commands: clone-github, clone-devops, sync |
+
+### Modified Files Summary
+
+| File | Unit | Changes |
+|------|------|---------|
+| `src/core/types.ts` | A | Add 8 new interfaces/types (TokenEntry, TokenListItem, TokenExpiryStatus, SyncHistoryEntry, RepoSyncMeta, SyncResult, RepoFileEntry); extend CredentialData with `tokens?` |
+| `src/core/credential-store.ts` | A | Import new types; add getExpiryStatus helper; normalize `tokens` on load; add 6 token CRUD methods |
+| `src/core/blob-client.ts` | D | Add `listBlobsFlat()` method for recursive flat listing |
+| `src/cli/index.ts` | E, F | Import and register 6 new commands (add-token, list-tokens, remove-token, clone-github, clone-devops, sync) |
+| `src/cli/commands/blob-ops.ts` | E | Import resolveStorage and confirm from shared.ts (remove local definitions) |
+| `src/cli/commands/view.ts` | E | Import resolveStorage from shared.ts (remove local definition) |
+| `src/electron/server.ts` | G | Import SyncEngine, GitHubClient, DevOpsClient; add 3 endpoints (GET /api/tokens, GET /api/repo-meta, POST /api/sync) |
+| `src/electron/public/app.js` | G | Add syncMetaCache, sync detection in loadTreeLevel, sync modal logic, fetchSyncMeta, openSyncModal |
+| `src/electron/public/index.html` | G | Add sync confirmation modal HTML |
+| `src/electron/public/styles.css` | G | Add sync badge, sync details, and spinner animation styles |
+
+---
+
+### Known Limitations (v1)
+
+1. **GitHub tree truncation:** Repos with >100,000 files may return truncated trees. A warning is logged but recursive traversal is not implemented.
+2. **Git LFS files:** LFS-tracked files store pointer files in the Git tree, not actual content. LFS files will be synced as pointer files.
+3. **Large file handling:** Files over 100 MB use the Git Blobs API fallback on GitHub. Files exceeding API size limits will fail with an error in `SyncResult.errors`.
+4. **Sync is synchronous:** The server API endpoint blocks until sync completes. For repos with 5,000+ files this could take 30-60 seconds. SSE/WebSocket streaming is deferred.
+5. **No automatic scheduling:** Sync is on-demand only. Scheduled sync is out of scope for v1.
+6. **Single-prefix per sync:** The `sync` command operates on one prefix at a time.
+7. **No new npm dependencies.** Uses Node 18+ built-in `fetch` for all HTTP calls.
+
+---
+
+### Risk Assessment (Repo Sync)
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| GitHub API rate limit hit during large clone | Sync stalls or fails mid-operation | `rateLimitedFetch` checks `X-RateLimit-Remaining` and sleeps before reset; batch concurrency of 10; partial progress saved in SyncResult.errors |
+| Azure DevOps throttling (~200 req/min) | Slow clone for large repos | 50ms inter-request delay in `downloadFile`; `Retry-After` handling in `rateLimitedFetch` |
+| PAT expires mid-sync | Sync fails partway | Expiry check before starting sync; warning if within 14 days; partial state recoverable via re-sync |
+| Credential store format change breaks existing users | Users lose storage configs | `tokens` field is optional; `load()` normalizes missing field to empty array |
+| Large `.repo-sync-meta.json` for repos with 5,000+ files | Slow metadata read/write | ~200 KB for 5,000 files is acceptable; single API call to read/write |
+| Concurrent syncs on same container | Race condition on metadata | Not addressed in v1; UI disables sync button during operation; CLI is single-invocation |

@@ -1,44 +1,15 @@
 import * as fs from "fs";
 import * as path from "path";
-import * as readline from "readline";
-import { CredentialStore } from "../../core/credential-store.js";
 import { BlobClient } from "../../core/blob-client.js";
-
-function resolveStorage(storageName?: string) {
-  const store = new CredentialStore();
-  if (storageName) {
-    const entry = store.getStorage(storageName);
-    if (!entry) {
-      console.error(`Storage '${storageName}' not found.`);
-      process.exit(1);
-    }
-    return entry;
-  }
-  const first = store.getFirstStorage();
-  if (!first) {
-    console.error('No storage accounts configured. Use "storage-nav add" first.');
-    process.exit(1);
-  }
-  return first;
-}
-
-function confirm(question: string): Promise<boolean> {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise((resolve) => {
-    rl.question(`${question} (y/N): `, (answer) => {
-      rl.close();
-      resolve(answer.trim().toLowerCase() === "y");
-    });
-  });
-}
+import { resolveStorageEntry, promptYesNo, type StorageOpts } from "./shared.js";
 
 export async function renameBlob(
-  storageName: string | undefined,
+  storageOpts: StorageOpts,
   container: string,
   oldBlob: string,
   newBlob: string
 ): Promise<void> {
-  const entry = resolveStorage(storageName);
+  const { entry } = await resolveStorageEntry(storageOpts);
   const client = new BlobClient(entry);
 
   console.log(`Renaming '${oldBlob}' -> '${newBlob}' in ${entry.accountName}/${container}...`);
@@ -47,13 +18,13 @@ export async function renameBlob(
 }
 
 export async function deleteBlob(
-  storageName: string | undefined,
+  storageOpts: StorageOpts,
   container: string,
   blobName: string
 ): Promise<void> {
-  const entry = resolveStorage(storageName);
+  const { entry } = await resolveStorageEntry(storageOpts);
 
-  const confirmed = await confirm(`Delete '${blobName}' from ${entry.accountName}/${container}?`);
+  const confirmed = await promptYesNo(`Delete '${blobName}' from ${entry.accountName}/${container}?`);
   if (!confirmed) {
     console.log("Cancelled.");
     return;
@@ -66,13 +37,13 @@ export async function deleteBlob(
 }
 
 export async function createBlob(
-  storageName: string | undefined,
+  storageOpts: StorageOpts,
   container: string,
   blobName: string,
   filePath?: string,
   content?: string
 ): Promise<void> {
-  const entry = resolveStorage(storageName);
+  const { entry } = await resolveStorageEntry(storageOpts);
   const client = new BlobClient(entry);
 
   let data: Buffer;

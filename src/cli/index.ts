@@ -5,6 +5,8 @@ import { listStorages } from "./commands/list-storages.js";
 import { removeStorage } from "./commands/remove-storage.js";
 import { viewBlob, listContainers, listBlobs, downloadBlob } from "./commands/view.js";
 import { renameBlob, deleteBlob, createBlob } from "./commands/blob-ops.js";
+import { addToken, listTokens, removeToken } from "./commands/token-ops.js";
+import { cloneGitHub, cloneDevOps, syncContainer } from "./commands/repo-sync.js";
 
 const program = new Command();
 
@@ -47,8 +49,11 @@ program
   .command("containers")
   .description("List containers in a storage account")
   .option("--storage <name>", "Storage account name (uses first if omitted)")
+  .option("--account-key <key>", "Account key (inline, overrides stored credential)")
+  .option("--sas-token <token>", "SAS token (inline, overrides stored credential)")
+  .option("--account <account>", "Azure Storage account name (required with inline key/token)")
   .action(async (opts) => {
-    await listContainers(opts.storage);
+    await listContainers({ storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account });
   });
 
 // List blobs
@@ -58,8 +63,11 @@ program
   .requiredOption("--container <name>", "Container name")
   .option("--storage <name>", "Storage account name (uses first if omitted)")
   .option("--prefix <prefix>", "Blob prefix (folder path)")
+  .option("--account-key <key>", "Account key (inline)")
+  .option("--sas-token <token>", "SAS token (inline)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token)")
   .action(async (opts) => {
-    await listBlobs(opts.storage, opts.container, opts.prefix);
+    await listBlobs({ storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.container, opts.prefix);
   });
 
 // View blob
@@ -69,8 +77,11 @@ program
   .requiredOption("--container <name>", "Container name")
   .requiredOption("--blob <path>", "Blob path")
   .option("--storage <name>", "Storage account name (uses first if omitted)")
+  .option("--account-key <key>", "Account key (inline)")
+  .option("--sas-token <token>", "SAS token (inline)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token)")
   .action(async (opts) => {
-    await viewBlob(opts.storage, opts.container, opts.blob);
+    await viewBlob({ storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.container, opts.blob);
   });
 
 // Download blob
@@ -81,8 +92,11 @@ program
   .requiredOption("--blob <path>", "Blob path")
   .requiredOption("--output <path>", "Local output file path")
   .option("--storage <name>", "Storage account name (uses first if omitted)")
+  .option("--account-key <key>", "Account key (inline)")
+  .option("--sas-token <token>", "SAS token (inline)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token)")
   .action(async (opts) => {
-    await downloadBlob(opts.storage, opts.container, opts.blob, opts.output);
+    await downloadBlob({ storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.container, opts.blob, opts.output);
   });
 
 // Rename blob
@@ -93,8 +107,11 @@ program
   .requiredOption("--blob <path>", "Current blob path")
   .requiredOption("--new-name <path>", "New blob path")
   .option("--storage <name>", "Storage account name (uses first if omitted)")
+  .option("--account-key <key>", "Account key (inline)")
+  .option("--sas-token <token>", "SAS token (inline)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token)")
   .action(async (opts) => {
-    await renameBlob(opts.storage, opts.container, opts.blob, opts.newName);
+    await renameBlob({ storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.container, opts.blob, opts.newName);
   });
 
 // Delete blob
@@ -104,8 +121,11 @@ program
   .requiredOption("--container <name>", "Container name")
   .requiredOption("--blob <path>", "Blob path to delete")
   .option("--storage <name>", "Storage account name (uses first if omitted)")
+  .option("--account-key <key>", "Account key (inline)")
+  .option("--sas-token <token>", "SAS token (inline)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token)")
   .action(async (opts) => {
-    await deleteBlob(opts.storage, opts.container, opts.blob);
+    await deleteBlob({ storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.container, opts.blob);
   });
 
 // Create (upload) blob
@@ -117,8 +137,94 @@ program
   .option("--file <path>", "Local file to upload")
   .option("--content <text>", "Inline text content")
   .option("--storage <name>", "Storage account name (uses first if omitted)")
+  .option("--account-key <key>", "Account key (inline)")
+  .option("--sas-token <token>", "SAS token (inline)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token)")
   .action(async (opts) => {
-    await createBlob(opts.storage, opts.container, opts.blob, opts.file, opts.content);
+    await createBlob({ storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.container, opts.blob, opts.file, opts.content);
+  });
+
+// Add token
+program
+  .command("add-token")
+  .description("Add a personal access token (GitHub or Azure DevOps)")
+  .requiredOption("--name <name>", "Display name for this token")
+  .requiredOption("--provider <provider>", "Token provider (github or azure-devops)")
+  .requiredOption("--token <token>", "Personal access token")
+  .option("--expires-at <date>", "Token expiration date (ISO 8601)")
+  .action((opts) => {
+    if (opts.provider !== "github" && opts.provider !== "azure-devops") {
+      console.error('Provider must be "github" or "azure-devops".');
+      process.exit(1);
+    }
+    addToken(opts.name, opts.provider, opts.token, opts.expiresAt);
+  });
+
+// List tokens
+program
+  .command("list-tokens")
+  .description("List configured personal access tokens")
+  .action(() => {
+    listTokens();
+  });
+
+// Remove token
+program
+  .command("remove-token")
+  .description("Remove a personal access token")
+  .requiredOption("--name <name>", "Name of the token to remove")
+  .action((opts) => {
+    removeToken(opts.name);
+  });
+
+// Clone GitHub repo
+program
+  .command("clone-github")
+  .description("Clone a GitHub repository into a blob container")
+  .requiredOption("--repo <url>", "GitHub repository URL")
+  .requiredOption("--container <name>", "Target container name")
+  .option("--storage <name>", "Storage account name (uses first if omitted)")
+  .option("--branch <branch>", "Branch to clone (default: repo default branch)")
+  .option("--token-name <name>", "PAT token name (uses first GitHub token if omitted)")
+  .option("--pat <token>", "GitHub PAT (inline, overrides stored token)")
+  .option("--account-key <key>", "Account key (inline)")
+  .option("--sas-token <token>", "SAS token (inline)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token)")
+  .action(async (opts) => {
+    await cloneGitHub(opts.repo, opts.container, { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.branch, { pat: opts.pat, tokenName: opts.tokenName });
+  });
+
+// Clone Azure DevOps repo
+program
+  .command("clone-devops")
+  .description("Clone an Azure DevOps repository into a blob container")
+  .requiredOption("--repo <url>", "Azure DevOps repository URL")
+  .requiredOption("--container <name>", "Target container name")
+  .option("--storage <name>", "Storage account name (uses first if omitted)")
+  .option("--branch <branch>", "Branch to clone (default: repo default branch)")
+  .option("--token-name <name>", "PAT token name (uses first Azure DevOps token if omitted)")
+  .option("--pat <token>", "Azure DevOps PAT (inline, overrides stored token)")
+  .option("--account-key <key>", "Account key (inline)")
+  .option("--sas-token <token>", "SAS token (inline)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token)")
+  .action(async (opts) => {
+    await cloneDevOps(opts.repo, opts.container, { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.branch, { pat: opts.pat, tokenName: opts.tokenName });
+  });
+
+// Sync container
+program
+  .command("sync")
+  .description("Sync a previously cloned container with its remote repository")
+  .requiredOption("--container <name>", "Container name")
+  .option("--storage <name>", "Storage account name (uses first if omitted)")
+  .option("--dry-run", "Show what would change without making changes")
+  .option("--pat <token>", "PAT (inline, overrides stored token)")
+  .option("--token-name <name>", "PAT token name")
+  .option("--account-key <key>", "Account key (inline)")
+  .option("--sas-token <token>", "SAS token (inline)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token)")
+  .action(async (opts) => {
+    await syncContainer(opts.container, { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.dryRun ?? false, { pat: opts.pat, tokenName: opts.tokenName });
   });
 
 // Launch Electron UI

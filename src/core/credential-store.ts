@@ -2,7 +2,7 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import type { CredentialData, EncryptedPayload, StorageEntry } from "./types.js";
+import type { CredentialData, EncryptedPayload, StorageEntry, TokenEntry } from "./types.js";
 
 const STORE_DIR = path.join(os.homedir(), ".storage-navigator");
 const STORE_FILE = path.join(STORE_DIR, "credentials.json");
@@ -220,5 +220,51 @@ export class CredentialStore {
   /** Get the first storage (convenience for single-storage setups) */
   getFirstStorage(): StorageEntry | undefined {
     return this.data.storages[0];
+  }
+
+  /** Add or update a personal access token */
+  addToken(entry: Omit<TokenEntry, "addedAt">): void {
+    if (!this.data.tokens) this.data.tokens = [];
+    const existing = this.data.tokens.findIndex((t) => t.name === entry.name);
+    const full: TokenEntry = { ...entry, addedAt: new Date().toISOString() };
+    if (existing >= 0) {
+      this.data.tokens[existing] = full;
+    } else {
+      this.data.tokens.push(full);
+    }
+    this.save();
+  }
+
+  /** Get a token by name */
+  getToken(name: string): TokenEntry | undefined {
+    return this.data.tokens?.find((t) => t.name === name);
+  }
+
+  /** Get the first token matching a provider */
+  getTokenByProvider(provider: "github" | "azure-devops"): TokenEntry | undefined {
+    return this.data.tokens?.find((t) => t.provider === provider);
+  }
+
+  /** List all tokens (no secrets exposed) */
+  listTokens(): { name: string; provider: string; addedAt: string; expiresAt: string | null; isExpired: boolean }[] {
+    return (this.data.tokens ?? []).map((t) => ({
+      name: t.name,
+      provider: t.provider,
+      addedAt: t.addedAt,
+      expiresAt: t.expiresAt ?? null,
+      isExpired: t.expiresAt ? new Date(t.expiresAt) < new Date() : false,
+    }));
+  }
+
+  /** Remove a token by name */
+  removeToken(name: string): boolean {
+    if (!this.data.tokens) return false;
+    const before = this.data.tokens.length;
+    this.data.tokens = this.data.tokens.filter((t) => t.name !== name);
+    if (this.data.tokens.length < before) {
+      this.save();
+      return true;
+    }
+    return false;
   }
 }

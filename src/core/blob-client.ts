@@ -67,6 +67,22 @@ export class BlobClient {
     return items;
   }
 
+  /** List ALL blobs in a container recursively (flat list, no hierarchy) */
+  async listBlobsFlat(containerName: string): Promise<BlobItem[]> {
+    const containerClient = this.serviceClient.getContainerClient(containerName);
+    const items: BlobItem[] = [];
+    for await (const blob of containerClient.listBlobsFlat()) {
+      items.push({
+        name: blob.name,
+        isPrefix: false,
+        size: blob.properties.contentLength,
+        lastModified: blob.properties.lastModified?.toISOString(),
+        contentType: blob.properties.contentType,
+      });
+    }
+    return items;
+  }
+
   /** Rename a blob (copy to new name, then delete original) */
   async renameBlob(containerName: string, oldName: string, newName: string): Promise<void> {
     const containerClient = this.serviceClient.getContainerClient(containerName);

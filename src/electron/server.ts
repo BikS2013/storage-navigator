@@ -4,6 +4,10 @@ import { fileURLToPath } from "url";
 import mammoth from "mammoth";
 import { CredentialStore } from "../core/credential-store.js";
 import { BlobClient } from "../core/blob-client.js";
+import { readSyncMeta, syncRepo } from "../core/sync-engine.js";
+import type { RepoProvider } from "../core/sync-engine.js";
+import { GitHubClient } from "../core/github-client.js";
+import { DevOpsClient } from "../core/devops-client.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -178,6 +182,69 @@ export function createServer(port: number, publicDirOverride?: string): express.
       const msg = err instanceof Error ? err.message : String(err);
       res.status(500).json({ error: msg });
     }
+  });
+
+  // API: Get sync metadata for a container
+  app.get("/api/sync-meta/:storage/:container", async (req, res) => {
+    try {
+      const store = new CredentialStore();
+      const entry = store.getStorage(req.params.storage);
+      if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
+      const client = new BlobClient(entry);
+      const meta = await readSyncMeta(client, req.params.container);
+      res.json(meta);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  // API: Trigger sync for a container
+  app.post("/api/sync/:storage/:container", async (req, res) => {
+    try {
+      const store = new CredentialStore();
+      const entry = store.getStorage(req.params.storage);
+      if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
+      const blobClient = new BlobClient(entry);
+
+      const meta = await readSyncMeta(blobClient, req.params.container);
+      if (!meta) { res.status(400).json({ error: "Container is not a synced repository" }); return; }
+
+      const pat = meta.provider === "github"
+        ? store.getTokenByProvider("github")
+        : store.getTokenByProvider("azure-devops");
+      if (!pat) { res.status(400).json({ error: `No ${meta.provider} token configured` }); return; }
+
+      let provider: RepoProvider;
+      if (meta.provider === "github") {
+        const { owner, repo } = GitHubClient.parseRepoUrl(meta.repoUrl);
+        const client = new GitHubClient(pat.token);
+        provider = {
+          listFiles: () => client.listFiles(owner, repo, meta.branch),
+          downloadFile: (path) => client.downloadFile(owner, repo, path, meta.branch),
+        };
+      } else {
+        const { org, project, repo } = DevOpsClient.parseRepoUrl(meta.repoUrl);
+        const client = new DevOpsClient(pat.token, org);
+        provider = {
+          listFiles: () => client.listFiles(project, repo, meta.branch),
+          downloadFile: (path) => client.downloadFile(project, repo, path, meta.branch),
+        };
+      }
+
+      const dryRun = req.query.dryRun === "true";
+      const result = await syncRepo(blobClient, req.params.container, provider, dryRun);
+      res.json(result);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  // API: List configured tokens (no secrets)
+  app.get("/api/tokens", (_req, res) => {
+    const store = new CredentialStore();
+    res.json(store.listTokens());
   });
 
   app.listen(port, () => {
