@@ -93,6 +93,19 @@
     </div>
   </div>
 
+  <!-- Delete Folder Confirmation Modal -->
+  <div id="delete-folder-modal" class="modal hidden">
+    <div class="modal-content">
+      <h2>Delete Folder</h2>
+      <p id="delete-folder-message" style="font-size:13px;color:var(--text);margin-bottom:12px;"></p>
+      <p style="font-size:12px;color:var(--expiry-expired);margin-bottom:16px;">All files inside this folder will be permanently deleted. This action cannot be undone.</p>
+      <div class="modal-actions">
+        <button id="delete-folder-cancel">Cancel</button>
+        <button id="delete-folder-confirm" class="primary danger">Delete Folder</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Create File Modal -->
   <div id="create-modal" class="modal hidden">
     <div class="modal-content">
@@ -123,10 +136,85 @@
     </div>
   </div>
 
-  <!-- Context Menu -->
+  <!-- Link Repository Modal -->
+  <div id="link-modal" class="modal hidden">
+    <div class="modal-content">
+      <h2>Link to Repository</h2>
+      <label>Provider
+        <select id="link-provider" style="display:block;width:100%;margin-top:4px;padding:8px;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:13px;">
+          <option value="github">GitHub</option>
+          <option value="azure-devops">Azure DevOps</option>
+          <option value="ssh">SSH (git@...)</option>
+        </select>
+      </label>
+      <label>Repository URL<input type="text" id="link-repo-url" placeholder="https://github.com/owner/repo or git@github.com:owner/repo.git"></label>
+      <label>Branch<input type="text" id="link-branch" placeholder="default branch"></label>
+      <label>Target Prefix<input type="text" id="link-target-prefix" placeholder="container root"></label>
+      <label>Repo Sub-Path<input type="text" id="link-repo-subpath" placeholder="entire repo"></label>
+      <div class="modal-actions">
+        <button id="link-cancel">Cancel</button>
+        <button id="link-save" class="primary">Create Link</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Links Panel Modal -->
+  <div id="links-panel-modal" class="modal hidden">
+    <div class="modal-content links-panel-content">
+      <div class="links-panel-header">
+        <h2>Repository Links</h2>
+        <div class="links-panel-actions-top">
+          <button id="links-sync-all" class="primary" style="font-size:12px;padding:4px 12px;">Sync All</button>
+        </div>
+      </div>
+      <div id="links-panel-body" style="max-height:400px;overflow-y:auto;margin-bottom:16px;">
+        <p class="placeholder">Loading links...</p>
+      </div>
+      <div class="modal-actions">
+        <button id="links-panel-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add Token Modal -->
+  <div id="add-token-modal" class="modal hidden">
+    <div class="modal-content">
+      <h2>Add Personal Access Token</h2>
+      <p id="add-token-message" style="font-size:13px;color:var(--expiry-expired);margin-bottom:12px;"></p>
+      <label>Token Name<input type="text" id="add-token-name" placeholder="e.g. my-devops-pat"></label>
+      <label>Provider
+        <select id="add-token-provider" style="display:block;width:100%;margin-top:4px;padding:8px;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:13px;">
+          <option value="github">GitHub</option>
+          <option value="azure-devops">Azure DevOps</option>
+        </select>
+      </label>
+      <label>Token<input type="password" id="add-token-value" placeholder="Paste your personal access token"></label>
+      <div class="modal-actions">
+        <button id="add-token-cancel">Cancel</button>
+        <button id="add-token-save" class="primary">Save Token</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Context Menu (files) -->
   <div id="context-menu" class="context-menu hidden">
+    <div class="context-menu-item" id="ctx-refresh">Refresh</div>
     <div class="context-menu-item" id="ctx-rename">Rename</div>
     <div class="context-menu-item ctx-danger" id="ctx-delete">Delete</div>
+  </div>
+
+  <!-- Context Menu (folders) -->
+  <div id="folder-context-menu" class="context-menu hidden">
+    <div class="context-menu-item" id="ctx-refresh-folder">Refresh</div>
+    <div class="context-menu-item" id="ctx-link-folder">Link to Repo</div>
+    <div class="context-menu-item ctx-danger" id="ctx-delete-folder">Delete Folder</div>
+  </div>
+
+  <!-- Context Menu (containers) -->
+  <div id="container-context-menu" class="context-menu hidden">
+    <div class="context-menu-item" id="ctx-refresh-container">Refresh</div>
+    <div class="context-menu-item" id="ctx-link-container">Link to Repo</div>
+    <div class="context-menu-item" id="ctx-view-links">View Links</div>
   </div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>

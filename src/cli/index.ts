@@ -4,9 +4,10 @@ import { addStorage } from "./commands/add-storage.js";
 import { listStorages } from "./commands/list-storages.js";
 import { removeStorage } from "./commands/remove-storage.js";
 import { viewBlob, listContainers, listBlobs, downloadBlob } from "./commands/view.js";
-import { renameBlob, deleteBlob, createBlob } from "./commands/blob-ops.js";
+import { renameBlob, deleteBlob, deleteFolder, createBlob } from "./commands/blob-ops.js";
 import { addToken, listTokens, removeToken } from "./commands/token-ops.js";
-import { cloneGitHub, cloneDevOps, syncContainer } from "./commands/repo-sync.js";
+import { cloneGitHub, cloneDevOps, cloneSsh, syncContainer } from "./commands/repo-sync.js";
+import { linkGitHub, linkDevOps, linkSsh, unlinkContainer, listLinks } from "./commands/link-ops.js";
 
 const program = new Command();
 
@@ -128,6 +129,20 @@ program
     await deleteBlob({ storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.container, opts.blob);
   });
 
+// Delete folder (all blobs under a prefix)
+program
+  .command("delete-folder")
+  .description("Delete all blobs under a prefix/folder (asks for confirmation)")
+  .requiredOption("--container <name>", "Container name")
+  .requiredOption("--prefix <path>", "Folder prefix to delete")
+  .option("--storage <name>", "Storage account name (uses first if omitted)")
+  .option("--account-key <key>", "Account key (inline)")
+  .option("--sas-token <token>", "SAS token (inline)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token)")
+  .action(async (opts) => {
+    await deleteFolder({ storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.container, opts.prefix);
+  });
+
 // Create (upload) blob
 program
   .command("create")
@@ -185,13 +200,15 @@ program
   .requiredOption("--container <name>", "Target container name")
   .option("--storage <name>", "Storage account name (uses first if omitted)")
   .option("--branch <branch>", "Branch to clone (default: repo default branch)")
+  .option("--prefix <path>", "Target folder prefix within container")
+  .option("--repo-path <path>", "Sub-path within the repo to sync")
   .option("--token-name <name>", "PAT token name (uses first GitHub token if omitted)")
   .option("--pat <token>", "GitHub PAT (inline, overrides stored token)")
   .option("--account-key <key>", "Account key (inline)")
   .option("--sas-token <token>", "SAS token (inline)")
   .option("--account <account>", "Azure Storage account name (with inline key/token)")
   .action(async (opts) => {
-    await cloneGitHub(opts.repo, opts.container, { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.branch, { pat: opts.pat, tokenName: opts.tokenName });
+    await cloneGitHub(opts.repo, opts.container, { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.branch, { pat: opts.pat, tokenName: opts.tokenName }, opts.prefix, opts.repoPath);
   });
 
 // Clone Azure DevOps repo
@@ -202,13 +219,32 @@ program
   .requiredOption("--container <name>", "Target container name")
   .option("--storage <name>", "Storage account name (uses first if omitted)")
   .option("--branch <branch>", "Branch to clone (default: repo default branch)")
+  .option("--prefix <path>", "Target folder prefix within container")
+  .option("--repo-path <path>", "Sub-path within the repo to sync")
   .option("--token-name <name>", "PAT token name (uses first Azure DevOps token if omitted)")
   .option("--pat <token>", "Azure DevOps PAT (inline, overrides stored token)")
   .option("--account-key <key>", "Account key (inline)")
   .option("--sas-token <token>", "SAS token (inline)")
   .option("--account <account>", "Azure Storage account name (with inline key/token)")
   .action(async (opts) => {
-    await cloneDevOps(opts.repo, opts.container, { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.branch, { pat: opts.pat, tokenName: opts.tokenName });
+    await cloneDevOps(opts.repo, opts.container, { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.branch, { pat: opts.pat, tokenName: opts.tokenName }, opts.prefix, opts.repoPath);
+  });
+
+// Clone via SSH
+program
+  .command("clone-ssh")
+  .description("Clone a repository via SSH into a blob container")
+  .requiredOption("--repo <url>", "Repository SSH URL (e.g. git@github.com:owner/repo.git)")
+  .requiredOption("--container <name>", "Target container name")
+  .option("--storage <name>", "Storage account name (uses first if omitted)")
+  .option("--branch <branch>", "Branch to clone (default: repo default branch)")
+  .option("--prefix <path>", "Target folder prefix within container")
+  .option("--repo-path <path>", "Sub-path within the repo to sync")
+  .option("--account-key <key>", "Account key (inline)")
+  .option("--sas-token <token>", "SAS token (inline)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token)")
+  .action(async (opts) => {
+    await cloneSsh(opts.repo, opts.container, { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.branch, opts.prefix, opts.repoPath);
   });
 
 // Sync container
@@ -218,13 +254,99 @@ program
   .requiredOption("--container <name>", "Container name")
   .option("--storage <name>", "Storage account name (uses first if omitted)")
   .option("--dry-run", "Show what would change without making changes")
+  .option("--prefix <path>", "Sync only the link at this prefix")
+  .option("--link-id <id>", "Sync a specific link by ID")
+  .option("--all", "Sync all links in the container")
   .option("--pat <token>", "PAT (inline, overrides stored token)")
   .option("--token-name <name>", "PAT token name")
   .option("--account-key <key>", "Account key (inline)")
   .option("--sas-token <token>", "SAS token (inline)")
   .option("--account <account>", "Azure Storage account name (with inline key/token)")
   .action(async (opts) => {
-    await syncContainer(opts.container, { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.dryRun ?? false, { pat: opts.pat, tokenName: opts.tokenName });
+    await syncContainer(opts.container, { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.dryRun ?? false, { pat: opts.pat, tokenName: opts.tokenName }, opts.prefix, opts.linkId, opts.all ?? false);
+  });
+
+// Link GitHub repo (metadata only)
+program
+  .command("link-github")
+  .description("Link a GitHub repository to a container (metadata only, no download)")
+  .requiredOption("--repo <url>", "GitHub repository URL")
+  .requiredOption("--container <name>", "Target container name")
+  .option("--branch <branch>", "Branch (default: repo default branch)")
+  .option("--prefix <path>", "Target folder prefix within container")
+  .option("--repo-path <path>", "Sub-path within the repo to sync")
+  .option("--storage <name>", "Storage account name (uses first if omitted)")
+  .option("--token-name <name>", "PAT token name (uses first GitHub token if omitted)")
+  .option("--pat <token>", "GitHub PAT (inline, overrides stored token)")
+  .option("--account-key <key>", "Account key (inline)")
+  .option("--sas-token <token>", "SAS token (inline)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token)")
+  .action(async (opts) => {
+    await linkGitHub(opts.repo, opts.container, { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.branch, opts.prefix, opts.repoPath, { pat: opts.pat, tokenName: opts.tokenName });
+  });
+
+// Link Azure DevOps repo (metadata only)
+program
+  .command("link-devops")
+  .description("Link an Azure DevOps repository to a container (metadata only, no download)")
+  .requiredOption("--repo <url>", "Azure DevOps repository URL")
+  .requiredOption("--container <name>", "Target container name")
+  .option("--branch <branch>", "Branch (default: repo default branch)")
+  .option("--prefix <path>", "Target folder prefix within container")
+  .option("--repo-path <path>", "Sub-path within the repo to sync")
+  .option("--storage <name>", "Storage account name (uses first if omitted)")
+  .option("--token-name <name>", "PAT token name (uses first Azure DevOps token if omitted)")
+  .option("--pat <token>", "Azure DevOps PAT (inline, overrides stored token)")
+  .option("--account-key <key>", "Account key (inline)")
+  .option("--sas-token <token>", "SAS token (inline)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token)")
+  .action(async (opts) => {
+    await linkDevOps(opts.repo, opts.container, { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.branch, opts.prefix, opts.repoPath, { pat: opts.pat, tokenName: opts.tokenName });
+  });
+
+// Link via SSH (metadata only)
+program
+  .command("link-ssh")
+  .description("Link an SSH-accessible repository to a container (metadata only, no download)")
+  .requiredOption("--repo <url>", "Repository SSH URL (e.g. git@github.com:owner/repo.git)")
+  .requiredOption("--container <name>", "Target container name")
+  .option("--branch <branch>", "Branch (default: repo default branch)")
+  .option("--prefix <path>", "Target folder prefix within container")
+  .option("--repo-path <path>", "Sub-path within the repo to sync")
+  .option("--storage <name>", "Storage account name (uses first if omitted)")
+  .option("--account-key <key>", "Account key (inline)")
+  .option("--sas-token <token>", "SAS token (inline)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token)")
+  .action(async (opts) => {
+    await linkSsh(opts.repo, opts.container, { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.branch, opts.prefix, opts.repoPath);
+  });
+
+// Unlink a repository from a container
+program
+  .command("unlink")
+  .description("Remove a repository link from a container (files are NOT deleted)")
+  .requiredOption("--container <name>", "Container name")
+  .option("--link-id <id>", "Link ID to remove")
+  .option("--prefix <path>", "Folder prefix to unlink")
+  .option("--storage <name>", "Storage account name (uses first if omitted)")
+  .option("--account-key <key>", "Account key (inline)")
+  .option("--sas-token <token>", "SAS token (inline)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token)")
+  .action(async (opts) => {
+    await unlinkContainer(opts.container, { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.linkId, opts.prefix);
+  });
+
+// List links in a container
+program
+  .command("list-links")
+  .description("List all repository links in a container")
+  .requiredOption("--container <name>", "Container name")
+  .option("--storage <name>", "Storage account name (uses first if omitted)")
+  .option("--account-key <key>", "Account key (inline)")
+  .option("--sas-token <token>", "SAS token (inline)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token)")
+  .action(async (opts) => {
+    await listLinks(opts.container, { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account });
   });
 
 // Launch Electron UI

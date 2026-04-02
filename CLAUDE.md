@@ -1,4 +1,5 @@
-## Structure & Convensions
+<structure-and-conventions>
+## Structure & Conventions
 
 - Every time you want to create a test script, you must create it in the test_scripts folder. If the folder doesn't exist, you must make it.
 
@@ -57,6 +58,7 @@
 
 - You must never create fallback solutions for configuration settings. In every case a configuration setting is not provided you must raise the appropriate exception. You must never substitute the missing config value with a default or a fallback value.
 - If I ask you to make an exception to the configuration setting rule, you must write this exception in the projects memory file, before you implement it.
+</structure-and-conventions>
 
 ---
 
@@ -100,7 +102,7 @@ Azure Blob Storage Navigator — browse containers and view files through CLI or
           view         View a blob (--container <name> --blob <path> --storage <name>)
           download     Download a blob (--container <name> --blob <path> --output <file>)
 
-          All blob commands (containers, ls, view, download, rename, delete, create) accept:
+          All blob commands (containers, ls, view, download, rename, delete, delete-folder, create) accept:
             --account-key <key>   Inline account key (overrides stored credential)
             --sas-token <token>   Inline SAS token (overrides stored credential)
             --account <account>   Azure Storage account name (required with inline key/token)
@@ -114,6 +116,11 @@ Azure Blob Storage Navigator — browse containers and view files through CLI or
           delete       Delete a blob (asks for confirmation)
             --container <name>    Container name
             --blob <path>         Blob path to delete
+            --storage <name>      Storage account (optional)
+
+          delete-folder  Delete all blobs under a prefix/folder (asks for confirmation)
+            --container <name>    Container name
+            --prefix <path>       Folder prefix to delete
             --storage <name>      Storage account (optional)
 
           create       Create/upload a new blob
@@ -136,6 +143,8 @@ Azure Blob Storage Navigator — browse containers and view files through CLI or
             --repo <url>          GitHub repository URL
             --container <name>    Target container name
             --branch <branch>     Branch to clone (optional, defaults to repo default)
+            --prefix <path>       Target folder prefix within container (optional)
+            --repo-path <path>    Sub-path within the repo to sync (optional)
             --storage <name>      Storage account (optional)
             --token-name <name>   PAT token name (optional, uses first GitHub token)
             --pat <token>         Inline GitHub PAT (overrides stored token)
@@ -144,6 +153,8 @@ Azure Blob Storage Navigator — browse containers and view files through CLI or
             --repo <url>          Azure DevOps repository URL
             --container <name>    Target container name
             --branch <branch>     Branch to clone (optional, defaults to repo default)
+            --prefix <path>       Target folder prefix within container (optional)
+            --repo-path <path>    Sub-path within the repo to sync (optional)
             --storage <name>      Storage account (optional)
             --token-name <name>   PAT token name (optional, uses first Azure DevOps token)
             --pat <token>         Inline Azure DevOps PAT (overrides stored token)
@@ -152,10 +163,43 @@ Azure Blob Storage Navigator — browse containers and view files through CLI or
             --container <name>    Container name
             --storage <name>      Storage account (optional)
             --dry-run             Show what would change without making changes
+            --prefix <path>       Sync only the link at this prefix (for multi-link containers)
+            --link-id <id>        Sync a specific link by ID
+            --all                 Sync all links in the container
             --pat <token>         Inline PAT (overrides stored token)
             --token-name <name>   PAT token name
 
-          All repo commands (clone-github, clone-devops, sync) also accept:
+          link-github  Link a GitHub repository to a container folder (metadata only, no download)
+            --repo <url>          GitHub repository URL
+            --container <name>    Target container name
+            --branch <branch>     Branch (optional, defaults to repo default)
+            --prefix <path>       Target folder prefix within container (optional)
+            --repo-path <path>    Sub-path within the repo to sync (optional)
+            --storage <name>      Storage account (optional)
+            --token-name <name>   PAT token name (optional)
+            --pat <token>         Inline GitHub PAT (optional)
+
+          link-devops  Link an Azure DevOps repository to a container folder (metadata only, no download)
+            --repo <url>          Azure DevOps repository URL
+            --container <name>    Target container name
+            --branch <branch>     Branch (optional, defaults to repo default)
+            --prefix <path>       Target folder prefix within container (optional)
+            --repo-path <path>    Sub-path within the repo to sync (optional)
+            --storage <name>      Storage account (optional)
+            --token-name <name>   PAT token name (optional)
+            --pat <token>         Inline Azure DevOps PAT (optional)
+
+          unlink       Remove a repository link from a container (files are NOT deleted)
+            --container <name>    Container name
+            --link-id <id>        Link ID to remove (optional)
+            --prefix <path>       Folder prefix to unlink (optional)
+            --storage <name>      Storage account (optional)
+
+          list-links   List all repository links in a container
+            --container <name>    Container name
+            --storage <name>      Storage account (optional)
+
+          All repo commands (clone-github, clone-devops, sync, link-github, link-devops, unlink, list-links) also accept:
             --account-key, --sas-token, --account for inline storage credentials
 
           ui           Launch web/Electron UI (--port <port>, default 3100)
@@ -183,6 +227,9 @@ Azure Blob Storage Navigator — browse containers and view files through CLI or
           # Delete a blob (will ask for confirmation)
           npx tsx src/cli/index.ts delete --container prompts --blob "obsolete-file.json"
 
+          # Delete a folder and all its contents (will ask for confirmation)
+          npx tsx src/cli/index.ts delete-folder --container prompts --prefix "old-folder/"
+
           # Create a blob from a local file
           npx tsx src/cli/index.ts create --container prompts --blob "config/new.json" --file ./local-file.json
 
@@ -209,6 +256,33 @@ Azure Blob Storage Navigator — browse containers and view files through CLI or
 
           # Clone with inline PAT and inline storage key
           npx tsx src/cli/index.ts clone-github --repo "https://github.com/owner/repo" --container my-repo --pat "ghp_xxx" --account myaccount --account-key "key"
+
+          # Clone a repo into a specific folder prefix
+          npx tsx src/cli/index.ts clone-github --repo "https://github.com/owner/repo" --container my-container --prefix "docs/" --repo-path "src/docs"
+
+          # Link a GitHub repo to a folder (metadata only, no download)
+          npx tsx src/cli/index.ts link-github --repo "https://github.com/owner/repo" --container my-container --prefix "templates/" --branch main
+
+          # Link an Azure DevOps repo
+          npx tsx src/cli/index.ts link-devops --repo "https://dev.azure.com/org/project/_git/repo" --container my-container --prefix "config/"
+
+          # List all links in a container
+          npx tsx src/cli/index.ts list-links --container my-container
+
+          # Sync a specific link by prefix
+          npx tsx src/cli/index.ts sync --container my-container --prefix "templates/"
+
+          # Sync a specific link by ID
+          npx tsx src/cli/index.ts sync --container my-container --link-id "abcd1234-..."
+
+          # Sync all links in a container
+          npx tsx src/cli/index.ts sync --container my-container --all
+
+          # Unlink a folder link
+          npx tsx src/cli/index.ts unlink --container my-container --prefix "templates/"
+
+          # Unlink by link ID
+          npx tsx src/cli/index.ts unlink --container my-container --link-id "abcd1234-..."
 
           # Launch second instance on different port
           npx tsx src/cli/index.ts ui --port 3200

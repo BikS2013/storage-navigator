@@ -2470,3 +2470,2035 @@ Unit A: Types + Credential Store
 | Credential store format change breaks existing users | Users lose storage configs | `tokens` field is optional; `load()` normalizes missing field to empty array |
 | Large `.repo-sync-meta.json` for repos with 5,000+ files | Slow metadata read/write | ~200 KB for 5,000 files is acceptable; single API call to read/write |
 | Concurrent syncs on same container | Race condition on metadata | Not addressed in v1; UI disables sync button during operation; CLI is single-invocation |
+
+---
+
+## Technical Design: Folder-Level Repository Linking and Sync
+
+**Date:** 2026-04-02
+**Status:** Ready for implementation
+**References:**
+- `docs/reference/refined-request-folder-link-sync.md` (requirements)
+- `docs/reference/investigation-folder-link-sync.md` (technical investigation)
+- `docs/reference/codebase-scan-folder-link-sync.md` (codebase scan)
+- `docs/design/plan-004-folder-link-sync.md` (implementation plan)
+
+### Feature Overview
+
+Extend the existing container-level clone/sync to support:
+1. **Linking** a container or sub-folder to a repository (metadata only, no file download)
+2. **Cloning** into a specific folder prefix within a container
+3. **Syncing** individual folder-level links or all links in a container
+4. **Unlinking** to remove the association without deleting files
+5. **UI** support for link management, visual indicators, and per-link sync
+
+A new `.repo-links.json` metadata blob per container replaces the single-link `.repo-sync-meta.json` pattern, with automatic backward-compatible migration.
+
+---
+
+### 1. New and Modified TypeScript Types
+
+#### 1.1 New Types in `src/core/types.ts`
+
+Add after the existing `RepoFileEntry` interface (line 34):
+
+```typescript
+/** A single repository link within a container */
+export interface RepoLink {
+  /** Unique link identifier (UUID v4 via crypto.randomUUID()) */
+  id: string;
+  /** Repository provider */
+  provider: "github" | "azure-devops";
+  /** Full repository URL (e.g., "https://github.com/owner/repo") */
+  repoUrl: string;
+  /** Branch name (never undefined after creation -- resolved to default branch if not specified) */
+  branch: string;
+  /** Sub-path within the repository to sync from (e.g., "src/templates"). Undefined = entire repo */
+  repoSubPath?: string;
+  /** Blob prefix in the container (e.g., "prompts/coa"). Undefined = container root */
+  targetPrefix?: string;
+  /** ISO 8601 timestamp of last successful sync. Undefined if never synced */
+  lastSyncAt?: string;
+  /** Commit SHA of last successful sync */
+  lastCommitSha?: string;
+  /** Map of blobPath -> git SHA for all tracked files. Keys are blob paths (not repo paths) */
+  fileShas: Record<string, string>;
+  /** ISO 8601 timestamp of when the link was created */
+  createdAt: string;
+}
+
+/** Container-level registry of all repository links */
+export interface RepoLinksRegistry {
+  /** Schema version for forward compatibility */
+  version: 1;
+  /** Array of link entries */
+  links: RepoLink[];
+}
+```
+
+#### 1.2 Internal Type in `src/core/sync-engine.ts` (Not Exported)
+
+Add near the top of `sync-engine.ts`, after the `RepoProvider` interface:
+
+```typescript
+/** Maps a repo file to its target blob location. Internal to sync-engine. */
+interface MappedFileEntry {
+  /** Original path in the repository (used for provider.downloadFile) */
+  repoPath: string;
+  /** Target path in the container (used for blobClient.createBlob and fileShas keys) */
+  blobPath: string;
+  /** Git object SHA (content hash) */
+  sha: string;
+}
+```
+
+#### 1.3 Existing Types -- No Changes
+
+The following existing types remain unchanged:
+- `RepoSyncMeta` -- retained for backward compatibility (read-only during migration)
+- `RepoFileEntry` -- unchanged; provider clients return these
+- `SyncResult` -- unchanged; clone/sync functions return these
+- `RepoProvider` -- unchanged; provider interface stays the same
+- `StorageOpts`, `PatOpts` -- unchanged; CLI shared helpers stay the same
+
+---
+
+### 2. Link Registry Functions in `src/core/sync-engine.ts`
+
+#### 2.1 Constants
+
+```typescript
+const LINKS_BLOB = ".repo-links.json";
+// Existing: const META_BLOB = ".repo-sync-meta.json";
+```
+
+#### 2.2 `normalizePath`
+
+```typescript
+/**
+ * Normalize a path by trimming leading and trailing slashes.
+ * Returns empty string for undefined/null/empty input.
+ */
+export function normalizePath(path: string | undefined): string {
+  if (!path) return "";
+  return path.replace(/^\/+/, "").replace(/\/+$/, "");
+}
+```
+
+**Behavior:**
+- `normalizePath("prompts/coa/")` -> `"prompts/coa"`
+- `normalizePath("/src/templates")` -> `"src/templates"`
+- `normalizePath(undefined)` -> `""`
+- `normalizePath("")` -> `""`
+
+#### 2.3 `readLinks`
+
+```typescript
+/**
+ * Read the link registry from a container.
+ * Returns null if .repo-links.json does not exist.
+ */
+export async function readLinks(
+  blobClient: BlobClient,
+  container: string
+): Promise<RepoLinksRegistry | null> {
+  try {
+    const blob = await blobClient.getBlobContent(container, LINKS_BLOB);
+    const text = typeof blob.content === "string" ? blob.content : blob.content.toString("utf-8");
+    return JSON.parse(text) as RepoLinksRegistry;
+  } catch {
+    return null;
+  }
+}
+```
+
+#### 2.4 `writeLinks`
+
+```typescript
+/**
+ * Write the link registry to a container.
+ */
+export async function writeLinks(
+  blobClient: BlobClient,
+  container: string,
+  registry: RepoLinksRegistry
+): Promise<void> {
+  const content = JSON.stringify(registry, null, 2);
+  await blobClient.createBlob(container, LINKS_BLOB, content, "application/json");
+}
+```
+
+#### 2.5 `migrateOldMeta`
+
+```typescript
+/**
+ * Migrate .repo-sync-meta.json to .repo-links.json.
+ * Returns the new registry if migration occurred, null if no old metadata exists.
+ * Does NOT delete the old .repo-sync-meta.json (retained for safety).
+ */
+export async function migrateOldMeta(
+  blobClient: BlobClient,
+  container: string
+): Promise<RepoLinksRegistry | null> {
+  const oldMeta = await readSyncMeta(blobClient, container);
+  if (!oldMeta) return null;
+
+  const link: RepoLink = {
+    id: crypto.randomUUID(),
+    provider: oldMeta.provider,
+    repoUrl: oldMeta.repoUrl,
+    branch: oldMeta.branch,
+    repoSubPath: undefined,
+    targetPrefix: undefined,
+    lastSyncAt: oldMeta.lastSyncAt,
+    lastCommitSha: oldMeta.lastCommitSha,
+    fileShas: { ...oldMeta.fileShas },
+    createdAt: oldMeta.lastSyncAt, // best available timestamp
+  };
+
+  const registry: RepoLinksRegistry = { version: 1, links: [link] };
+  await writeLinks(blobClient, container, registry);
+  return registry;
+}
+```
+
+**Key decisions:**
+- Uses `crypto.randomUUID()` (Node.js built-in).
+- `createdAt` is set to `lastSyncAt` from the old metadata as the best available timestamp.
+- `fileShas` are copied as-is. Since the old format has no `targetPrefix` or `repoSubPath`, blob paths equal repo paths -- no transformation needed.
+
+#### 2.6 `resolveLinks`
+
+```typescript
+/**
+ * Read .repo-links.json, or auto-migrate from old format, or return empty registry.
+ * This is the primary entry point for all callers needing link data.
+ */
+export async function resolveLinks(
+  blobClient: BlobClient,
+  container: string
+): Promise<RepoLinksRegistry> {
+  // 1. Try reading .repo-links.json
+  const existing = await readLinks(blobClient, container);
+  if (existing) return existing;
+
+  // 2. Try auto-migrating from .repo-sync-meta.json
+  const migrated = await migrateOldMeta(blobClient, container);
+  if (migrated) return migrated;
+
+  // 3. No metadata at all -- return empty registry
+  return { version: 1, links: [] };
+}
+```
+
+#### 2.7 `detectExactConflict`
+
+```typescript
+/**
+ * Check if an exact prefix match already exists in the link list.
+ * Returns true if a link with the same normalized targetPrefix exists.
+ */
+export function detectExactConflict(
+  existingLinks: RepoLink[],
+  newPrefix: string | undefined
+): boolean {
+  const norm = normalizePath(newPrefix);
+  return existingLinks.some(
+    (link) => normalizePath(link.targetPrefix) === norm
+  );
+}
+```
+
+#### 2.8 `detectOverlap`
+
+```typescript
+/**
+ * Check for nested prefix overlap (one prefix is a sub-path of another).
+ * Returns a warning message if overlap is detected, null otherwise.
+ * Does NOT check for exact match (that is detectExactConflict).
+ */
+export function detectOverlap(
+  existingLinks: RepoLink[],
+  newPrefix: string | undefined
+): string | null {
+  const norm = normalizePath(newPrefix);
+  for (const link of existingLinks) {
+    const existing = normalizePath(link.targetPrefix);
+    // Skip exact match (handled by detectExactConflict)
+    if (norm === existing) continue;
+    if (norm.startsWith(existing + "/") || existing.startsWith(norm + "/")) {
+      return `Warning: prefix "${newPrefix ?? "(container root)"}" overlaps with existing link to ${link.repoUrl} at prefix "${link.targetPrefix ?? "(container root)"}"`;
+    }
+    // Special case: one is empty (container root) and the other is not
+    if ((norm === "" && existing !== "") || (norm !== "" && existing === "")) {
+      return `Warning: prefix "${newPrefix ?? "(container root)"}" overlaps with existing link to ${link.repoUrl} at prefix "${link.targetPrefix ?? "(container root)"}" (one covers the entire container)`;
+    }
+  }
+  return null;
+}
+```
+
+#### 2.9 `createLink`
+
+```typescript
+/**
+ * Add a new link to the container's link registry.
+ * Throws on exact prefix conflict. Returns warning on nested overlap.
+ *
+ * @param linkData - All fields except id, createdAt, fileShas (auto-generated)
+ * @returns The created RepoLink and an optional warning string
+ */
+export async function createLink(
+  blobClient: BlobClient,
+  container: string,
+  linkData: {
+    provider: "github" | "azure-devops";
+    repoUrl: string;
+    branch: string;
+    repoSubPath?: string;
+    targetPrefix?: string;
+  }
+): Promise<{ link: RepoLink; warning?: string }> {
+  const registry = await resolveLinks(blobClient, container);
+
+  // Check for exact prefix conflict
+  if (detectExactConflict(registry.links, linkData.targetPrefix)) {
+    const norm = normalizePath(linkData.targetPrefix);
+    throw new Error(
+      `A link already exists for prefix "${norm || "(container root)"}". Use "unlink" first or specify a different prefix.`
+    );
+  }
+
+  // Check for nested overlap (warning, not error)
+  const warning = detectOverlap(registry.links, linkData.targetPrefix);
+
+  const link: RepoLink = {
+    id: crypto.randomUUID(),
+    provider: linkData.provider,
+    repoUrl: linkData.repoUrl,
+    branch: linkData.branch,
+    repoSubPath: linkData.repoSubPath ? normalizePath(linkData.repoSubPath) : undefined,
+    targetPrefix: linkData.targetPrefix ? normalizePath(linkData.targetPrefix) : undefined,
+    lastSyncAt: undefined,
+    lastCommitSha: undefined,
+    fileShas: {},
+    createdAt: new Date().toISOString(),
+  };
+
+  registry.links.push(link);
+  await writeLinks(blobClient, container, registry);
+
+  return { link, warning: warning ?? undefined };
+}
+```
+
+#### 2.10 `removeLink`
+
+```typescript
+/**
+ * Remove a link by ID from the container's link registry.
+ * Returns true if the link was found and removed, false otherwise.
+ */
+export async function removeLink(
+  blobClient: BlobClient,
+  container: string,
+  linkId: string
+): Promise<boolean> {
+  const registry = await resolveLinks(blobClient, container);
+  const before = registry.links.length;
+  registry.links = registry.links.filter((l) => l.id !== linkId);
+
+  if (registry.links.length === before) return false;
+
+  await writeLinks(blobClient, container, registry);
+  return true;
+}
+```
+
+#### 2.11 `findLinkByPrefix`
+
+```typescript
+/**
+ * Find a link by its normalized target prefix.
+ * Returns the link if exactly one match is found.
+ * Throws if ambiguous (multiple matches) or not found.
+ */
+export function findLinkByPrefix(
+  links: RepoLink[],
+  prefix: string | undefined
+): RepoLink {
+  const norm = normalizePath(prefix);
+  const matches = links.filter((l) => normalizePath(l.targetPrefix) === norm);
+
+  if (matches.length === 0) {
+    throw new Error(`No link found for prefix "${norm || "(container root)"}".`);
+  }
+  if (matches.length > 1) {
+    throw new Error(
+      `Multiple links found for prefix "${norm || "(container root)"}". Use --link-id to specify.`
+    );
+  }
+  return matches[0];
+}
+```
+
+---
+
+### 3. Path Mapping Logic in `src/core/sync-engine.ts`
+
+#### 3.1 `filterByRepoSubPath`
+
+```typescript
+/**
+ * Filter a list of repo file entries to include only files under the given sub-path.
+ * If repoSubPath is undefined/empty, returns all files.
+ */
+export function filterByRepoSubPath(
+  files: RepoFileEntry[],
+  repoSubPath?: string
+): RepoFileEntry[] {
+  const norm = normalizePath(repoSubPath);
+  if (!norm) return files;
+  const prefix = norm + "/";
+  return files.filter((f) => f.path === norm || f.path.startsWith(prefix));
+}
+```
+
+#### 3.2 `mapToTargetPaths`
+
+```typescript
+/**
+ * Map filtered repo files to their target blob paths.
+ * Strips repoSubPath prefix and prepends targetPrefix.
+ *
+ * Identity transform when both repoSubPath and targetPrefix are undefined.
+ */
+export function mapToTargetPaths(
+  files: RepoFileEntry[],
+  repoSubPath?: string,
+  targetPrefix?: string
+): MappedFileEntry[] {
+  const normRepo = normalizePath(repoSubPath);
+  const normTarget = normalizePath(targetPrefix);
+  const stripPrefix = normRepo ? normRepo + "/" : "";
+
+  return files.map((file) => {
+    // Compute relative path by stripping the repo sub-path prefix
+    const relativePath = stripPrefix && file.path.startsWith(stripPrefix)
+      ? file.path.slice(stripPrefix.length)
+      : file.path;
+
+    // Compute blob path by prepending the target prefix
+    const blobPath = normTarget
+      ? normTarget + "/" + relativePath
+      : relativePath;
+
+    return {
+      repoPath: file.path,
+      blobPath,
+      sha: file.sha,
+    };
+  });
+}
+```
+
+**Path mapping examples:**
+
+| `repoSubPath` | `targetPrefix` | Repo file path | Blob path |
+|---|---|---|---|
+| `undefined` | `undefined` | `src/templates/extract.json` | `src/templates/extract.json` |
+| `"src/templates"` | `undefined` | `src/templates/extract.json` | `extract.json` |
+| `undefined` | `"prompts/coa"` | `src/templates/extract.json` | `prompts/coa/src/templates/extract.json` |
+| `"src/templates"` | `"prompts/coa"` | `src/templates/extract.json` | `prompts/coa/extract.json` |
+| `"src/templates"` | `"prompts/coa"` | `README.md` | Excluded by filterByRepoSubPath |
+
+---
+
+### 4. Refactored `cloneRepo` and `syncRepo` Signatures
+
+#### 4.1 `cloneRepo` -- New Signature
+
+**Current signature (line 33 of sync-engine.ts):**
+```typescript
+export async function cloneRepo(
+  blobClient: BlobClient,
+  container: string,
+  provider: RepoProvider,
+  meta: Omit<RepoSyncMeta, "lastSyncAt" | "fileShas">,
+  onProgress?: (msg: string) => void
+): Promise<SyncResult>
+```
+
+**New signature:**
+```typescript
+/**
+ * Clone a repository (or sub-path) into a container (or container prefix).
+ * The caller is responsible for writing the updated link back to the registry.
+ *
+ * @param link - The RepoLink describing what to clone and where. Updated in-place
+ *               with lastSyncAt, lastCommitSha, and fileShas on success.
+ * @returns SyncResult with upload/error counts
+ */
+export async function cloneRepo(
+  blobClient: BlobClient,
+  container: string,
+  provider: RepoProvider,
+  link: RepoLink,
+  onProgress?: (msg: string) => void
+): Promise<SyncResult>
+```
+
+**Internal changes:**
+1. After `provider.listFiles()`, apply `filterByRepoSubPath(remoteFiles, link.repoSubPath)`.
+2. Apply `mapToTargetPaths(filteredFiles, link.repoSubPath, link.targetPrefix)`.
+3. In the `processInBatches` callback:
+   - Use `mappedFile.repoPath` for `provider.downloadFile(mappedFile.repoPath)`.
+   - Use `mappedFile.blobPath` for `blobClient.createBlob(container, mappedFile.blobPath, ...)`.
+   - Store `fileShas[mappedFile.blobPath] = mappedFile.sha`.
+4. After completion, update `link` in-place:
+   - `link.lastSyncAt = new Date().toISOString()`
+   - `link.fileShas = fileShas`
+5. Do NOT write `.repo-sync-meta.json`. Do NOT write `.repo-links.json` (caller does this).
+6. Return `SyncResult` as before.
+
+**Full implementation:**
+
+```typescript
+export async function cloneRepo(
+  blobClient: BlobClient,
+  container: string,
+  provider: RepoProvider,
+  link: RepoLink,
+  onProgress?: (msg: string) => void
+): Promise<SyncResult> {
+  const result: SyncResult = { uploaded: [], deleted: [], skipped: [], errors: [] };
+
+  onProgress?.("Listing remote files...");
+  const remoteFiles = await provider.listFiles();
+  onProgress?.(`Found ${remoteFiles.length} files in repository.`);
+
+  // Apply path filtering and mapping
+  const filtered = filterByRepoSubPath(remoteFiles, link.repoSubPath);
+  const mapped = mapToTargetPaths(filtered, link.repoSubPath, link.targetPrefix);
+  onProgress?.(`${mapped.length} files match after filtering.`);
+
+  const fileShas: Record<string, string> = {};
+
+  await processInBatches(mapped, BATCH_CONCURRENCY, async (entry) => {
+    try {
+      const content = await provider.downloadFile(entry.repoPath);
+      const contentType = inferContentType(entry.blobPath);
+      await blobClient.createBlob(container, entry.blobPath, content, contentType);
+      fileShas[entry.blobPath] = entry.sha;
+      result.uploaded.push(entry.blobPath);
+      onProgress?.(`Uploaded: ${entry.blobPath}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      result.errors.push(`${entry.blobPath}: ${msg}`);
+      onProgress?.(`Error: ${entry.blobPath} -- ${msg}`);
+    }
+  });
+
+  // Update the link in-place (caller writes it to the registry)
+  link.lastSyncAt = new Date().toISOString();
+  link.fileShas = fileShas;
+
+  return result;
+}
+```
+
+#### 4.2 `syncRepo` -- New Signature
+
+**Current signature (line 77 of sync-engine.ts):**
+```typescript
+export async function syncRepo(
+  blobClient: BlobClient,
+  container: string,
+  provider: RepoProvider,
+  dryRun: boolean = false,
+  onProgress?: (msg: string) => void
+): Promise<SyncResult>
+```
+
+**New signature:**
+```typescript
+/**
+ * Sync a previously cloned link with its remote repository.
+ * The caller provides the RepoLink (instead of this function reading meta internally).
+ * The link is updated in-place with new lastSyncAt, lastCommitSha, and fileShas.
+ * The caller is responsible for writing the updated link back to the registry.
+ *
+ * @param link - The RepoLink to sync. Updated in-place on success.
+ * @returns SyncResult with upload/delete/skip/error counts
+ */
+export async function syncRepo(
+  blobClient: BlobClient,
+  container: string,
+  provider: RepoProvider,
+  link: RepoLink,
+  dryRun: boolean = false,
+  onProgress?: (msg: string) => void
+): Promise<SyncResult>
+```
+
+**Internal changes:**
+1. Remove the internal `readSyncMeta()` call. Use `link.fileShas` as `oldShas`.
+2. After `provider.listFiles()`, apply `filterByRepoSubPath()` and `mapToTargetPaths()`.
+3. Compare `mappedFile.blobPath` keys against `link.fileShas` for change detection.
+4. Use `mappedFile.repoPath` for `provider.downloadFile()`.
+5. Use `mappedFile.blobPath` for `blobClient.createBlob()` and `blobClient.deleteBlob()`.
+6. After completion, update `link` in-place:
+   - `link.lastSyncAt = new Date().toISOString()`
+   - `link.fileShas = newShas`
+7. Do NOT write any metadata blobs (caller does this).
+
+**Full implementation:**
+
+```typescript
+export async function syncRepo(
+  blobClient: BlobClient,
+  container: string,
+  provider: RepoProvider,
+  link: RepoLink,
+  dryRun: boolean = false,
+  onProgress?: (msg: string) => void
+): Promise<SyncResult> {
+  const result: SyncResult = { uploaded: [], deleted: [], skipped: [], errors: [] };
+
+  onProgress?.("Listing remote files...");
+  const remoteFiles = await provider.listFiles();
+  onProgress?.(`Found ${remoteFiles.length} files in repository.`);
+
+  // Apply path filtering and mapping
+  const filtered = filterByRepoSubPath(remoteFiles, link.repoSubPath);
+  const mapped = mapToTargetPaths(filtered, link.repoSubPath, link.targetPrefix);
+  onProgress?.(`${mapped.length} files match after filtering.`);
+
+  const oldShas = link.fileShas;
+  const newShas: Record<string, string> = {};
+
+  // Determine what changed
+  const toUpload: MappedFileEntry[] = [];
+  const remoteBlobPathSet = new Set<string>();
+
+  for (const entry of mapped) {
+    remoteBlobPathSet.add(entry.blobPath);
+    if (oldShas[entry.blobPath] !== entry.sha) {
+      toUpload.push(entry);
+    } else {
+      result.skipped.push(entry.blobPath);
+      newShas[entry.blobPath] = entry.sha;
+    }
+  }
+
+  // Files that were in the old sync but are no longer in the remote set
+  const toDelete: string[] = [];
+  for (const oldBlobPath of Object.keys(oldShas)) {
+    if (!remoteBlobPathSet.has(oldBlobPath)) {
+      toDelete.push(oldBlobPath);
+    }
+  }
+
+  onProgress?.(`Changes: ${toUpload.length} to upload, ${toDelete.length} to delete, ${result.skipped.length} unchanged.`);
+
+  if (dryRun) {
+    result.uploaded = toUpload.map((e) => e.blobPath);
+    result.deleted = toDelete;
+    return result;
+  }
+
+  // Upload changed/new files
+  await processInBatches(toUpload, BATCH_CONCURRENCY, async (entry) => {
+    try {
+      const content = await provider.downloadFile(entry.repoPath);
+      const contentType = inferContentType(entry.blobPath);
+      await blobClient.createBlob(container, entry.blobPath, content, contentType);
+      newShas[entry.blobPath] = entry.sha;
+      result.uploaded.push(entry.blobPath);
+      onProgress?.(`Uploaded: ${entry.blobPath}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      result.errors.push(`${entry.blobPath}: ${msg}`);
+    }
+  });
+
+  // Delete removed files
+  for (const blobPath of toDelete) {
+    try {
+      await blobClient.deleteBlob(container, blobPath);
+      result.deleted.push(blobPath);
+      onProgress?.(`Deleted: ${blobPath}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      result.errors.push(`delete ${blobPath}: ${msg}`);
+    }
+  }
+
+  // Update link in-place (caller writes registry)
+  link.lastSyncAt = new Date().toISOString();
+  link.fileShas = newShas;
+
+  return result;
+}
+```
+
+#### 4.3 Backward Compatibility Guarantee
+
+When `link.targetPrefix` is `undefined` and `link.repoSubPath` is `undefined`:
+- `filterByRepoSubPath()` returns all files (identity).
+- `mapToTargetPaths()` maps `blobPath = repoPath` for every file (identity).
+- All existing behavior is preserved exactly.
+
+---
+
+### 5. New CLI Commands in `src/cli/commands/repo-sync.ts`
+
+#### 5.1 New Imports
+
+Add to the existing import block:
+
+```typescript
+import {
+  cloneRepo, syncRepo, readSyncMeta,
+  resolveLinks, writeLinks, createLink, removeLink, findLinkByPrefix,
+  normalizePath
+} from "../../core/sync-engine.js";
+import type { RepoLink, RepoLinksRegistry } from "../../core/types.js";
+```
+
+#### 5.2 `linkGitHub`
+
+```typescript
+export async function linkGitHub(
+  repoUrl: string,
+  container: string,
+  storageOpts: StorageOpts,
+  opts: {
+    prefix?: string;
+    repoPath?: string;
+    branch?: string;
+  },
+  patOpts: PatOpts = {}
+): Promise<void> {
+  const { store, entry } = await resolveStorageEntry(storageOpts);
+  const pat = await resolvePatToken(store, "github", patOpts);
+  const { owner, repo } = GitHubClient.parseRepoUrl(repoUrl);
+  const client = new GitHubClient(pat);
+  const blobClient = new BlobClient(entry);
+
+  // Validate repo access and resolve branch
+  const targetBranch = opts.branch ?? await client.getDefaultBranch(owner, repo);
+  console.log(`Validating access to github.com/${owner}/${repo} (branch: ${targetBranch})...`);
+
+  // Validate by listing files (also confirms branch exists)
+  await client.listFiles(owner, repo, targetBranch);
+  console.log("Repository validated.");
+
+  // Create the link
+  const { link, warning } = await createLink(blobClient, container, {
+    provider: "github",
+    repoUrl,
+    branch: targetBranch,
+    repoSubPath: opts.repoPath,
+    targetPrefix: opts.prefix,
+  });
+
+  if (warning) console.error(`\n${warning}\n`);
+
+  console.log(`Link created successfully.`);
+  console.log(`  Link ID:        ${link.id}`);
+  console.log(`  Repository:     ${repoUrl}`);
+  console.log(`  Branch:         ${targetBranch}`);
+  console.log(`  Repo sub-path:  ${link.repoSubPath ?? "(entire repo)"}`);
+  console.log(`  Target prefix:  ${link.targetPrefix ?? "(container root)"}`);
+  console.log(`\nUse "sync --container ${container} --link-id ${link.id}" to download files.`);
+}
+```
+
+#### 5.3 `linkDevOps`
+
+```typescript
+export async function linkDevOps(
+  repoUrl: string,
+  container: string,
+  storageOpts: StorageOpts,
+  opts: {
+    prefix?: string;
+    repoPath?: string;
+    branch?: string;
+  },
+  patOpts: PatOpts = {}
+): Promise<void> {
+  const { store, entry } = await resolveStorageEntry(storageOpts);
+  const pat = await resolvePatToken(store, "azure-devops", patOpts);
+  const { org, project, repo } = DevOpsClient.parseRepoUrl(repoUrl);
+  const client = new DevOpsClient(pat, org);
+  const blobClient = new BlobClient(entry);
+
+  const targetBranch = opts.branch ?? await client.getDefaultBranch(project, repo);
+  console.log(`Validating access to ${org}/${project}/${repo} (branch: ${targetBranch})...`);
+
+  await client.listFiles(project, repo, targetBranch);
+  console.log("Repository validated.");
+
+  const { link, warning } = await createLink(blobClient, container, {
+    provider: "azure-devops",
+    repoUrl,
+    branch: targetBranch,
+    repoSubPath: opts.repoPath,
+    targetPrefix: opts.prefix,
+  });
+
+  if (warning) console.error(`\n${warning}\n`);
+
+  console.log(`Link created successfully.`);
+  console.log(`  Link ID:        ${link.id}`);
+  console.log(`  Repository:     ${repoUrl}`);
+  console.log(`  Branch:         ${targetBranch}`);
+  console.log(`  Repo sub-path:  ${link.repoSubPath ?? "(entire repo)"}`);
+  console.log(`  Target prefix:  ${link.targetPrefix ?? "(container root)"}`);
+  console.log(`\nUse "sync --container ${container} --link-id ${link.id}" to download files.`);
+}
+```
+
+#### 5.4 `unlinkContainer`
+
+```typescript
+export async function unlinkContainer(
+  container: string,
+  storageOpts: StorageOpts,
+  opts: {
+    prefix?: string;
+    linkId?: string;
+  }
+): Promise<void> {
+  const { entry } = await resolveStorageEntry(storageOpts);
+  const blobClient = new BlobClient(entry);
+  const registry = await resolveLinks(blobClient, container);
+
+  if (registry.links.length === 0) {
+    console.error(`Container '${container}' has no repository links.`);
+    process.exit(1);
+  }
+
+  let targetLink: RepoLink;
+
+  if (opts.linkId) {
+    // Find by ID
+    const found = registry.links.find((l) => l.id === opts.linkId);
+    if (!found) {
+      console.error(`Link ID '${opts.linkId}' not found in container '${container}'.`);
+      process.exit(1);
+    }
+    targetLink = found;
+  } else if (opts.prefix !== undefined) {
+    // Find by prefix
+    targetLink = findLinkByPrefix(registry.links, opts.prefix);
+  } else if (registry.links.length === 1) {
+    // Single link, no qualifier needed
+    targetLink = registry.links[0];
+  } else {
+    // Multiple links, no qualifier -- error with guidance
+    console.error(`Container '${container}' has ${registry.links.length} links. Specify --prefix or --link-id:`);
+    for (const l of registry.links) {
+      console.error(`  ${l.id}  ${l.targetPrefix ?? "(root)"}  ${l.repoUrl}`);
+    }
+    process.exit(1);
+  }
+
+  const removed = await removeLink(blobClient, container, targetLink.id);
+  if (removed) {
+    console.log(`Link removed: ${targetLink.repoUrl} at prefix "${targetLink.targetPrefix ?? "(container root)"}"`);
+    console.log("Synced files were NOT deleted.");
+  } else {
+    console.error("Failed to remove link.");
+    process.exit(1);
+  }
+}
+```
+
+#### 5.5 `listLinks`
+
+```typescript
+export async function listLinks(
+  container: string,
+  storageOpts: StorageOpts
+): Promise<void> {
+  const { entry } = await resolveStorageEntry(storageOpts);
+  const blobClient = new BlobClient(entry);
+  const registry = await resolveLinks(blobClient, container);
+
+  if (registry.links.length === 0) {
+    console.log("No repository links found.");
+    return;
+  }
+
+  console.log(`Repository links for container '${container}':\n`);
+  console.log(
+    "ID".padEnd(38) +
+    "Provider".padEnd(14) +
+    "Repository".padEnd(50) +
+    "Branch".padEnd(16) +
+    "Repo Sub-Path".padEnd(24) +
+    "Target Prefix".padEnd(24) +
+    "Last Sync"
+  );
+  console.log("-".repeat(180));
+
+  for (const l of registry.links) {
+    console.log(
+      l.id.padEnd(38) +
+      l.provider.padEnd(14) +
+      l.repoUrl.substring(0, 48).padEnd(50) +
+      l.branch.padEnd(16) +
+      (l.repoSubPath ?? "(all)").padEnd(24) +
+      (l.targetPrefix ?? "(root)").padEnd(24) +
+      (l.lastSyncAt ? new Date(l.lastSyncAt).toLocaleString() : "never")
+    );
+  }
+}
+```
+
+#### 5.6 Modified `cloneGitHub` -- New Signature
+
+```typescript
+export async function cloneGitHub(
+  repoUrl: string,
+  container: string,
+  storageOpts: StorageOpts,
+  branch?: string,
+  patOpts: PatOpts = {},
+  opts: { prefix?: string; repoPath?: string } = {}
+): Promise<void> {
+  const { store, entry } = await resolveStorageEntry(storageOpts);
+  const pat = await resolvePatToken(store, "github", patOpts);
+  const { owner, repo } = GitHubClient.parseRepoUrl(repoUrl);
+  const client = new GitHubClient(pat);
+  const blobClient = new BlobClient(entry);
+
+  const targetBranch = branch ?? await client.getDefaultBranch(owner, repo);
+  const prefixLabel = opts.prefix ? ` into prefix "${opts.prefix}"` : "";
+  console.log(`Cloning github.com/${owner}/${repo} (branch: ${targetBranch})${prefixLabel} into container '${container}'...\n`);
+
+  const provider: RepoProvider = {
+    listFiles: () => client.listFiles(owner, repo, targetBranch),
+    downloadFile: (path) => client.downloadFile(owner, repo, path, targetBranch),
+  };
+
+  // Create a link entry first
+  const { link, warning } = await createLink(blobClient, container, {
+    provider: "github",
+    repoUrl,
+    branch: targetBranch,
+    repoSubPath: opts.repoPath,
+    targetPrefix: opts.prefix,
+  });
+
+  if (warning) console.error(`${warning}\n`);
+
+  // Clone using the link
+  const result = await cloneRepo(blobClient, container, provider, link, (msg) => console.log(`  ${msg}`));
+
+  // Write updated link back to registry
+  const registry = await resolveLinks(blobClient, container);
+  const idx = registry.links.findIndex((l) => l.id === link.id);
+  if (idx >= 0) registry.links[idx] = link;
+  await writeLinks(blobClient, container, registry);
+
+  console.log(`\nDone. Uploaded: ${result.uploaded.length}, Errors: ${result.errors.length}`);
+  if (result.errors.length > 0) {
+    console.error("\nErrors:");
+    for (const e of result.errors) console.error(`  ${e}`);
+  }
+}
+```
+
+#### 5.7 Modified `cloneDevOps` -- New Signature
+
+Same pattern as `cloneGitHub` but using `DevOpsClient`. The signature adds the same `opts: { prefix?: string; repoPath?: string } = {}` parameter.
+
+#### 5.8 Modified `syncContainer` -- New Signature
+
+```typescript
+export async function syncContainer(
+  container: string,
+  storageOpts: StorageOpts,
+  dryRun: boolean = false,
+  patOpts: PatOpts = {},
+  opts: { prefix?: string; linkId?: string; all?: boolean } = {}
+): Promise<void> {
+  const { store, entry } = await resolveStorageEntry(storageOpts);
+  const blobClient = new BlobClient(entry);
+  const registry = await resolveLinks(blobClient, container);
+
+  if (registry.links.length === 0) {
+    console.error(`Container '${container}' has no repository links.`);
+    process.exit(1);
+  }
+
+  // Determine which links to sync
+  let linksToSync: RepoLink[];
+
+  if (opts.all) {
+    linksToSync = registry.links;
+  } else if (opts.linkId) {
+    const found = registry.links.find((l) => l.id === opts.linkId);
+    if (!found) {
+      console.error(`Link ID '${opts.linkId}' not found.`);
+      process.exit(1);
+    }
+    linksToSync = [found];
+  } else if (opts.prefix !== undefined) {
+    linksToSync = [findLinkByPrefix(registry.links, opts.prefix)];
+  } else if (registry.links.length === 1) {
+    linksToSync = [registry.links[0]];
+  } else {
+    console.error(`Container '${container}' has ${registry.links.length} links. Specify --prefix, --link-id, or --all:`);
+    for (const l of registry.links) {
+      console.error(`  ${l.id}  ${l.targetPrefix ?? "(root)"}  ${l.repoUrl}`);
+    }
+    process.exit(1);
+  }
+
+  // Sync each link sequentially
+  for (const link of linksToSync) {
+    const pat = await resolvePatToken(store, link.provider, patOpts);
+
+    let provider: RepoProvider;
+    if (link.provider === "github") {
+      const { owner, repo } = GitHubClient.parseRepoUrl(link.repoUrl);
+      const client = new GitHubClient(pat);
+      provider = {
+        listFiles: () => client.listFiles(owner, repo, link.branch),
+        downloadFile: (path) => client.downloadFile(owner, repo, path, link.branch),
+      };
+    } else {
+      const { org, project, repo } = DevOpsClient.parseRepoUrl(link.repoUrl);
+      const client = new DevOpsClient(pat, org);
+      provider = {
+        listFiles: () => client.listFiles(project, repo, link.branch),
+        downloadFile: (path) => client.downloadFile(project, repo, path, link.branch),
+      };
+    }
+
+    console.log(`\nSyncing link: ${link.repoUrl} (branch: ${link.branch}) -> prefix "${link.targetPrefix ?? "(root)"}"`);
+    if (link.lastSyncAt) console.log(`  Last sync: ${link.lastSyncAt}`);
+    if (dryRun) console.log("  (Dry run -- no changes will be made)");
+
+    const result = await syncRepo(blobClient, container, provider, link, dryRun, (msg) => console.log(`  ${msg}`));
+
+    // Write updated link back to registry after each sync
+    if (!dryRun) {
+      const idx = registry.links.findIndex((l) => l.id === link.id);
+      if (idx >= 0) registry.links[idx] = link;
+      await writeLinks(blobClient, container, registry);
+    }
+
+    console.log(`  Uploaded: ${result.uploaded.length}, Deleted: ${result.deleted.length}, Skipped: ${result.skipped.length}, Errors: ${result.errors.length}`);
+    if (result.errors.length > 0) {
+      console.error("  Errors:");
+      for (const e of result.errors) console.error(`    ${e}`);
+    }
+  }
+}
+```
+
+---
+
+### 6. CLI Command Registration in `src/cli/index.ts`
+
+#### 6.1 Updated Import
+
+```typescript
+import {
+  cloneGitHub, cloneDevOps, syncContainer,
+  linkGitHub, linkDevOps, unlinkContainer, listLinks
+} from "./commands/repo-sync.js";
+```
+
+#### 6.2 New Commands
+
+Add after the existing `sync` command registration (after line 242):
+
+```typescript
+// Link GitHub repo
+program
+  .command("link-github")
+  .description("Link a container/folder to a GitHub repository (metadata only, no download)")
+  .requiredOption("--repo <url>", "GitHub repository URL")
+  .requiredOption("--container <name>", "Target container")
+  .option("--prefix <path>", "Target folder prefix within container")
+  .option("--repo-path <path>", "Sub-path within the repo to sync")
+  .option("--branch <branch>", "Branch (default: repo default branch)")
+  .option("--storage <name>", "Storage account name")
+  .option("--token-name <name>", "PAT token name")
+  .option("--pat <token>", "GitHub PAT (inline)")
+  .option("--account-key <key>", "Account key (inline)")
+  .option("--sas-token <token>", "SAS token (inline)")
+  .option("--account <account>", "Azure Storage account name")
+  .action(async (opts) => {
+    await linkGitHub(
+      opts.repo, opts.container,
+      { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account },
+      { prefix: opts.prefix, repoPath: opts.repoPath, branch: opts.branch },
+      { pat: opts.pat, tokenName: opts.tokenName }
+    );
+  });
+
+// Link Azure DevOps repo
+program
+  .command("link-devops")
+  .description("Link a container/folder to an Azure DevOps repository (metadata only, no download)")
+  .requiredOption("--repo <url>", "Azure DevOps repository URL")
+  .requiredOption("--container <name>", "Target container")
+  .option("--prefix <path>", "Target folder prefix within container")
+  .option("--repo-path <path>", "Sub-path within the repo to sync")
+  .option("--branch <branch>", "Branch (default: repo default branch)")
+  .option("--storage <name>", "Storage account name")
+  .option("--token-name <name>", "PAT token name")
+  .option("--pat <token>", "Azure DevOps PAT (inline)")
+  .option("--account-key <key>", "Account key (inline)")
+  .option("--sas-token <token>", "SAS token (inline)")
+  .option("--account <account>", "Azure Storage account name")
+  .action(async (opts) => {
+    await linkDevOps(
+      opts.repo, opts.container,
+      { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account },
+      { prefix: opts.prefix, repoPath: opts.repoPath, branch: opts.branch },
+      { pat: opts.pat, tokenName: opts.tokenName }
+    );
+  });
+
+// Unlink repository
+program
+  .command("unlink")
+  .description("Remove a repository link from a container (files are NOT deleted)")
+  .requiredOption("--container <name>", "Container name")
+  .option("--prefix <path>", "Folder prefix to unlink")
+  .option("--link-id <id>", "Link ID to unlink")
+  .option("--storage <name>", "Storage account name")
+  .option("--account-key <key>", "Account key (inline)")
+  .option("--sas-token <token>", "SAS token (inline)")
+  .option("--account <account>", "Azure Storage account name")
+  .action(async (opts) => {
+    await unlinkContainer(
+      opts.container,
+      { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account },
+      { prefix: opts.prefix, linkId: opts.linkId }
+    );
+  });
+
+// List repository links
+program
+  .command("list-links")
+  .description("List all repository links in a container")
+  .requiredOption("--container <name>", "Container name")
+  .option("--storage <name>", "Storage account name")
+  .option("--account-key <key>", "Account key (inline)")
+  .option("--sas-token <token>", "SAS token (inline)")
+  .option("--account <account>", "Azure Storage account name")
+  .action(async (opts) => {
+    await listLinks(
+      opts.container,
+      { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }
+    );
+  });
+```
+
+#### 6.3 Modified Existing Commands
+
+**`clone-github`** -- add two options before `.action()`:
+```typescript
+  .option("--prefix <path>", "Target folder prefix within container")
+  .option("--repo-path <path>", "Sub-path within the repo to sync")
+```
+
+Update `.action()`:
+```typescript
+  .action(async (opts) => {
+    await cloneGitHub(
+      opts.repo, opts.container,
+      { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account },
+      opts.branch,
+      { pat: opts.pat, tokenName: opts.tokenName },
+      { prefix: opts.prefix, repoPath: opts.repoPath }
+    );
+  });
+```
+
+**`clone-devops`** -- same additions.
+
+**`sync`** -- add three options before `.action()`:
+```typescript
+  .option("--prefix <path>", "Sync only the link at this prefix")
+  .option("--link-id <id>", "Sync a specific link by ID")
+  .option("--all", "Sync all links in the container")
+```
+
+Update `.action()`:
+```typescript
+  .action(async (opts) => {
+    await syncContainer(
+      opts.container,
+      { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account },
+      opts.dryRun ?? false,
+      { pat: opts.pat, tokenName: opts.tokenName },
+      { prefix: opts.prefix, linkId: opts.linkId, all: opts.all }
+    );
+  });
+```
+
+---
+
+### 7. API Endpoint Contracts in `src/electron/server.ts`
+
+#### 7.1 New Import
+
+Add to the import from `sync-engine.js`:
+
+```typescript
+import {
+  readSyncMeta, syncRepo,
+  resolveLinks, writeLinks, createLink, removeLink, findLinkByPrefix
+} from "../core/sync-engine.js";
+import type { RepoProvider } from "../core/sync-engine.js";
+import type { RepoLink } from "../core/types.js";
+```
+
+#### 7.2 Helper: `buildProviderForLink`
+
+```typescript
+/**
+ * Construct a RepoProvider for a given link using stored PAT tokens.
+ * Throws if no PAT is configured for the link's provider.
+ */
+function buildProviderForLink(
+  store: CredentialStore,
+  link: RepoLink
+): RepoProvider {
+  const pat = store.getTokenByProvider(link.provider);
+  if (!pat) {
+    throw new Error(`No ${link.provider} token configured. Add one via CLI: add-token --provider ${link.provider} --token <token> --name <name>`);
+  }
+
+  if (link.provider === "github") {
+    const { owner, repo } = GitHubClient.parseRepoUrl(link.repoUrl);
+    const client = new GitHubClient(pat.token);
+    return {
+      listFiles: () => client.listFiles(owner, repo, link.branch),
+      downloadFile: (path) => client.downloadFile(owner, repo, path, link.branch),
+    };
+  } else {
+    const { org, project, repo } = DevOpsClient.parseRepoUrl(link.repoUrl);
+    const client = new DevOpsClient(pat.token, org);
+    return {
+      listFiles: () => client.listFiles(project, repo, link.branch),
+      downloadFile: (path) => client.downloadFile(project, repo, path, link.branch),
+    };
+  }
+}
+```
+
+#### 7.3 `GET /api/links/:storage/:container`
+
+**Purpose:** List all repository links in a container.
+
+**Response:** `RepoLink[]` (the `links` array from the registry)
+
+```typescript
+app.get("/api/links/:storage/:container", async (req, res) => {
+  try {
+    const store = new CredentialStore();
+    const entry = store.getStorage(req.params.storage);
+    if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
+    const blobClient = new BlobClient(entry);
+    const registry = await resolveLinks(blobClient, req.params.container);
+    res.json(registry.links);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: msg });
+  }
+});
+```
+
+#### 7.4 `POST /api/links/:storage/:container`
+
+**Purpose:** Create a new repository link.
+
+**Request body:**
+```json
+{
+  "provider": "github" | "azure-devops",
+  "repoUrl": "string",
+  "branch": "string (optional -- will be resolved to default if omitted)",
+  "repoSubPath": "string (optional)",
+  "targetPrefix": "string (optional)"
+}
+```
+
+**Response (201):**
+```json
+{
+  "link": { /* RepoLink object */ },
+  "warning": "string or undefined"
+}
+```
+
+**Response (400):** `{ "error": "A link already exists for prefix ..." }`
+
+```typescript
+app.post("/api/links/:storage/:container", async (req, res) => {
+  try {
+    const store = new CredentialStore();
+    const entry = store.getStorage(req.params.storage);
+    if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
+
+    const { provider, repoUrl, branch, repoSubPath, targetPrefix } = req.body;
+    if (!provider || !repoUrl) {
+      res.status(400).json({ error: "provider and repoUrl are required" });
+      return;
+    }
+
+    // Resolve branch if not provided
+    let resolvedBranch = branch;
+    if (!resolvedBranch) {
+      const pat = store.getTokenByProvider(provider);
+      if (!pat) { res.status(400).json({ error: `No ${provider} token configured` }); return; }
+      if (provider === "github") {
+        const { owner, repo } = GitHubClient.parseRepoUrl(repoUrl);
+        const client = new GitHubClient(pat.token);
+        resolvedBranch = await client.getDefaultBranch(owner, repo);
+      } else {
+        const { org, project, repo } = DevOpsClient.parseRepoUrl(repoUrl);
+        const client = new DevOpsClient(pat.token, org);
+        resolvedBranch = await client.getDefaultBranch(project, repo);
+      }
+    }
+
+    const blobClient = new BlobClient(entry);
+    const result = await createLink(blobClient, req.params.container, {
+      provider,
+      repoUrl,
+      branch: resolvedBranch,
+      repoSubPath,
+      targetPrefix,
+    });
+
+    res.status(201).json(result);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const status = msg.includes("already exists") ? 400 : 500;
+    res.status(status).json({ error: msg });
+  }
+});
+```
+
+#### 7.5 `DELETE /api/links/:storage/:container/:linkId`
+
+**Purpose:** Remove a link by ID.
+
+**Response (200):** `{ "success": true }`
+**Response (404):** `{ "error": "Link not found" }`
+
+```typescript
+app.delete("/api/links/:storage/:container/:linkId", async (req, res) => {
+  try {
+    const store = new CredentialStore();
+    const entry = store.getStorage(req.params.storage);
+    if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
+    const blobClient = new BlobClient(entry);
+    const removed = await removeLink(blobClient, req.params.container, req.params.linkId);
+    if (removed) {
+      res.json({ success: true });
+    } else {
+      res.status(404).json({ error: "Link not found" });
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: msg });
+  }
+});
+```
+
+#### 7.6 `POST /api/sync/:storage/:container/:linkId`
+
+**Purpose:** Sync a specific link.
+
+**Query params:** `?dryRun=true` (optional)
+
+**Response (200):** `SyncResult` object
+
+```typescript
+app.post("/api/sync/:storage/:container/:linkId", async (req, res) => {
+  try {
+    const store = new CredentialStore();
+    const entry = store.getStorage(req.params.storage);
+    if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
+    const blobClient = new BlobClient(entry);
+
+    const registry = await resolveLinks(blobClient, req.params.container);
+    const link = registry.links.find((l) => l.id === req.params.linkId);
+    if (!link) { res.status(404).json({ error: "Link not found" }); return; }
+
+    const provider = buildProviderForLink(store, link);
+    const dryRun = req.query.dryRun === "true";
+
+    const result = await syncRepo(blobClient, req.params.container, provider, link, dryRun);
+
+    // Write updated link back to registry
+    if (!dryRun) {
+      const idx = registry.links.findIndex((l) => l.id === link.id);
+      if (idx >= 0) registry.links[idx] = link;
+      await writeLinks(blobClient, req.params.container, registry);
+    }
+
+    res.json(result);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: msg });
+  }
+});
+```
+
+#### 7.7 `POST /api/sync-all/:storage/:container`
+
+**Purpose:** Sync all links in a container sequentially.
+
+**Response (200):**
+```json
+{
+  "results": [
+    { "linkId": "uuid", "targetPrefix": "...", "result": { /* SyncResult */ } },
+    { "linkId": "uuid", "targetPrefix": "...", "error": "..." }
+  ]
+}
+```
+
+```typescript
+app.post("/api/sync-all/:storage/:container", async (req, res) => {
+  try {
+    const store = new CredentialStore();
+    const entry = store.getStorage(req.params.storage);
+    if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
+    const blobClient = new BlobClient(entry);
+
+    const registry = await resolveLinks(blobClient, req.params.container);
+    if (registry.links.length === 0) {
+      res.status(400).json({ error: "No repository links found" });
+      return;
+    }
+
+    const results: Array<{ linkId: string; targetPrefix?: string; result?: SyncResult; error?: string }> = [];
+
+    for (const link of registry.links) {
+      try {
+        const provider = buildProviderForLink(store, link);
+        const result = await syncRepo(blobClient, req.params.container, provider, link);
+
+        // Write updated link after each sync
+        const idx = registry.links.findIndex((l) => l.id === link.id);
+        if (idx >= 0) registry.links[idx] = link;
+        await writeLinks(blobClient, req.params.container, registry);
+
+        results.push({ linkId: link.id, targetPrefix: link.targetPrefix, result });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        results.push({ linkId: link.id, targetPrefix: link.targetPrefix, error: msg });
+      }
+    }
+
+    res.json({ results });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: msg });
+  }
+});
+```
+
+#### 7.8 Modified `GET /api/sync-meta/:storage/:container` (Backward Compatibility)
+
+**Change:** Call `resolveLinks()` first. If links exist, return the first link formatted as old `RepoSyncMeta` shape. Otherwise fall back to the current behavior.
+
+```typescript
+app.get("/api/sync-meta/:storage/:container", async (req, res) => {
+  try {
+    const store = new CredentialStore();
+    const entry = store.getStorage(req.params.storage);
+    if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
+    const blobClient = new BlobClient(entry);
+
+    const registry = await resolveLinks(blobClient, req.params.container);
+    if (registry.links.length > 0) {
+      // Return first link formatted as old RepoSyncMeta shape
+      const link = registry.links[0];
+      res.json({
+        provider: link.provider,
+        repoUrl: link.repoUrl,
+        branch: link.branch,
+        lastSyncAt: link.lastSyncAt ?? "",
+        lastCommitSha: link.lastCommitSha,
+        fileShas: link.fileShas,
+        // Additional fields for enhanced UI
+        linkCount: registry.links.length,
+      });
+    } else {
+      res.json(null);
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: msg });
+  }
+});
+```
+
+#### 7.9 Modified `POST /api/sync/:storage/:container` (Backward Compatibility)
+
+**Change:** For single-link containers, sync the link. For multi-link containers, return HTTP 400 with guidance.
+
+```typescript
+app.post("/api/sync/:storage/:container", async (req, res) => {
+  try {
+    const store = new CredentialStore();
+    const entry = store.getStorage(req.params.storage);
+    if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
+    const blobClient = new BlobClient(entry);
+
+    const registry = await resolveLinks(blobClient, req.params.container);
+    if (registry.links.length === 0) {
+      res.status(400).json({ error: "Container is not a synced repository" });
+      return;
+    }
+
+    if (registry.links.length > 1) {
+      res.status(400).json({
+        error: "Multiple links exist. Use /api/sync/:storage/:container/:linkId or /api/sync-all/:storage/:container",
+        links: registry.links.map((l) => ({ id: l.id, targetPrefix: l.targetPrefix, repoUrl: l.repoUrl })),
+      });
+      return;
+    }
+
+    const link = registry.links[0];
+    const provider = buildProviderForLink(store, link);
+    const dryRun = req.query.dryRun === "true";
+
+    const result = await syncRepo(blobClient, req.params.container, provider, link, dryRun);
+
+    if (!dryRun) {
+      registry.links[0] = link;
+      await writeLinks(blobClient, req.params.container, registry);
+    }
+
+    res.json(result);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: msg });
+  }
+});
+```
+
+---
+
+### 8. UI Components
+
+#### 8.1 New HTML in `src/electron/public/index.html`
+
+Add after the existing `<!-- Sync Confirmation Modal -->` (after line 137, before `<!-- Context Menu (files) -->`):
+
+```html
+<!-- Link to Repository Dialog -->
+<div id="link-dialog" class="modal hidden">
+  <div class="modal-content" style="max-width:500px">
+    <h2>Link to Repository</h2>
+    <label>Provider
+      <select id="link-provider" style="display:block;width:100%;margin-top:4px;padding:8px;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:13px;">
+        <option value="github">GitHub</option>
+        <option value="azure-devops">Azure DevOps</option>
+      </select>
+    </label>
+    <label>Repository URL<input type="text" id="link-repo-url" placeholder="https://github.com/owner/repo"></label>
+    <label>Branch<input type="text" id="link-branch" placeholder="(default branch)"></label>
+    <label>Repository sub-path<input type="text" id="link-repo-path" placeholder="(entire repository)"></label>
+    <label>Target prefix<input type="text" id="link-target-prefix" placeholder="(container root)"></label>
+    <label>Token
+      <select id="link-token" style="display:block;width:100%;margin-top:4px;padding:8px;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:13px;">
+        <option value="">Loading tokens...</option>
+      </select>
+    </label>
+    <div id="link-warning" style="color:var(--expiry-warning);font-size:12px;margin:8px 0;display:none;"></div>
+    <div class="modal-actions">
+      <button id="link-cancel">Cancel</button>
+      <button id="link-only" class="primary">Link Only</button>
+      <button id="link-and-sync" class="primary">Link & Sync</button>
+    </div>
+  </div>
+</div>
+
+<!-- Multi-Link Sync Dialog -->
+<div id="multi-link-sync-dialog" class="modal hidden">
+  <div class="modal-content" style="max-width:600px">
+    <h2>Sync Repository Links</h2>
+    <div id="multi-link-list" style="max-height:300px;overflow-y:auto;margin-bottom:16px;"></div>
+    <div class="modal-actions">
+      <button id="multi-link-close">Close</button>
+      <button id="multi-link-sync-all" class="primary">Sync All</button>
+    </div>
+  </div>
+</div>
+
+<!-- Unlink Confirmation Dialog -->
+<div id="unlink-confirm-dialog" class="modal hidden">
+  <div class="modal-content">
+    <h2>Unlink Repository</h2>
+    <p id="unlink-message" style="font-size:13px;color:var(--text);margin-bottom:12px;"></p>
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:16px;">Synced files will NOT be deleted.</p>
+    <div class="modal-actions">
+      <button id="unlink-cancel">Cancel</button>
+      <button id="unlink-confirm" class="primary danger">Unlink</button>
+    </div>
+  </div>
+</div>
+
+<!-- Links Panel (shown as modal) -->
+<div id="links-panel" class="modal hidden">
+  <div class="modal-content" style="max-width:700px">
+    <h2>Repository Links</h2>
+    <div id="links-panel-list" style="max-height:400px;overflow-y:auto;margin-bottom:16px;"></div>
+    <div class="modal-actions">
+      <button id="links-panel-close">Close</button>
+    </div>
+  </div>
+</div>
+```
+
+**Context menu additions.** Add to `<!-- Context Menu (containers) -->`:
+```html
+<div id="container-context-menu" class="context-menu hidden">
+  <div class="context-menu-item" id="ctx-refresh-container">Refresh</div>
+  <div class="context-menu-item" id="ctx-link-container">Link to Repository...</div>
+  <div class="context-menu-item" id="ctx-view-links">View Links</div>
+</div>
+```
+
+Add to `<!-- Context Menu (folders) -->`:
+```html
+<div id="folder-context-menu" class="context-menu hidden">
+  <div class="context-menu-item" id="ctx-refresh-folder">Refresh</div>
+  <div class="context-menu-item" id="ctx-link-folder">Link to Repository...</div>
+  <div class="context-menu-item" id="ctx-sync-folder">Sync from Repository</div>
+  <div class="context-menu-item" id="ctx-unlink-folder">Unlink Repository</div>
+  <div class="context-menu-item ctx-danger" id="ctx-delete-folder">Delete Folder</div>
+</div>
+```
+
+Note: `ctx-sync-folder` and `ctx-unlink-folder` are shown/hidden dynamically in JavaScript based on whether the folder is a link target.
+
+#### 8.2 CSS Additions in `src/electron/public/styles.css`
+
+```css
+/* Link indicators */
+.link-indicator {
+  font-size: 10px;
+  margin-left: 4px;
+  opacity: 0.7;
+  cursor: help;
+}
+.link-badge {
+  font-size: 10px;
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--bg);
+  cursor: pointer;
+  font-weight: 600;
+}
+.link-list-item {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.link-list-item:last-child { border-bottom: none; }
+.link-list-item .link-repo { font-weight: 500; }
+.link-list-item .link-meta { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+.link-list-item .link-actions { margin-top: 6px; }
+.link-list-item .link-actions button { font-size: 11px; padding: 2px 8px; margin-right: 4px; }
+.link-warning { color: var(--expiry-warning); font-size: 12px; }
+```
+
+#### 8.3 JavaScript in `src/electron/public/app.js`
+
+Add a new section `// === Repository Link Management ===` after the existing `// --- Sync ---` section (after line 737, before `// --- Resizer ---`).
+
+**New state variables:**
+```javascript
+let linkTarget = null;    // { container, prefix }
+let containerLinks = {};  // Map<containerName, RepoLink[]>
+let unlinkTarget = null;  // { container, linkId, repoUrl }
+```
+
+**New DOM references** (add near top):
+```javascript
+const linkDialog = document.getElementById("link-dialog");
+const linkProvider = document.getElementById("link-provider");
+const linkRepoUrl = document.getElementById("link-repo-url");
+const linkBranch = document.getElementById("link-branch");
+const linkRepoPath = document.getElementById("link-repo-path");
+const linkTargetPrefix = document.getElementById("link-target-prefix");
+const linkToken = document.getElementById("link-token");
+const linkWarning = document.getElementById("link-warning");
+const linkCancel = document.getElementById("link-cancel");
+const linkOnly = document.getElementById("link-only");
+const linkAndSync = document.getElementById("link-and-sync");
+const multiLinkDialog = document.getElementById("multi-link-sync-dialog");
+const multiLinkList = document.getElementById("multi-link-list");
+const multiLinkClose = document.getElementById("multi-link-close");
+const multiLinkSyncAll = document.getElementById("multi-link-sync-all");
+const unlinkDialog = document.getElementById("unlink-confirm-dialog");
+const unlinkMessage = document.getElementById("unlink-message");
+const unlinkCancel = document.getElementById("unlink-cancel");
+const unlinkConfirm = document.getElementById("unlink-confirm");
+const linksPanel = document.getElementById("links-panel");
+const linksPanelList = document.getElementById("links-panel-list");
+const linksPanelClose = document.getElementById("links-panel-close");
+const ctxLinkContainer = document.getElementById("ctx-link-container");
+const ctxViewLinks = document.getElementById("ctx-view-links");
+const ctxLinkFolder = document.getElementById("ctx-link-folder");
+const ctxSyncFolder = document.getElementById("ctx-sync-folder");
+const ctxUnlinkFolder = document.getElementById("ctx-unlink-folder");
+```
+
+**Key functions (signatures and behavior descriptions):**
+
+```javascript
+async function fetchContainerLinks(storage, container) {
+  // GET /api/links/:storage/:container
+  // Cache result in containerLinks[container]
+  // Returns RepoLink[]
+}
+
+function showLinkDialog(container, prefix) {
+  // Set linkTarget = { container, prefix }
+  // Pre-fill linkTargetPrefix with prefix if provided
+  // Populate token dropdown from /api/tokens filtered by selected provider
+  // Show linkDialog
+}
+
+async function submitLink(syncAfter) {
+  // POST /api/links/:storage/:container with form data
+  // If response has warning, show in linkWarning div
+  // If syncAfter, POST /api/sync/:storage/:container/:linkId
+  // Refresh tree and link cache
+}
+
+function showMultiLinkSyncDialog(container, links) {
+  // Render links list in multiLinkList with per-link Sync buttons
+  // Each link shows: provider icon, repoUrl, branch, prefix, lastSyncAt
+  // Show multiLinkDialog
+}
+
+async function syncSingleLink(storage, container, linkId) {
+  // POST /api/sync/:storage/:container/:linkId
+  // Show result in alert
+  // Refresh tree
+}
+
+async function syncAllLinks(storage, container) {
+  // POST /api/sync-all/:storage/:container
+  // Show aggregate result in alert
+  // Refresh tree
+}
+
+function showUnlinkConfirm(container, linkId, repoUrl) {
+  // Set unlinkTarget = { container, linkId, repoUrl }
+  // Set unlinkMessage text
+  // Show unlinkDialog
+}
+
+async function confirmUnlink() {
+  // DELETE /api/links/:storage/:container/:linkId
+  // Refresh tree and link cache
+}
+
+function renderLinkIndicators(containerName) {
+  // After folder tree loads, iterate containerLinks[containerName]
+  // For each link with targetPrefix, find matching folder tree node
+  // Append <span class="link-indicator" title="...">&#128279;</span>
+}
+
+function showLinksPanel(container) {
+  // Render all links for container in linksPanelList
+  // Each link has Sync and Unlink buttons
+  // Show linksPanel
+}
+```
+
+**Modified `toggleContainer`:** Replace the `fetch('/api/sync-meta/...')` block with:
+```javascript
+// After loadTreeLevel completes:
+try {
+  const links = await fetchContainerLinks(currentStorage, containerName);
+  if (links.length > 0) {
+    const badge = document.createElement("span");
+    badge.className = links.length > 1 ? "link-badge" : "sync-badge";
+    badge.textContent = links.length > 1 ? `${links.length} links` : "\u21BB";
+    badge.title = links.length > 1
+      ? `${links.length} repository links`
+      : `Synced from ${links[0].provider}: ${links[0].repoUrl} (${links[0].branch})`;
+
+    badge.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (links.length === 1) {
+        // Single link: show sync modal (existing behavior)
+        syncTarget = { container: containerName, meta: links[0] };
+        syncInfo.innerHTML = `
+          <p><strong>Repository:</strong> ${links[0].repoUrl}</p>
+          <p><strong>Branch:</strong> ${links[0].branch}</p>
+          <p><strong>Provider:</strong> ${links[0].provider}</p>
+          <p><strong>Last synced:</strong> ${links[0].lastSyncAt ? new Date(links[0].lastSyncAt).toLocaleString() : "never"}</p>
+          <p><strong>Files:</strong> ${Object.keys(links[0].fileShas).length}</p>
+        `;
+        syncModal.classList.remove("hidden");
+      } else {
+        // Multiple links: show multi-link sync dialog
+        showMultiLinkSyncDialog(containerName, links);
+      }
+    });
+
+    const containerItem = node.querySelector(".tree-item");
+    if (containerItem && !containerItem.querySelector(".sync-badge") && !containerItem.querySelector(".link-badge")) {
+      containerItem.appendChild(badge);
+    }
+  }
+  renderLinkIndicators(containerName);
+} catch { /* not a linked container */ }
+```
+
+**Modified folder context menu handler:** Before showing the folder context menu, check if the folder is a link target:
+```javascript
+// In the folder contextmenu handler, after setting folderContextTarget:
+const links = containerLinks[folderContextTarget.container] || [];
+const folderLink = links.find(l => normalizePath(l.targetPrefix) === normalizePath(folderContextTarget.folderPrefix));
+ctxSyncFolder.style.display = folderLink ? "" : "none";
+ctxUnlinkFolder.style.display = folderLink ? "" : "none";
+```
+
+**Context menu event handlers:**
+```javascript
+ctxLinkContainer.addEventListener("click", () => {
+  containerCtxMenu.classList.add("hidden");
+  if (containerContextTarget) showLinkDialog(containerContextTarget.containerName);
+});
+
+ctxViewLinks.addEventListener("click", () => {
+  containerCtxMenu.classList.add("hidden");
+  if (containerContextTarget) showLinksPanel(containerContextTarget.containerName);
+});
+
+ctxLinkFolder.addEventListener("click", () => {
+  folderCtxMenu.classList.add("hidden");
+  if (folderContextTarget) showLinkDialog(folderContextTarget.container, folderContextTarget.folderPrefix);
+});
+
+ctxSyncFolder.addEventListener("click", async () => {
+  folderCtxMenu.classList.add("hidden");
+  if (!folderContextTarget) return;
+  const links = containerLinks[folderContextTarget.container] || [];
+  const folderLink = links.find(l => normalizePath(l.targetPrefix) === normalizePath(folderContextTarget.folderPrefix));
+  if (folderLink) await syncSingleLink(currentStorage, folderContextTarget.container, folderLink.id);
+});
+
+ctxUnlinkFolder.addEventListener("click", () => {
+  folderCtxMenu.classList.add("hidden");
+  if (!folderContextTarget) return;
+  const links = containerLinks[folderContextTarget.container] || [];
+  const folderLink = links.find(l => normalizePath(l.targetPrefix) === normalizePath(folderContextTarget.folderPrefix));
+  if (folderLink) showUnlinkConfirm(folderContextTarget.container, folderLink.id, folderLink.repoUrl);
+});
+```
+
+---
+
+### 9. Backward Compatibility: Auto-Migration Flow
+
+```
+Container accessed (any operation: sync, list-links, UI badge, etc.)
+    |
+    v
+resolveLinks(blobClient, container)
+    |
+    +-- .repo-links.json exists?
+    |       |
+    |       YES --> Parse and return RepoLinksRegistry
+    |       |
+    |       NO
+    |       |
+    |       +-- .repo-sync-meta.json exists?
+    |               |
+    |               YES --> migrateOldMeta()
+    |               |         |
+    |               |         +-- Create RepoLink from old metadata
+    |               |         +-- Write .repo-links.json
+    |               |         +-- Return new RepoLinksRegistry
+    |               |         +-- (Old .repo-sync-meta.json retained, not deleted)
+    |               |
+    |               NO --> Return empty registry { version: 1, links: [] }
+```
+
+**Migration is transparent and idempotent:**
+- If `.repo-links.json` already exists, `.repo-sync-meta.json` is never read.
+- If migration writes `.repo-links.json` successfully, subsequent calls skip migration.
+- If migration fails (e.g., write error), the next call retries because `.repo-links.json` does not yet exist.
+
+---
+
+### 10. Parallel Implementation Units and Interface Contracts
+
+The feature decomposes into **five implementation units** with the following dependency graph:
+
+```
+Unit 1: Core Types + Link Registry (sync-engine.ts, types.ts)
+    |
+    v
+Unit 2: Refactored Clone/Sync Engine (sync-engine.ts)
+    |
+    +------------------+------------------+
+    |                  |                  |
+    v                  v                  |
+Unit 3: CLI         Unit 4: Server API   |
+(repo-sync.ts,      (server.ts)          |
+ index.ts)                               |
+    |                  |                  |
+    +------------------+                  |
+             |                            |
+             v                            |
+         Unit 5: UI                       |
+   (app.js, index.html,                  |
+    styles.css)                           |
+```
+
+**Units 3 and 4 can be built in parallel** after Units 1 and 2 are complete.
+
+#### Unit 1: Core Types + Link Registry
+
+**Files:** `src/core/types.ts`, `src/core/sync-engine.ts`
+**Produces (exports):**
+- Types: `RepoLink`, `RepoLinksRegistry`
+- Functions: `normalizePath`, `readLinks`, `writeLinks`, `resolveLinks`, `migrateOldMeta`, `createLink`, `removeLink`, `findLinkByPrefix`, `detectExactConflict`, `detectOverlap`
+- Constants: `LINKS_BLOB`
+
+**Interface contract for downstream units:**
+```typescript
+// All downstream units import these from "../../core/sync-engine.js" or "../../core/types.js"
+export function normalizePath(path: string | undefined): string;
+export function readLinks(blobClient: BlobClient, container: string): Promise<RepoLinksRegistry | null>;
+export function writeLinks(blobClient: BlobClient, container: string, registry: RepoLinksRegistry): Promise<void>;
+export function resolveLinks(blobClient: BlobClient, container: string): Promise<RepoLinksRegistry>;
+export function migrateOldMeta(blobClient: BlobClient, container: string): Promise<RepoLinksRegistry | null>;
+export function createLink(blobClient: BlobClient, container: string, linkData: {
+  provider: "github" | "azure-devops"; repoUrl: string; branch: string;
+  repoSubPath?: string; targetPrefix?: string;
+}): Promise<{ link: RepoLink; warning?: string }>;
+export function removeLink(blobClient: BlobClient, container: string, linkId: string): Promise<boolean>;
+export function findLinkByPrefix(links: RepoLink[], prefix: string | undefined): RepoLink;
+export function detectExactConflict(existingLinks: RepoLink[], newPrefix: string | undefined): boolean;
+export function detectOverlap(existingLinks: RepoLink[], newPrefix: string | undefined): string | null;
+```
+
+#### Unit 2: Refactored Clone/Sync Engine
+
+**Files:** `src/core/sync-engine.ts` (continued)
+**Produces (exports):**
+- Functions: `filterByRepoSubPath`, `mapToTargetPaths` (utility), refactored `cloneRepo`, refactored `syncRepo`
+- Internal type: `MappedFileEntry` (not exported)
+
+**Interface contract for downstream units:**
+```typescript
+export function filterByRepoSubPath(files: RepoFileEntry[], repoSubPath?: string): RepoFileEntry[];
+export function mapToTargetPaths(files: RepoFileEntry[], repoSubPath?: string, targetPrefix?: string): MappedFileEntry[];
+export function cloneRepo(blobClient: BlobClient, container: string, provider: RepoProvider, link: RepoLink, onProgress?: (msg: string) => void): Promise<SyncResult>;
+export function syncRepo(blobClient: BlobClient, container: string, provider: RepoProvider, link: RepoLink, dryRun?: boolean, onProgress?: (msg: string) => void): Promise<SyncResult>;
+```
+
+**Critical contract:** After `cloneRepo` or `syncRepo` returns, the `link` parameter has been mutated in-place with updated `lastSyncAt`, `fileShas`, and (for sync) `lastCommitSha`. The caller must write the updated link back to the registry via `writeLinks()`.
+
+#### Unit 3: CLI Commands
+
+**Files:** `src/cli/commands/repo-sync.ts`, `src/cli/index.ts`
+**Depends on:** Units 1 and 2 (imports from sync-engine and types)
+**Produces (exports):** `linkGitHub`, `linkDevOps`, `unlinkContainer`, `listLinks` (new); modified `cloneGitHub`, `cloneDevOps`, `syncContainer`
+
+**Interface contract with CLI index:**
+```typescript
+export async function linkGitHub(repoUrl: string, container: string, storageOpts: StorageOpts, opts: { prefix?: string; repoPath?: string; branch?: string }, patOpts?: PatOpts): Promise<void>;
+export async function linkDevOps(repoUrl: string, container: string, storageOpts: StorageOpts, opts: { prefix?: string; repoPath?: string; branch?: string }, patOpts?: PatOpts): Promise<void>;
+export async function unlinkContainer(container: string, storageOpts: StorageOpts, opts: { prefix?: string; linkId?: string }): Promise<void>;
+export async function listLinks(container: string, storageOpts: StorageOpts): Promise<void>;
+export async function cloneGitHub(repoUrl: string, container: string, storageOpts: StorageOpts, branch?: string, patOpts?: PatOpts, opts?: { prefix?: string; repoPath?: string }): Promise<void>;
+export async function cloneDevOps(repoUrl: string, container: string, storageOpts: StorageOpts, branch?: string, patOpts?: PatOpts, opts?: { prefix?: string; repoPath?: string }): Promise<void>;
+export async function syncContainer(container: string, storageOpts: StorageOpts, dryRun?: boolean, patOpts?: PatOpts, opts?: { prefix?: string; linkId?: string; all?: boolean }): Promise<void>;
+```
+
+#### Unit 4: Server API Endpoints
+
+**Files:** `src/electron/server.ts`
+**Depends on:** Units 1 and 2 (imports from sync-engine and types)
+**Produces:** REST API endpoints
+
+**Interface contract with UI (HTTP):**
+
+| Method | Path | Request Body | Response | Status Codes |
+|---|---|---|---|---|
+| GET | `/api/links/:storage/:container` | -- | `RepoLink[]` | 200, 404, 500 |
+| POST | `/api/links/:storage/:container` | `{ provider, repoUrl, branch?, repoSubPath?, targetPrefix? }` | `{ link: RepoLink, warning?: string }` | 201, 400, 500 |
+| DELETE | `/api/links/:storage/:container/:linkId` | -- | `{ success: true }` | 200, 404, 500 |
+| POST | `/api/sync/:storage/:container/:linkId` | -- (query: `?dryRun=true`) | `SyncResult` | 200, 404, 500 |
+| POST | `/api/sync-all/:storage/:container` | -- | `{ results: [{ linkId, targetPrefix?, result?, error? }] }` | 200, 400, 500 |
+| GET | `/api/sync-meta/:storage/:container` | -- | `RepoSyncMeta-shaped \| null` (+ `linkCount`) | 200, 404, 500 |
+| POST | `/api/sync/:storage/:container` | -- | `SyncResult` (single-link) or `{ error, links }` (multi-link) | 200, 400, 500 |
+
+#### Unit 5: UI Integration
+
+**Files:** `src/electron/public/app.js`, `src/electron/public/index.html`, `src/electron/public/styles.css`
+**Depends on:** Unit 4 (consumes API endpoints)
+**No downstream consumers.**
+
+---
+
+### 11. Complete File Change Summary
+
+| File | Unit(s) | Changes |
+|------|---------|---------|
+| `src/core/types.ts` | 1 | Add `RepoLink`, `RepoLinksRegistry` interfaces |
+| `src/core/sync-engine.ts` | 1, 2 | Add `LINKS_BLOB` constant, `MappedFileEntry` type, `normalizePath`, `readLinks`, `writeLinks`, `migrateOldMeta`, `resolveLinks`, `createLink`, `removeLink`, `findLinkByPrefix`, `detectExactConflict`, `detectOverlap`, `filterByRepoSubPath`, `mapToTargetPaths`; refactor `cloneRepo` and `syncRepo` signatures and internals |
+| `src/cli/commands/repo-sync.ts` | 3 | Add `linkGitHub`, `linkDevOps`, `unlinkContainer`, `listLinks`; modify `cloneGitHub`, `cloneDevOps`, `syncContainer` for new parameters |
+| `src/cli/index.ts` | 3 | Register `link-github`, `link-devops`, `unlink`, `list-links` commands; add `--prefix`, `--repo-path` to clone commands; add `--prefix`, `--link-id`, `--all` to sync |
+| `src/electron/server.ts` | 4 | Add `buildProviderForLink` helper; add 5 new endpoints; modify 2 existing endpoints for backward compatibility |
+| `src/electron/public/index.html` | 5 | Add 4 new modals (link-dialog, multi-link-sync-dialog, unlink-confirm-dialog, links-panel); extend container and folder context menus |
+| `src/electron/public/app.js` | 5 | Add link management section with ~250-300 lines: state variables, DOM refs, `fetchContainerLinks`, `showLinkDialog`, `submitLink`, `showMultiLinkSyncDialog`, `syncSingleLink`, `syncAllLinks`, `showUnlinkConfirm`, `confirmUnlink`, `renderLinkIndicators`, `showLinksPanel`; modify `toggleContainer`; modify folder context menu handler |
+| `src/electron/public/styles.css` | 5 | Add `.link-indicator`, `.link-badge`, `.link-list-item`, `.link-warning` styles |
+
+### Files NOT Modified
+
+| File | Reason |
+|------|--------|
+| `src/core/github-client.ts` | No changes; filtering done in sync engine |
+| `src/core/devops-client.ts` | No changes; filtering done in sync engine |
+| `src/core/blob-client.ts` | All needed blob operations already available |
+| `src/core/repo-utils.ts` | Generic utilities used as-is |
+| `src/core/credential-store.ts` | Token management already complete |
+| `src/cli/commands/shared.ts` | Reusable helpers used as-is |
+| `src/electron/main.ts` | No changes to Electron bootstrap |
+| `src/electron/launch.ts` | No changes to launch logic |
+
+---
+
+### 12. Risk Assessment
+
+| Risk | Severity | Mitigation |
+|------|----------|------------|
+| Breaking existing clone/sync during Phase 2 refactor | High | When `targetPrefix` and `repoSubPath` are undefined, path mapping is identity; test existing flow after refactor |
+| Path normalization bugs (trailing slashes, empty strings) | Medium | Centralized `normalizePath()` with explicit handling; always normalize before comparison |
+| Concurrent registry writes (two sync operations on same container) | Medium | Sync-all is sequential; UI sync buttons disabled during operation; no parallel sync at API level |
+| Migration creates duplicate link if retried | Low | Random UUID acceptable; second migration is no-op if `.repo-links.json` already exists |
+| `app.js` growing large (currently 749 lines, adding ~250-300) | Low | New code in clearly-demarcated section; splitting into modules deferred |
+| Rate limiting with many links synced via `--all` | Low | Sequential sync; existing `rateLimitedFetch` handles 429 responses |

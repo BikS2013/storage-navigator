@@ -40,11 +40,55 @@
   const syncCancel = document.getElementById("sync-cancel");
   const syncConfirm = document.getElementById("sync-confirm");
 
+  const ctxRefresh = document.getElementById("ctx-refresh");
+  const folderCtxMenu = document.getElementById("folder-context-menu");
+  const ctxRefreshFolder = document.getElementById("ctx-refresh-folder");
+  const ctxDeleteFolder = document.getElementById("ctx-delete-folder");
+  const deleteFolderModal = document.getElementById("delete-folder-modal");
+  const deleteFolderMessage = document.getElementById("delete-folder-message");
+  const deleteFolderCancel = document.getElementById("delete-folder-cancel");
+  const deleteFolderConfirm = document.getElementById("delete-folder-confirm");
+  const containerCtxMenu = document.getElementById("container-context-menu");
+  const ctxRefreshContainer = document.getElementById("ctx-refresh-container");
+  const ctxLinkContainer = document.getElementById("ctx-link-container");
+  const ctxViewLinks = document.getElementById("ctx-view-links");
+  const ctxLinkFolder = document.getElementById("ctx-link-folder");
+
+  // --- Link Modal elements ---
+  const linkModal = document.getElementById("link-modal");
+  const linkProvider = document.getElementById("link-provider");
+  const linkRepoUrl = document.getElementById("link-repo-url");
+  const linkBranch = document.getElementById("link-branch");
+  const linkTargetPrefix = document.getElementById("link-target-prefix");
+  const linkRepoSubpath = document.getElementById("link-repo-subpath");
+  const linkCancel = document.getElementById("link-cancel");
+  const linkSave = document.getElementById("link-save");
+
+  // --- Links Panel elements ---
+  const linksPanelModal = document.getElementById("links-panel-modal");
+  const linksPanelBody = document.getElementById("links-panel-body");
+  const linksSyncAll = document.getElementById("links-sync-all");
+  const linksPanelClose = document.getElementById("links-panel-close");
+
+  // --- Add Token Modal elements ---
+  const addTokenModal = document.getElementById("add-token-modal");
+  const addTokenMessage = document.getElementById("add-token-message");
+  const addTokenName = document.getElementById("add-token-name");
+  const addTokenProvider = document.getElementById("add-token-provider");
+  const addTokenValue = document.getElementById("add-token-value");
+  const addTokenCancel = document.getElementById("add-token-cancel");
+  const addTokenSave = document.getElementById("add-token-save");
+
   let currentStorage = "";
   let currentContainer = "";
   let activeTreeItem = null;
   let contextTarget = null; // { container, blobName, parentEl, prefix, depth }
+  let folderContextTarget = null; // { container, folderName, folderPrefix, parentEl, prefix, depth, node }
+  let containerContextTarget = null; // { containerName, node }
   let syncTarget = null; // { container, meta }
+  let linkTarget = null; // { container, targetPrefix }
+  let linksPanelContainer = null; // container name for the currently open links panel
+  let containerLinksCache = {}; // container -> RepoLinksRegistry
 
   // --- Theme ---
   let theme = localStorage.getItem("sn-theme") || "dark";
@@ -71,7 +115,14 @@
   // --- API helpers ---
   async function api(url, opts) {
     const res = await fetch(url, opts);
-    if (!res.ok) throw new Error(`API error: ${res.status}`);
+    if (!res.ok) {
+      let body = {};
+      try { body = await res.json(); } catch {}
+      const err = new Error(body.error || `API error: ${res.status}`);
+      err.code = body.code;
+      err.provider = body.provider;
+      throw err;
+    }
     return res;
   }
   async function apiJson(url, opts) { return (await api(url, opts)).json(); }
@@ -119,6 +170,13 @@
         const node = createTreeNode(c.name, "\uD83D\uDCE6", 0, true);
         node.dataset.container = c.name;
         node.querySelector(".tree-item").addEventListener("click", () => toggleContainer(node, c.name));
+        node.querySelector(".tree-item").addEventListener("contextmenu", (e) => {
+          e.preventDefault();
+          containerContextTarget = { containerName: c.name, node };
+          containerCtxMenu.style.left = e.clientX + "px";
+          containerCtxMenu.style.top = e.clientY + "px";
+          containerCtxMenu.classList.remove("hidden");
+        });
         treeContent.appendChild(node);
       }
     } catch (e) {
@@ -175,34 +233,29 @@
     try {
       await loadTreeLevel(children, containerName, "", 1);
 
-      // Check for repo sync metadata
+      // Fetch links for this container and add indicators
       try {
-        const metaRes = await fetch(`/api/sync-meta/${currentStorage}/${containerName}`);
-        const meta = await metaRes.json();
-        if (meta && meta.provider) {
-          const badge = document.createElement("span");
-          badge.className = "sync-badge";
-          badge.textContent = "\u21BB"; // sync arrow
-          badge.title = `Synced from ${meta.provider}: ${meta.repoUrl} (${meta.branch})`;
-          badge.addEventListener("click", (e) => {
-            e.stopPropagation();
-            syncTarget = { container: containerName, meta };
-            syncInfo.innerHTML = `
-              <p><strong>Repository:</strong> ${meta.repoUrl}</p>
-              <p><strong>Branch:</strong> ${meta.branch}</p>
-              <p><strong>Provider:</strong> ${meta.provider}</p>
-              <p><strong>Last synced:</strong> ${new Date(meta.lastSyncAt).toLocaleString()}</p>
-              <p><strong>Files:</strong> ${Object.keys(meta.fileShas).length}</p>
-            `;
-            syncModal.classList.remove("hidden");
-          });
-          // Add badge to the container's tree-item
+        const registry = await apiJson(`/api/links/${currentStorage}/${containerName}`);
+        containerLinksCache[containerName] = registry;
+        if (registry && registry.links && registry.links.length > 0) {
+          // Add sync badge to container node (opens links panel on click)
           const containerItem = node.querySelector(".tree-item");
           if (containerItem && !containerItem.querySelector(".sync-badge")) {
+            const badge = document.createElement("span");
+            badge.className = "sync-badge";
+            badge.textContent = "\u21BB"; // sync arrow
+            badge.title = `${registry.links.length} repo link(s)`;
+            badge.addEventListener("click", (e) => {
+              e.stopPropagation();
+              openLinksPanel(containerName);
+            });
             containerItem.appendChild(badge);
           }
+
+          // Add link-badge indicators to folders that have a targetPrefix matching
+          addLinkIndicators(children, containerName, registry.links);
         }
-      } catch { /* not a synced container */ }
+      } catch { /* no links */ }
     } catch (e) {
       children.innerHTML = `<div style="padding:4px 24px;color:var(--expiry-expired);font-size:12px">Error: ${e.message}</div>`;
     }
@@ -222,6 +275,13 @@
       if (item.isPrefix) {
         const node = createTreeNode(shortName, "\uD83D\uDCC1", depth, true);
         node.querySelector(".tree-item").addEventListener("click", () => toggleFolder(node, container, item.name, depth + 1));
+        node.querySelector(".tree-item").addEventListener("contextmenu", (e) => {
+          e.preventDefault();
+          folderContextTarget = { container, folderName: shortName, folderPrefix: item.name, parentEl, prefix, depth, node };
+          folderCtxMenu.style.left = e.clientX + "px";
+          folderCtxMenu.style.top = e.clientY + "px";
+          folderCtxMenu.classList.remove("hidden");
+        });
         parentEl.appendChild(node);
       } else {
         const icon = getFileIcon(shortName);
@@ -407,9 +467,17 @@
   });
 
   // --- Context menu ---
-  document.addEventListener("click", () => ctxMenu.classList.add("hidden"));
+  document.addEventListener("click", () => {
+    ctxMenu.classList.add("hidden");
+    folderCtxMenu.classList.add("hidden");
+    containerCtxMenu.classList.add("hidden");
+  });
   document.addEventListener("contextmenu", (e) => {
-    if (!e.target.closest(".tree-item")) ctxMenu.classList.add("hidden");
+    if (!e.target.closest(".tree-item")) {
+      ctxMenu.classList.add("hidden");
+      folderCtxMenu.classList.add("hidden");
+      containerCtxMenu.classList.add("hidden");
+    }
   });
 
   ctxRename.addEventListener("click", () => {
@@ -472,6 +540,44 @@
     }
   });
 
+  // --- Refresh (file context) ---
+  ctxRefresh.addEventListener("click", async () => {
+    ctxMenu.classList.add("hidden");
+    if (!contextTarget) return;
+    await loadTreeLevel(
+      contextTarget.parentEl,
+      contextTarget.container,
+      contextTarget.prefix,
+      contextTarget.depth
+    );
+    contextTarget = null;
+  });
+
+  // --- Refresh (folder context) ---
+  ctxRefreshFolder.addEventListener("click", async () => {
+    folderCtxMenu.classList.add("hidden");
+    if (!folderContextTarget) return;
+    const children = folderContextTarget.node.querySelector(".tree-children");
+    if (children && children.classList.contains("expanded")) {
+      await loadTreeLevel(children, folderContextTarget.container, folderContextTarget.folderPrefix, folderContextTarget.depth + 1);
+    }
+    folderContextTarget = null;
+  });
+
+  // --- Refresh (container context) ---
+  ctxRefreshContainer.addEventListener("click", async () => {
+    containerCtxMenu.classList.add("hidden");
+    if (!containerContextTarget) return;
+    const children = containerContextTarget.node.querySelector(".tree-children");
+    if (children) {
+      children.innerHTML = '<div style="padding:4px 24px;color:var(--text-dim);font-size:12px">Loading...</div>';
+      children.classList.add("expanded");
+      containerContextTarget.node.querySelector(".tree-toggle").textContent = "\u25BC";
+      await loadTreeLevel(children, containerContextTarget.containerName, "", 1);
+    }
+    containerContextTarget = null;
+  });
+
   // --- Delete ---
   ctxDelete.addEventListener("click", () => {
     ctxMenu.classList.add("hidden");
@@ -519,6 +625,53 @@
       deleteConfirm.disabled = false;
       deleteConfirm.textContent = "Delete";
       contextTarget = null;
+    }
+  });
+
+  // --- Delete Folder ---
+  ctxDeleteFolder.addEventListener("click", () => {
+    folderCtxMenu.classList.add("hidden");
+    if (!folderContextTarget) return;
+    deleteFolderMessage.textContent = `Are you sure you want to delete the folder "${folderContextTarget.folderName}" and ALL its contents?`;
+    deleteFolderModal.classList.remove("hidden");
+  });
+
+  deleteFolderCancel.addEventListener("click", () => {
+    deleteFolderModal.classList.add("hidden");
+    folderContextTarget = null;
+  });
+
+  deleteFolderConfirm.addEventListener("click", async () => {
+    if (!folderContextTarget) return;
+
+    deleteFolderConfirm.disabled = true;
+    deleteFolderConfirm.textContent = "Deleting...";
+
+    try {
+      const url = `/api/folder/${currentStorage}/${folderContextTarget.container}?prefix=${encodeURIComponent(folderContextTarget.folderPrefix)}`;
+      await apiJson(url, { method: "DELETE" });
+
+      deleteFolderModal.classList.add("hidden");
+
+      // Clear content panel if a file from the deleted folder was being viewed
+      contentTitle.textContent = "No file selected";
+      contentMeta.textContent = "";
+      contentBody.innerHTML = '<p class="placeholder">Click a file to view its contents</p>';
+      activeTreeItem = null;
+
+      // Refresh the parent folder level
+      await loadTreeLevel(
+        folderContextTarget.parentEl,
+        folderContextTarget.container,
+        folderContextTarget.prefix,
+        folderContextTarget.depth
+      );
+    } catch (e) {
+      alert("Delete folder failed: " + e.message);
+    } finally {
+      deleteFolderConfirm.disabled = false;
+      deleteFolderConfirm.textContent = "Delete Folder";
+      folderContextTarget = null;
     }
   });
 
@@ -608,7 +761,11 @@
       // Refresh the tree to reflect changes
       await buildTree();
     } catch (e) {
-      alert("Sync failed: " + e.message);
+      const retryContainer = syncTarget.container;
+      handleSyncError(e, "Sync failed", async () => {
+        syncTarget = { container: retryContainer };
+        syncConfirm.click();
+      });
     } finally {
       syncConfirm.disabled = false;
       syncConfirm.textContent = "Sync Now";
@@ -623,6 +780,318 @@
   resizer.addEventListener("mousedown", () => { isResizing = true; });
   document.addEventListener("mousemove", (e) => { if (isResizing) treePanel.style.width = e.clientX + "px"; });
   document.addEventListener("mouseup", () => { isResizing = false; });
+
+  // ============================================================
+  // --- Link Management ---
+  // ============================================================
+
+  // Helper: add link badge indicators to folder tree items
+  function addLinkIndicators(parentEl, containerName, links) {
+    for (const link of links) {
+      const prefix = link.targetPrefix;
+      if (!prefix) continue; // container-root links get the sync-badge instead
+
+      // Find the folder tree-item whose data matches this prefix
+      const folderNodes = parentEl.querySelectorAll(".tree-node");
+      for (const fNode of folderNodes) {
+        const item = fNode.querySelector(".tree-item");
+        if (!item) continue;
+        const nameSpan = item.querySelector(".tree-name");
+        if (!nameSpan) continue;
+        // The folder name in the tree is the last segment; the prefix ends with /
+        const normalizedPrefix = prefix.replace(/\/$/, "");
+        const folderName = normalizedPrefix.split("/").pop();
+        if (nameSpan.textContent === folderName && !item.querySelector(".link-badge")) {
+          const badge = document.createElement("span");
+          badge.className = "link-badge";
+          badge.textContent = "\u{1F517}"; // link symbol
+          badge.title = `Linked: ${link.repoUrl} (${link.branch})`;
+          item.appendChild(badge);
+        }
+      }
+    }
+  }
+
+  // --- Link Modal: open from container context menu ---
+  ctxLinkContainer.addEventListener("click", () => {
+    containerCtxMenu.classList.add("hidden");
+    if (!containerContextTarget) return;
+    linkTarget = { container: containerContextTarget.containerName, targetPrefix: "" };
+    linkProvider.value = "github";
+    linkRepoUrl.value = "";
+    linkBranch.value = "";
+    linkTargetPrefix.value = "";
+    linkRepoSubpath.value = "";
+    linkModal.classList.remove("hidden");
+    linkRepoUrl.focus();
+  });
+
+  // --- Link Modal: open from folder context menu ---
+  ctxLinkFolder.addEventListener("click", () => {
+    folderCtxMenu.classList.add("hidden");
+    if (!folderContextTarget) return;
+    linkTarget = { container: folderContextTarget.container, targetPrefix: folderContextTarget.folderPrefix };
+    linkProvider.value = "github";
+    linkRepoUrl.value = "";
+    linkBranch.value = "";
+    linkTargetPrefix.value = folderContextTarget.folderPrefix;
+    linkRepoSubpath.value = "";
+    linkModal.classList.remove("hidden");
+    linkRepoUrl.focus();
+  });
+
+  linkCancel.addEventListener("click", () => {
+    linkModal.classList.add("hidden");
+    linkTarget = null;
+  });
+
+  linkSave.addEventListener("click", async () => {
+    if (!linkTarget) return;
+    const provider = linkProvider.value;
+    const repoUrl = linkRepoUrl.value.trim();
+    const branch = linkBranch.value.trim();
+    const targetPrefix = linkTargetPrefix.value.trim();
+    const repoSubPath = linkRepoSubpath.value.trim();
+
+    if (!repoUrl) { alert("Repository URL is required."); return; }
+    if (!branch) { alert("Branch is required."); return; }
+
+    linkSave.disabled = true;
+    linkSave.textContent = "Creating...";
+
+    try {
+      const body = { provider, repoUrl, branch };
+      if (targetPrefix) body.targetPrefix = targetPrefix;
+      if (repoSubPath) body.repoSubPath = repoSubPath;
+
+      const result = await apiJson(`/api/links/${currentStorage}/${linkTarget.container}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      linkModal.classList.add("hidden");
+      let msg = "Link created successfully.";
+      if (result.warning) msg += "\nWarning: " + result.warning;
+      alert(msg);
+
+      // Refresh tree to show new indicators
+      await buildTree();
+    } catch (e) {
+      alert("Failed to create link: " + e.message);
+    } finally {
+      linkSave.disabled = false;
+      linkSave.textContent = "Create Link";
+      linkTarget = null;
+    }
+  });
+
+  // --- View Links: open from container context menu ---
+  ctxViewLinks.addEventListener("click", () => {
+    containerCtxMenu.classList.add("hidden");
+    if (!containerContextTarget) return;
+    openLinksPanel(containerContextTarget.containerName);
+  });
+
+  async function openLinksPanel(containerName) {
+    linksPanelContainer = containerName;
+    linksPanelBody.innerHTML = '<p class="placeholder">Loading links...</p>';
+    linksPanelModal.classList.remove("hidden");
+
+    try {
+      const registry = await apiJson(`/api/links/${currentStorage}/${containerName}`);
+      containerLinksCache[containerName] = registry;
+      renderLinksPanel(registry, containerName);
+    } catch (e) {
+      linksPanelBody.innerHTML = `<p class="placeholder">Error: ${e.message}</p>`;
+    }
+  }
+
+  function renderLinksPanel(registry, containerName) {
+    if (!registry || !registry.links || registry.links.length === 0) {
+      linksPanelBody.innerHTML = '<p class="placeholder">No links configured for this container.</p>';
+      return;
+    }
+
+    const providerIcon = (p) => p === "github" ? "\u{1F4BB}" : "\u{2601}\uFE0F";
+    let html = '<table class="links-table"><thead><tr>';
+    html += '<th></th><th>Repository</th><th>Branch</th><th>Target</th><th>Sub-Path</th><th>Last Sync</th><th>Actions</th>';
+    html += '</tr></thead><tbody>';
+
+    for (const link of registry.links) {
+      const target = link.targetPrefix || "(root)";
+      const subPath = link.repoSubPath || "(all)";
+      const lastSync = link.lastSyncAt ? new Date(link.lastSyncAt).toLocaleString() : "never";
+      const shortUrl = link.repoUrl.replace(/^https?:\/\//, "").replace(/\.git$/, "");
+
+      html += '<tr>';
+      html += `<td><span class="link-provider-icon">${providerIcon(link.provider)}</span></td>`;
+      html += `<td class="link-url" title="${escapeHtml(link.repoUrl)}">${escapeHtml(shortUrl)}</td>`;
+      html += `<td>${escapeHtml(link.branch)}</td>`;
+      html += `<td>${escapeHtml(target)}</td>`;
+      html += `<td>${escapeHtml(subPath)}</td>`;
+      html += `<td>${escapeHtml(lastSync)}</td>`;
+      html += '<td class="link-actions">';
+      html += `<button class="link-sync-btn" data-link-id="${escapeHtml(link.id)}">Sync</button>`;
+      html += `<button class="link-unlink-btn" data-link-id="${escapeHtml(link.id)}">Unlink</button>`;
+      html += '</td>';
+      html += '</tr>';
+    }
+
+    html += '</tbody></table>';
+    linksPanelBody.innerHTML = html;
+
+    // Attach per-link action handlers
+    linksPanelBody.querySelectorAll(".link-sync-btn").forEach((btn) => {
+      btn.addEventListener("click", () => syncSingleLink(containerName, btn.dataset.linkId, btn));
+    });
+    linksPanelBody.querySelectorAll(".link-unlink-btn").forEach((btn) => {
+      btn.addEventListener("click", () => unlinkSingleLink(containerName, btn.dataset.linkId));
+    });
+  }
+
+  async function syncSingleLink(containerName, linkId, btn) {
+    if (!confirm("Sync this link now?")) return;
+    const origText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Syncing...";
+
+    try {
+      const result = await apiJson(`/api/sync-link/${currentStorage}/${containerName}/${linkId}`, {
+        method: "POST",
+      });
+      alert(
+        `Sync complete!\nUploaded: ${result.uploaded.length}\nDeleted: ${result.deleted.length}\nSkipped: ${result.skipped.length}\nErrors: ${result.errors.length}`
+      );
+      // Refresh panel data
+      await openLinksPanel(containerName);
+      // Refresh tree
+      await buildTree();
+    } catch (e) {
+      handleSyncError(e, "Sync failed", async () => {
+        await syncSingleLink(containerName, linkId, btn);
+      });
+    } finally {
+      btn.disabled = false;
+      btn.textContent = origText;
+    }
+  }
+
+  async function unlinkSingleLink(containerName, linkId) {
+    if (!confirm("Remove this link? (Files will not be deleted.)")) return;
+
+    try {
+      await apiJson(`/api/links/${currentStorage}/${containerName}/${linkId}`, {
+        method: "DELETE",
+      });
+      // Refresh panel
+      await openLinksPanel(containerName);
+      // Refresh tree to update indicators
+      await buildTree();
+    } catch (e) {
+      alert("Unlink failed: " + e.message);
+    }
+  }
+
+  // --- Sync All ---
+  linksSyncAll.addEventListener("click", async () => {
+    if (!linksPanelContainer) return;
+    if (!confirm("Sync ALL links for this container?")) return;
+
+    linksSyncAll.disabled = true;
+    linksSyncAll.textContent = "Syncing...";
+
+    try {
+      const data = await apiJson(`/api/sync-all/${currentStorage}/${linksPanelContainer}`, {
+        method: "POST",
+      });
+
+      let summary = "Sync All complete:\n";
+      for (const r of data.results) {
+        const shortUrl = r.repoUrl.replace(/^https?:\/\//, "").replace(/\.git$/, "");
+        summary += `\n${shortUrl}: uploaded=${r.result.uploaded.length}, deleted=${r.result.deleted.length}, errors=${r.result.errors.length}`;
+      }
+      alert(summary);
+
+      // Refresh panel and tree
+      await openLinksPanel(linksPanelContainer);
+      await buildTree();
+    } catch (e) {
+      const retryContainer = linksPanelContainer;
+      handleSyncError(e, "Sync All failed", async () => {
+        linksPanelContainer = retryContainer;
+        linksSyncAll.click();
+      });
+    } finally {
+      linksSyncAll.disabled = false;
+      linksSyncAll.textContent = "Sync All";
+    }
+  });
+
+  // --- Handle sync errors (detect missing PAT and offer to add) ---
+  let pendingRetryAction = null; // async function to retry after token is added
+
+  function handleSyncError(e, context, retryAction) {
+    if (e.code === "MISSING_PAT") {
+      pendingRetryAction = retryAction || null;
+      openAddTokenModal(e.provider, context);
+    } else {
+      alert(context + ": " + e.message);
+    }
+  }
+
+  function openAddTokenModal(provider, context) {
+    const providerLabel = provider === "github" ? "GitHub" : "Azure DevOps";
+    addTokenMessage.textContent = `A ${providerLabel} personal access token is required to sync. Please add one below.`;
+    addTokenProvider.value = provider;
+    addTokenName.value = "";
+    addTokenValue.value = "";
+    addTokenModal.classList.remove("hidden");
+    addTokenValue.focus();
+  }
+
+  addTokenCancel.addEventListener("click", () => {
+    addTokenModal.classList.add("hidden");
+    pendingRetryAction = null;
+  });
+
+  addTokenSave.addEventListener("click", async () => {
+    const name = addTokenName.value.trim();
+    const provider = addTokenProvider.value;
+    const token = addTokenValue.value.trim();
+
+    if (!name) { alert("Token name is required."); return; }
+    if (!token) { alert("Token value is required."); return; }
+
+    addTokenSave.disabled = true;
+    addTokenSave.textContent = "Saving...";
+
+    try {
+      await apiJson("/api/tokens", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, provider, token }),
+      });
+      addTokenModal.classList.add("hidden");
+
+      // Automatically retry the sync that triggered the missing PAT error
+      if (pendingRetryAction) {
+        const retry = pendingRetryAction;
+        pendingRetryAction = null;
+        await retry();
+      }
+    } catch (e) {
+      alert("Failed to save token: " + e.message);
+    } finally {
+      addTokenSave.disabled = false;
+      addTokenSave.textContent = "Save Token";
+    }
+  });
+
+  linksPanelClose.addEventListener("click", () => {
+    linksPanelModal.classList.add("hidden");
+    linksPanelContainer = null;
+  });
 
   // --- Init ---
   loadStorages();

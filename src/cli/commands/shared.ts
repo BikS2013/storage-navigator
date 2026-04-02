@@ -40,7 +40,7 @@ export interface StorageOpts {
  * 1. Inline credentials (--account-key or --sas-token with --account)
  * 2. Named stored credential (--storage)
  * 3. First stored credential
- * 4. Prompt the user interactively and offer to store
+ * Exits with error if no credential is available.
  */
 export async function resolveStorageEntry(opts: StorageOpts): Promise<{ store: CredentialStore; entry: StorageEntry }> {
   const store = new CredentialStore();
@@ -74,28 +74,12 @@ export async function resolveStorageEntry(opts: StorageOpts): Promise<{ store: C
   const first = store.getFirstStorage();
   if (first) return { store, entry: first };
 
-  // 4. Prompt the user
-  console.log("No storage accounts configured.");
-  const accountName = await promptSecret("Azure Storage account name: ");
-  const authChoice = await promptSecret("Auth type (key/sas): ");
-  let accountKey: string | undefined;
-  let sasToken: string | undefined;
-
-  if (authChoice === "sas") {
-    sasToken = await promptSecret("SAS token: ");
-  } else {
-    accountKey = await promptSecret("Account key: ");
-  }
-
-  const entry: StorageEntry = { name: accountName, accountName, accountKey, sasToken, addedAt: new Date().toISOString() };
-
-  const save = await promptYesNo("Store this credential for future use?");
-  if (save) {
-    store.addStorage({ name: accountName, accountName, accountKey, sasToken });
-    console.log(`Storage '${accountName}' saved.`);
-  }
-
-  return { store, entry };
+  // No credential available — raise error (no interactive fallback)
+  console.error("Error: No storage accounts configured.");
+  console.error(`\nTo add a storage account, run:`);
+  console.error(`  npx tsx src/cli/index.ts add --name <name> --account <account> --account-key <key>`);
+  console.error(`\nOr provide credentials inline with --account-key <key> --account <name>`);
+  process.exit(1);
 }
 
 export interface PatOpts {
@@ -108,7 +92,7 @@ export interface PatOpts {
  * 1. Inline PAT (--pat)
  * 2. Named stored token (--token-name)
  * 3. First stored token for the provider
- * 4. Prompt the user interactively and offer to store
+ * Exits with error if no token is available.
  */
 export async function resolvePatToken(
   store: CredentialStore,
@@ -130,16 +114,10 @@ export async function resolvePatToken(
   const token = store.getTokenByProvider(provider);
   if (token) return token.token;
 
-  // 4. Prompt the user
-  console.log(`No ${provider} token configured.`);
-  const pat = await promptSecret(`${provider} personal access token: `);
-
-  const save = await promptYesNo("Store this token for future use?");
-  if (save) {
-    const name = await promptSecret("Token display name: ");
-    store.addToken({ name, provider, token: pat });
-    console.log(`Token '${name}' saved.`);
-  }
-
-  return pat;
+  // No token available — raise error (no interactive fallback)
+  console.error(`Error: No ${provider} personal access token configured.`);
+  console.error(`\nTo add a token, run:`);
+  console.error(`  npx tsx src/cli/index.ts add-token --name <name> --provider ${provider} --token <token>`);
+  console.error(`\nOr provide one inline with --pat <token>`);
+  process.exit(1);
 }

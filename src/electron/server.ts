@@ -4,13 +4,61 @@ import { fileURLToPath } from "url";
 import mammoth from "mammoth";
 import { CredentialStore } from "../core/credential-store.js";
 import { BlobClient } from "../core/blob-client.js";
-import { readSyncMeta, syncRepo } from "../core/sync-engine.js";
+import { readSyncMeta, syncRepo, resolveLinks, writeLinks, createLink, removeLink } from "../core/sync-engine.js";
 import type { RepoProvider } from "../core/sync-engine.js";
+import type { RepoLink, SyncResult } from "../core/types.js";
 import { GitHubClient } from "../core/github-client.js";
 import { DevOpsClient } from "../core/devops-client.js";
+import { SshGitClient } from "../core/ssh-git-client.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+/**
+ * Build a RepoProvider + optional cleanup function for a given link.
+ * For github/azure-devops, requires a PAT from the credential store.
+ * For ssh, uses the system's SSH agent/keys (no PAT needed).
+ * Returns null if a PAT is required but not configured.
+ */
+async function buildProviderForLink(
+  store: CredentialStore,
+  link: RepoLink
+): Promise<{ provider: RepoProvider; cleanup?: () => void } | null> {
+  if (link.provider === "ssh") {
+    const sshClient = new SshGitClient();
+    await sshClient.clone(link.repoUrl, link.branch);
+    return {
+      provider: {
+        listFiles: () => sshClient.listFiles(),
+        downloadFile: (filePath) => sshClient.downloadFile(filePath),
+      },
+      cleanup: () => sshClient.cleanup(),
+    };
+  }
+
+  const pat = store.getTokenByProvider(link.provider as "github" | "azure-devops");
+  if (!pat) return null;
+
+  if (link.provider === "github") {
+    const { owner, repo } = GitHubClient.parseRepoUrl(link.repoUrl);
+    const client = new GitHubClient(pat.token);
+    return {
+      provider: {
+        listFiles: () => client.listFiles(owner, repo, link.branch),
+        downloadFile: (filePath) => client.downloadFile(owner, repo, filePath, link.branch),
+      },
+    };
+  } else {
+    const { org, project, repo } = DevOpsClient.parseRepoUrl(link.repoUrl);
+    const client = new DevOpsClient(pat.token, org);
+    return {
+      provider: {
+        listFiles: () => client.listFiles(project, repo, link.branch),
+        downloadFile: (filePath) => client.downloadFile(project, repo, filePath, link.branch),
+      },
+    };
+  }
+}
 
 export function createServer(port: number, publicDirOverride?: string): express.Express {
   const app = express();
@@ -162,6 +210,25 @@ export function createServer(port: number, publicDirOverride?: string): express.
     }
   });
 
+  // API: Delete a folder (all blobs under a prefix)
+  app.delete("/api/folder/:storage/:container", async (req, res) => {
+    try {
+      const store = new CredentialStore();
+      const entry = store.getStorage(req.params.storage);
+      if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
+
+      const prefix = req.query.prefix as string;
+      if (!prefix) { res.status(400).json({ error: "?prefix= query parameter required" }); return; }
+
+      const client = new BlobClient(entry);
+      const count = await client.deleteFolder(req.params.container, prefix);
+      res.json({ success: true, deleted: count });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: msg });
+    }
+  });
+
   // API: Create (upload) a blob
   app.post("/api/blob/:storage/:container", async (req, res) => {
     try {
@@ -184,15 +251,36 @@ export function createServer(port: number, publicDirOverride?: string): express.
     }
   });
 
-  // API: Get sync metadata for a container
+  // API: Get sync metadata for a container (backward compatible)
+  // Falls back to .repo-links.json if .repo-sync-meta.json is not found
   app.get("/api/sync-meta/:storage/:container", async (req, res) => {
     try {
       const store = new CredentialStore();
       const entry = store.getStorage(req.params.storage);
       if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
       const client = new BlobClient(entry);
+
+      // Try the legacy .repo-sync-meta.json first
       const meta = await readSyncMeta(client, req.params.container);
-      res.json(meta);
+      if (meta) { res.json(meta); return; }
+
+      // Fall back to .repo-links.json — convert first link to old format
+      const registry = await resolveLinks(client, req.params.container);
+      if (registry.links.length > 0) {
+        const link = registry.links[0];
+        const legacyMeta = {
+          provider: link.provider,
+          repoUrl: link.repoUrl,
+          branch: link.branch,
+          lastSyncAt: link.lastSyncAt ?? "",
+          lastCommitSha: link.lastCommitSha,
+          fileShas: link.fileShas,
+        };
+        res.json(legacyMeta);
+        return;
+      }
+
+      res.json(null);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       res.status(500).json({ error: msg });
@@ -207,34 +295,226 @@ export function createServer(port: number, publicDirOverride?: string): express.
       if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
       const blobClient = new BlobClient(entry);
 
-      const meta = await readSyncMeta(blobClient, req.params.container);
-      if (!meta) { res.status(400).json({ error: "Container is not a synced repository" }); return; }
+      // Resolve links (auto-migrates from old .repo-sync-meta.json if needed)
+      const registry = await resolveLinks(blobClient, req.params.container);
+      if (registry.links.length === 0) {
+        res.status(400).json({ error: "Container is not a synced repository" });
+        return;
+      }
 
-      const pat = meta.provider === "github"
-        ? store.getTokenByProvider("github")
-        : store.getTokenByProvider("azure-devops");
-      if (!pat) { res.status(400).json({ error: `No ${meta.provider} token configured` }); return; }
+      // If multiple links exist, direct caller to per-link or sync-all endpoints
+      if (registry.links.length > 1) {
+        res.status(400).json({
+          error: "Multiple links exist. Use /api/sync-link/:storage/:container/:linkId or /api/sync-all/:storage/:container",
+          links: registry.links.map((l) => ({ id: l.id, provider: l.provider, repoUrl: l.repoUrl, targetPrefix: l.targetPrefix })),
+        });
+        return;
+      }
+      const link: RepoLink = registry.links[0];
 
-      let provider: RepoProvider;
-      if (meta.provider === "github") {
-        const { owner, repo } = GitHubClient.parseRepoUrl(meta.repoUrl);
-        const client = new GitHubClient(pat.token);
-        provider = {
-          listFiles: () => client.listFiles(owner, repo, meta.branch),
-          downloadFile: (path) => client.downloadFile(owner, repo, path, meta.branch),
-        };
+      const built = await buildProviderForLink(store, link);
+      if (!built) { res.status(400).json({ error: `No ${link.provider} personal access token configured. Please add a token via Settings or the CLI.`, code: "MISSING_PAT", provider: link.provider }); return; }
+
+      const dryRun = req.query.dryRun === "true";
+      let result: SyncResult;
+      try {
+        result = await syncRepo(blobClient, req.params.container, built.provider, link, dryRun);
+      } finally {
+        built.cleanup?.();
+      }
+
+      // Write updated link back to registry (unless dry run)
+      if (!dryRun) {
+        const idx = registry.links.findIndex((l) => l.id === link.id);
+        if (idx >= 0) registry.links[idx] = link;
+        await writeLinks(blobClient, req.params.container, registry);
+      }
+
+      res.json(result);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  // ============================================================
+  // Link Registry API Endpoints (Folder-Level Linking)
+  // ============================================================
+
+  // API: List all links in a container
+  app.get("/api/links/:storage/:container", async (req, res) => {
+    try {
+      const store = new CredentialStore();
+      const entry = store.getStorage(req.params.storage);
+      if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
+      const client = new BlobClient(entry);
+      const registry = await resolveLinks(client, req.params.container);
+      res.json(registry);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  // API: Create a new link
+  app.post("/api/links/:storage/:container", async (req, res) => {
+    try {
+      const store = new CredentialStore();
+      const entry = store.getStorage(req.params.storage);
+      if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
+
+      const { provider, repoUrl, branch, targetPrefix, repoSubPath } = req.body;
+      if (!provider || !repoUrl || !branch) {
+        res.status(400).json({ error: "provider, repoUrl, and branch are required" });
+        return;
+      }
+      if (provider !== "github" && provider !== "azure-devops" && provider !== "ssh") {
+        res.status(400).json({ error: "provider must be 'github', 'azure-devops', or 'ssh'" });
+        return;
+      }
+
+      const client = new BlobClient(entry);
+      const result = await createLink(client, req.params.container, {
+        provider,
+        repoUrl,
+        branch,
+        repoSubPath,
+        targetPrefix,
+      });
+
+      res.json({ success: true, link: result.link, warning: result.warning });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // createLink throws on exact prefix conflict — return 409
+      if (msg.includes("A link already exists for prefix")) {
+        res.status(409).json({ error: msg });
       } else {
-        const { org, project, repo } = DevOpsClient.parseRepoUrl(meta.repoUrl);
-        const client = new DevOpsClient(pat.token, org);
-        provider = {
-          listFiles: () => client.listFiles(project, repo, meta.branch),
-          downloadFile: (path) => client.downloadFile(project, repo, path, meta.branch),
-        };
+        res.status(500).json({ error: msg });
+      }
+    }
+  });
+
+  // API: Remove a link
+  app.delete("/api/links/:storage/:container/:linkId", async (req, res) => {
+    try {
+      const store = new CredentialStore();
+      const entry = store.getStorage(req.params.storage);
+      if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
+
+      const client = new BlobClient(entry);
+      const removed = await removeLink(client, req.params.container, req.params.linkId);
+      if (!removed) {
+        res.status(404).json({ error: "Link not found" });
+        return;
+      }
+      res.json({ success: true });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  // API: Sync a specific link
+  app.post("/api/sync-link/:storage/:container/:linkId", async (req, res) => {
+    try {
+      const store = new CredentialStore();
+      const entry = store.getStorage(req.params.storage);
+      if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
+
+      const blobClient = new BlobClient(entry);
+      const registry = await resolveLinks(blobClient, req.params.container);
+      const link = registry.links.find((l) => l.id === req.params.linkId);
+      if (!link) {
+        res.status(404).json({ error: "Link not found" });
+        return;
+      }
+
+      const built = await buildProviderForLink(store, link);
+      if (!built) {
+        res.status(400).json({ error: `No ${link.provider} personal access token configured.`, code: "MISSING_PAT", provider: link.provider });
+        return;
       }
 
       const dryRun = req.query.dryRun === "true";
-      const result = await syncRepo(blobClient, req.params.container, provider, dryRun);
+      let result: SyncResult;
+      try {
+        result = await syncRepo(blobClient, req.params.container, built.provider, link, dryRun);
+      } finally {
+        built.cleanup?.();
+      }
+
+      if (!dryRun) {
+        const idx = registry.links.findIndex((l) => l.id === link.id);
+        if (idx >= 0) registry.links[idx] = link;
+        await writeLinks(blobClient, req.params.container, registry);
+      }
+
       res.json(result);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  // API: Sync all links in a container sequentially
+  app.post("/api/sync-all/:storage/:container", async (req, res) => {
+    try {
+      const store = new CredentialStore();
+      const entry = store.getStorage(req.params.storage);
+      if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
+
+      const blobClient = new BlobClient(entry);
+      const registry = await resolveLinks(blobClient, req.params.container);
+
+      if (registry.links.length === 0) {
+        res.status(400).json({ error: "No links configured in this container" });
+        return;
+      }
+
+      const dryRun = req.query.dryRun === "true";
+      const results: Array<{ linkId: string; provider: string; repoUrl: string; result: SyncResult }> = [];
+
+      for (const link of registry.links) {
+        let built: { provider: RepoProvider; cleanup?: () => void } | null = null;
+        try {
+          built = await buildProviderForLink(store, link);
+          if (!built) {
+            results.push({
+              linkId: link.id,
+              provider: link.provider,
+              repoUrl: link.repoUrl,
+              result: { uploaded: [], deleted: [], skipped: [], errors: [`No ${link.provider} personal access token configured.`] },
+            });
+            continue;
+          }
+
+          const result = await syncRepo(blobClient, req.params.container, built.provider, link, dryRun);
+
+          if (!dryRun) {
+            const idx = registry.links.findIndex((l) => l.id === link.id);
+            if (idx >= 0) registry.links[idx] = link;
+          }
+
+          results.push({ linkId: link.id, provider: link.provider, repoUrl: link.repoUrl, result });
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          results.push({
+            linkId: link.id,
+            provider: link.provider,
+            repoUrl: link.repoUrl,
+            result: { uploaded: [], deleted: [], skipped: [], errors: [msg] },
+          });
+        } finally {
+          built?.cleanup?.();
+        }
+      }
+
+      // Write updated registry once at the end (unless dry run)
+      if (!dryRun) {
+        await writeLinks(blobClient, req.params.container, registry);
+      }
+
+      res.json({ results });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       res.status(500).json({ error: msg });
@@ -245,6 +525,22 @@ export function createServer(port: number, publicDirOverride?: string): express.
   app.get("/api/tokens", (_req, res) => {
     const store = new CredentialStore();
     res.json(store.listTokens());
+  });
+
+  // API: Add a personal access token
+  app.post("/api/tokens", (req, res) => {
+    const { name, provider, token } = req.body;
+    if (!name || !provider || !token) {
+      res.status(400).json({ error: "name, provider, and token are required" });
+      return;
+    }
+    if (provider !== "github" && provider !== "azure-devops") {
+      res.status(400).json({ error: 'provider must be "github" or "azure-devops"' });
+      return;
+    }
+    const store = new CredentialStore();
+    store.addToken({ name, provider, token });
+    res.json({ success: true });
   });
 
   app.listen(port, () => {

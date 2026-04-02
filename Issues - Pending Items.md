@@ -4,9 +4,17 @@
 
 ### Medium Priority
 
-- **Test coverage**: No automated tests exist yet for repo sync features. Tests needed for: GitHub/DevOps client URL parsing, sync engine SHA diffing, token CRUD operations.
+- **Test coverage**: No automated tests exist yet for repo sync features. Tests needed for: GitHub/DevOps client URL parsing, sync engine SHA diffing, token CRUD operations, link registry CRUD, path filtering/mapping, migration logic.
+- **XSS in tree node names (pre-existing)**: `createTreeNode()` in `app.js` renders the `name` parameter via `innerHTML` without `escapeHtml()`. Container names and folder names from Azure could theoretically contain HTML special characters. Low risk since Azure Blob Storage restricts these characters, but should be hardened.
+- **Link dialog does not validate repo access before creating link**: The CLI commands (`link-github`, `link-devops`) validate that the repo is accessible by resolving the default branch, but the UI's `POST /api/links` endpoint only writes metadata without validating repo accessibility. The spec requires validation.
 - **GitHub Trees API truncation**: For very large repos (100k+ files), the Git Trees API may truncate results. A recursive fallback is not yet implemented.
 - **Git LFS files**: LFS-tracked files return pointer files, not actual content. Not handled in v1.
+
+### Low Priority
+
+- **Link dialog missing token dropdown**: The spec requires the link dialog to have a token dropdown populated from configured PATs filtered by provider. Current implementation only collects provider, URL, branch, prefix, and sub-path. Token selection is server-side (first matching token).
+- **Folder-level "Sync from Repository" context menu not implemented**: The spec calls for right-click on linked folders showing "Sync from Repository" and "Unlink Repository" options. Currently only "Link to Repo" appears in the folder context menu. Sync/unlink for linked folders must go through the Links Panel.
+- **Multi-link sync badge count**: The spec says the container badge should show count (e.g., "2 links") for multi-link containers. Current implementation shows a generic sync arrow icon. The tooltip shows count but the visual badge does not.
 
 ## Completed
 

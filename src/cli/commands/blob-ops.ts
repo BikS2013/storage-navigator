@@ -36,6 +36,25 @@ export async function deleteBlob(
   console.log("Done.");
 }
 
+export async function deleteFolder(
+  storageOpts: StorageOpts,
+  container: string,
+  prefix: string
+): Promise<void> {
+  const { entry } = await resolveStorageEntry(storageOpts);
+
+  const confirmed = await promptYesNo(`Delete ALL blobs under '${prefix}' from ${entry.accountName}/${container}?`);
+  if (!confirmed) {
+    console.log("Cancelled.");
+    return;
+  }
+
+  const client = new BlobClient(entry);
+  console.log(`Deleting all blobs under '${prefix}'...`);
+  const count = await client.deleteFolder(container, prefix);
+  console.log(`Done. ${count} blob(s) deleted.`);
+}
+
 export async function createBlob(
   storageOpts: StorageOpts,
   container: string,

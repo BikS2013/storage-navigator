@@ -337,3 +337,81 @@ header h1 { font-size: 14px; font-weight: 600; color: var(--text-accent); }
 /* Danger button */
 .modal-actions button.danger { background: #c0392b; border-color: #c0392b; }
 .modal-actions button.danger:hover { background: #e74c3c; border-color: #e74c3c; }
+
+/* ===== Link indicator badge ===== */
+.link-badge {
+  display: inline-block;
+  font-size: 10px;
+  color: var(--text-accent);
+  margin-left: 4px;
+  cursor: default;
+  opacity: 0.8;
+  vertical-align: middle;
+}
+
+/* ===== Links Panel ===== */
+.links-panel-content {
+  min-width: 560px;
+  max-width: 680px;
+}
+.links-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.links-panel-header h2 { margin-bottom: 0; }
+
+.links-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.links-table th,
+.links-table td {
+  padding: 6px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.links-table th {
+  background: var(--bg-secondary);
+  color: var(--text-dim);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.links-table td { color: var(--text); }
+.links-table td.link-url {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.links-table .link-actions {
+  display: flex;
+  gap: 4px;
+}
+.links-table .link-actions button {
+  padding: 2px 8px;
+  font-size: 11px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  background: var(--btn-bg);
+  color: var(--text);
+  cursor: pointer;
+}
+.links-table .link-actions button:hover { opacity: 0.9; }
+.links-table .link-actions button.link-sync-btn { background: var(--btn-primary); border-color: var(--btn-primary); color: white; }
+.links-table .link-actions button.link-unlink-btn { color: var(--expiry-expired); }
+.links-table .link-actions button.link-unlink-btn:hover { background: var(--expiry-expired); color: white; }
+
+.link-provider-icon {
+  display: inline-block;
+  width: 16px;
+  text-align: center;
+}
+
+/* Context-menu separator visual hint */
+.context-menu-item + .context-menu-item { /* no change needed, keeps existing spacing */ }

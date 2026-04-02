@@ -127,6 +127,30 @@ export class BlobClient {
     });
   }
 
+  /** Delete all blobs under a prefix (folder). Returns the count of deleted blobs. */
+  async deleteFolder(containerName: string, prefix: string): Promise<number> {
+    const containerClient = this.serviceClient.getContainerClient(containerName);
+
+    // Ensure prefix ends with /
+    const normalizedPrefix = prefix.endsWith("/") ? prefix : prefix + "/";
+
+    // List all blobs under the prefix (flat, recursive)
+    const blobsToDelete: string[] = [];
+    for await (const blob of containerClient.listBlobsFlat({ prefix: normalizedPrefix })) {
+      blobsToDelete.push(blob.name);
+    }
+
+    if (blobsToDelete.length === 0) {
+      throw new Error(`No blobs found under prefix '${normalizedPrefix}' in container '${containerName}'.`);
+    }
+
+    for (const blobName of blobsToDelete) {
+      await containerClient.getBlockBlobClient(blobName).delete();
+    }
+
+    return blobsToDelete.length;
+  }
+
   /** Download blob content */
   async getBlobContent(containerName: string, blobName: string): Promise<BlobContent> {
     const containerClient = this.serviceClient.getContainerClient(containerName);
