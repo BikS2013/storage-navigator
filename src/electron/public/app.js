@@ -180,7 +180,7 @@
         treeContent.appendChild(node);
       }
     } catch (e) {
-      treeContent.innerHTML = `<p class="placeholder">Error: ${e.message}</p>`;
+      treeContent.innerHTML = `<p class="placeholder">Error: ${escapeHtml(e.message)}</p>`;
     }
   }
 
@@ -191,11 +191,22 @@
     const item = document.createElement("div");
     item.className = "tree-item";
     item.style.setProperty("--depth", depth);
-    item.innerHTML = `
-      <span class="tree-toggle">${hasChildren ? "\u25B6" : ""}</span>
-      <span class="tree-icon">${icon}</span>
-      <span class="tree-name">${name}</span>
-    `;
+
+    const toggle = document.createElement("span");
+    toggle.className = "tree-toggle";
+    toggle.textContent = hasChildren ? "\u25B6" : "";
+
+    const iconSpan = document.createElement("span");
+    iconSpan.className = "tree-icon";
+    iconSpan.textContent = icon;
+
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "tree-name";
+    nameSpan.textContent = name;
+
+    item.appendChild(toggle);
+    item.appendChild(iconSpan);
+    item.appendChild(nameSpan);
     wrapper.appendChild(item);
 
     if (hasChildren) {
@@ -257,7 +268,7 @@
         }
       } catch { /* no links */ }
     } catch (e) {
-      children.innerHTML = `<div style="padding:4px 24px;color:var(--expiry-expired);font-size:12px">Error: ${e.message}</div>`;
+      children.innerHTML = `<div style="padding:4px 24px;color:var(--expiry-expired);font-size:12px">Error: ${escapeHtml(e.message)}</div>`;
     }
   }
 
@@ -338,7 +349,7 @@
     try {
       await loadTreeLevel(children, container, prefix, depth);
     } catch (e) {
-      children.innerHTML = `<div style="padding:4px 24px;color:var(--expiry-expired)">Error: ${e.message}</div>`;
+      children.innerHTML = `<div style="padding:4px 24px;color:var(--expiry-expired)">Error: ${escapeHtml(e.message)}</div>`;
     }
   }
 
@@ -372,9 +383,13 @@
         try {
           const res = await api(url + "&format=html");
           const html = await res.text();
-          contentBody.innerHTML = `<div class="docx-view">${html}</div>`;
+          // Sanitize: strip script/iframe/object/embed tags to prevent XSS from untrusted docx
+          const sanitized = html
+            .replace(/<script[\s\S]*?<\/script>/gi, "")
+            .replace(/<(iframe|object|embed|link|meta|form)[^>]*>/gi, "");
+          contentBody.innerHTML = `<div class="docx-view">${sanitized}</div>`;
         } catch (e) {
-          contentBody.innerHTML = `<p class="placeholder">Error: ${e.message}</p>`;
+          contentBody.innerHTML = `<p class="placeholder">Error: ${escapeHtml(e.message)}</p>`;
         }
         return;
       }
@@ -401,7 +416,7 @@
         contentBody.innerHTML = `<pre class="text-view">${escapeHtml(text)}</pre>`;
       }
     } catch (e) {
-      contentBody.innerHTML = `<p class="placeholder">Error: ${e.message}</p>`;
+      contentBody.innerHTML = `<p class="placeholder">Error: ${escapeHtml(e.message)}</p>`;
     }
   }
 
@@ -903,7 +918,7 @@
       containerLinksCache[containerName] = registry;
       renderLinksPanel(registry, containerName);
     } catch (e) {
-      linksPanelBody.innerHTML = `<p class="placeholder">Error: ${e.message}</p>`;
+      linksPanelBody.innerHTML = `<p class="placeholder">Error: ${escapeHtml(e.message)}</p>`;
     }
   }
 

@@ -132,11 +132,11 @@ export class CredentialStore {
 
   private save(): void {
     if (!fs.existsSync(STORE_DIR)) {
-      fs.mkdirSync(STORE_DIR, { recursive: true });
+      fs.mkdirSync(STORE_DIR, { recursive: true, mode: 0o700 });
     }
     const plaintext = JSON.stringify(this.data, null, 2);
     const payload = encrypt(plaintext);
-    fs.writeFileSync(STORE_FILE, JSON.stringify(payload, null, 2), "utf-8");
+    fs.writeFileSync(STORE_FILE, JSON.stringify(payload, null, 2), { encoding: "utf-8", mode: 0o600 });
   }
 
   /** Parse SAS token expiry date from the 'se' parameter */

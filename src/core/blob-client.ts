@@ -38,6 +38,12 @@ export class BlobClient {
     return containers;
   }
 
+  /** Create a new container */
+  async createContainer(containerName: string): Promise<void> {
+    const containerClient = this.serviceClient.getContainerClient(containerName);
+    await containerClient.create();
+  }
+
   /** List blobs in a container with optional prefix (for folder navigation) */
   async listBlobs(containerName: string, prefix?: string): Promise<BlobItem[]> {
     const containerClient = this.serviceClient.getContainerClient(containerName);

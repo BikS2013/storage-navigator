@@ -1,4 +1,4 @@
-import { execSync } from "child_process";
+import { execSync, spawnSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
@@ -23,13 +23,16 @@ export class SshGitClient {
   /** Get the default branch of a remote repo */
   async getDefaultBranch(repoUrl: string): Promise<string> {
     try {
-      const output = execSync(`git ls-remote --symref ${repoUrl} HEAD`, {
+      // Use spawnSync with array args to prevent shell injection via repoUrl
+      const result = spawnSync("git", ["ls-remote", "--symref", repoUrl, "HEAD"], {
         encoding: "utf-8",
         timeout: 30000,
         env: { ...process.env, GIT_SSH_COMMAND: "ssh -o StrictHostKeyChecking=accept-new" },
       });
+      if (result.error) throw result.error;
+      if (result.status !== 0) throw new Error(result.stderr || "git ls-remote failed");
       // Parse: ref: refs/heads/main\tHEAD
-      const match = output.match(/ref: refs\/heads\/(\S+)\tHEAD/);
+      const match = result.stdout.match(/ref: refs\/heads\/(\S+)\tHEAD/);
       if (match) return match[1];
       throw new Error("Could not determine default branch");
     } catch (err) {
@@ -47,8 +50,10 @@ export class SshGitClient {
     this.cloneDir = path.join(os.tmpdir(), tmpName);
 
     try {
-      execSync(
-        `git clone --depth 1 --single-branch --branch ${branch} ${repoUrl} ${this.cloneDir}`,
+      // Use spawnSync with array args to prevent shell injection via repoUrl/branch
+      const result = spawnSync(
+        "git",
+        ["clone", "--depth", "1", "--single-branch", "--branch", branch, repoUrl, this.cloneDir],
         {
           encoding: "utf-8",
           timeout: 300000, // 5 minutes for large repos
@@ -56,6 +61,8 @@ export class SshGitClient {
           stdio: ["pipe", "pipe", "pipe"],
         }
       );
+      if (result.error) throw result.error;
+      if (result.status !== 0) throw new Error(result.stderr || "git clone failed");
     } catch (err) {
       this.cleanup();
       const msg = err instanceof Error ? err.message : String(err);
@@ -98,7 +105,11 @@ export class SshGitClient {
    */
   async downloadFile(filePath: string): Promise<Buffer> {
     if (!this.cloneDir) throw new Error("Repository not cloned. Call clone() first.");
-    const fullPath = path.join(this.cloneDir, filePath);
+    const fullPath = path.resolve(this.cloneDir, filePath);
+    // Prevent path traversal — resolved path must stay inside cloneDir
+    if (!fullPath.startsWith(this.cloneDir + path.sep) && fullPath !== this.cloneDir) {
+      throw new Error(`Path traversal detected: ${filePath}`);
+    }
     if (!fs.existsSync(fullPath)) {
       throw new Error(`File not found in clone: ${filePath}`);
     }

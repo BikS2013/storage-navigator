@@ -4,7 +4,7 @@ import { addStorage } from "./commands/add-storage.js";
 import { listStorages } from "./commands/list-storages.js";
 import { removeStorage } from "./commands/remove-storage.js";
 import { viewBlob, listContainers, listBlobs, downloadBlob } from "./commands/view.js";
-import { renameBlob, deleteBlob, deleteFolder, createBlob } from "./commands/blob-ops.js";
+import { createContainer, renameBlob, deleteBlob, deleteFolder, createBlob } from "./commands/blob-ops.js";
 import { addToken, listTokens, removeToken } from "./commands/token-ops.js";
 import { cloneGitHub, cloneDevOps, cloneSsh, syncContainer } from "./commands/repo-sync.js";
 import { linkGitHub, linkDevOps, linkSsh, unlinkContainer, listLinks } from "./commands/link-ops.js";
@@ -55,6 +55,19 @@ program
   .option("--account <account>", "Azure Storage account name (required with inline key/token)")
   .action(async (opts) => {
     await listContainers({ storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account });
+  });
+
+// Create container
+program
+  .command("create-container")
+  .description("Create a new container in a storage account")
+  .requiredOption("--name <name>", "Container name")
+  .option("--storage <name>", "Storage account name (uses first if omitted)")
+  .option("--account-key <key>", "Account key (inline, overrides stored credential)")
+  .option("--sas-token <token>", "SAS token (inline, overrides stored credential)")
+  .option("--account <account>", "Azure Storage account name (required with inline key/token)")
+  .action(async (opts) => {
+    await createContainer({ storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.name);
   });
 
 // List blobs

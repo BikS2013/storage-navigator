@@ -5,10 +5,12 @@
 ### Medium Priority
 
 - **Test coverage**: No automated tests exist yet for repo sync features. Tests needed for: GitHub/DevOps client URL parsing, sync engine SHA diffing, token CRUD operations, link registry CRUD, path filtering/mapping, migration logic.
-- **XSS in tree node names (pre-existing)**: `createTreeNode()` in `app.js` renders the `name` parameter via `innerHTML` without `escapeHtml()`. Container names and folder names from Azure could theoretically contain HTML special characters. Low risk since Azure Blob Storage restricts these characters, but should be hardened.
 - **Link dialog does not validate repo access before creating link**: The CLI commands (`link-github`, `link-devops`) validate that the repo is accessible by resolving the default branch, but the UI's `POST /api/links` endpoint only writes metadata without validating repo accessibility. The spec requires validation.
-- **GitHub Trees API truncation**: For very large repos (100k+ files), the Git Trees API may truncate results. A recursive fallback is not yet implemented.
 - **Git LFS files**: LFS-tracked files return pointer files, not actual content. Not handled in v1.
+- **Duplicated content-type detection**: Three separate MIME-type maps exist in `blob-ops.ts`, `repo-utils.ts`, and `server.ts` with inconsistencies (`.md` maps to `text/plain` in one, `text/markdown` in another). Should consolidate to use `inferContentType()` from `repo-utils.ts` everywhere.
+- **Dead code**: `promptSecret()` in `src/cli/commands/shared.ts` is defined but never called.
+- **CredentialStore instantiated per request**: Every API request in `server.ts` creates a new `CredentialStore`, reading and decrypting from disk each time. Should use a singleton or request-scoped instance.
+- **Registry race conditions**: `createLink()`, `removeLink()`, `cloneRepo()`, and `syncRepo()` all do read-modify-write on `.repo-links.json` with no locking. Concurrent CLI/UI operations can overwrite each other.
 
 ### Low Priority
 
@@ -18,6 +20,13 @@
 
 ## Completed
 
+- **Command injection in ssh-git-client.ts**: Fixed. Replaced `execSync` with string interpolation by `spawnSync` with array args in `clone()` and `getDefaultBranch()` to prevent shell injection via repoUrl/branch. Also added path traversal guard in `downloadFile()`.
+- **Server binding to 0.0.0.0**: Fixed. Express server now binds explicitly to `127.0.0.1` instead of all interfaces, preventing network-adjacent access to the unauthenticated API.
+- **XSS via innerHTML in app.js**: Fixed. `createTreeNode()` now uses `textContent` via DOM APIs instead of `innerHTML`. All error messages use `escapeHtml()`. DOCX HTML output is sanitized by stripping script/iframe/object/embed tags.
+- **Credentials file permissions**: Fixed. `save()` in `credential-store.ts` now creates the directory with `mode: 0o700` and the file with `mode: 0o600`, preventing world-readable ciphertext.
+- **No SRI on CDN resources**: Fixed. Added `integrity` and `crossorigin="anonymous"` attributes to all CDN-loaded highlight.js and marked.js resources in `index.html`.
+- **GitHub Trees API truncation silently ignored**: Fixed. `listFiles()` now throws an error when the tree is truncated, with guidance to use `--repo-path` for large repos.
+- **Rate-limit header misinterpretation**: Fixed. `rateLimitedFetch()` now correctly distinguishes `x-ratelimit-reset` (epoch timestamp) from `Retry-After` (delta seconds). Added max retry limit of 5 to prevent unbounded recursion.
 - **Credential encryption key instability**: Fixed. The encryption key was derived from `os.hostname()` which changes on macOS depending on network. Migrated to a persisted random key at `~/.storage-navigator/machine.key`. Includes automatic migration from old hostname-based keys.
 - **Electron app name showing "Electron" in macOS dock**: Fixed. The launch script now renames `Electron.app` to `Storage Navigator.app` before launch and restores on exit.
 - **Electron static files not served**: Fixed. The esbuild bundle rewrote `__dirname`, breaking the public directory path. Now resolved via `process.cwd()` and passed as parameter to `createServer()`.

@@ -43,7 +43,10 @@ export class GitHubClient {
       truncated: boolean;
     };
     if (data.truncated) {
-      console.warn("Warning: Repository tree was truncated (very large repo). Some files may be missing.");
+      throw new Error(
+        "Repository tree was truncated by GitHub (very large repo). " +
+        "Use the --repo-path option to sync a sub-directory instead of the entire repo."
+      );
     }
     return data.tree
       .filter((item) => item.type === "blob")

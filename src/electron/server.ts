@@ -543,8 +543,8 @@ export function createServer(port: number, publicDirOverride?: string): express.
     res.json({ success: true });
   });
 
-  app.listen(port, () => {
-    console.log(`Storage Navigator server running on http://localhost:${port}`);
+  app.listen(port, "127.0.0.1", () => {
+    console.log(`Storage Navigator server running on http://127.0.0.1:${port}`);
   });
 
   return app;

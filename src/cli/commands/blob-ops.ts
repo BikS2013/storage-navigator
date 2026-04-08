@@ -3,6 +3,18 @@ import * as path from "path";
 import { BlobClient } from "../../core/blob-client.js";
 import { resolveStorageEntry, promptYesNo, type StorageOpts } from "./shared.js";
 
+export async function createContainer(
+  storageOpts: StorageOpts,
+  containerName: string
+): Promise<void> {
+  const { entry } = await resolveStorageEntry(storageOpts);
+  const client = new BlobClient(entry);
+
+  console.log(`Creating container '${containerName}' in ${entry.accountName}...`);
+  await client.createContainer(containerName);
+  console.log("Done.");
+}
+
 export async function renameBlob(
   storageOpts: StorageOpts,
   container: string,
