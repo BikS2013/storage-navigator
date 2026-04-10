@@ -54,6 +54,12 @@ export function launchElectronApp(port: number): void {
     const distDir = path.dirname(originalAppBundle);
     const targetAppBundle = path.join(distDir, "Storage Navigator.app");
 
+    // Recovery: if a previous run left the bundle renamed (SIGKILL, crash, etc.),
+    // restore it before proceeding so the rename below succeeds.
+    if (!fs.existsSync(originalAppBundle) && fs.existsSync(targetAppBundle)) {
+      fs.renameSync(targetAppBundle, originalAppBundle);
+    }
+
     // Rename Electron.app -> Storage Navigator.app (if not already renamed)
     if (path.basename(originalAppBundle) !== "Storage Navigator.app") {
       // If a stale renamed bundle exists, remove it first

@@ -1,3 +1,65 @@
+import { CredentialStore } from "./credential-store.js";
+import { GitHubClient } from "./github-client.js";
+import { DevOpsClient } from "./devops-client.js";
+import { SshGitClient } from "./ssh-git-client.js";
+import type { RepoLink, RepoProvider } from "./types.js";
+
+/**
+ * Construct a RepoProvider for the given link.
+ * Returns null if the link requires a PAT and none is configured (callers must respond with
+ * a MISSING_PAT error to the user).
+ * For SSH links, the returned cleanup() function must be called in a finally block.
+ *
+ * @param store       Credential store instance
+ * @param link        The RepoLink to build a provider for
+ * @param inlinePat   Optional PAT override (CLI --pat flag); takes priority over stored tokens
+ */
+export async function buildProviderForLink(
+  store: CredentialStore,
+  link: RepoLink,
+  inlinePat?: string
+): Promise<{ provider: RepoProvider; cleanup?: () => void } | null> {
+  if (link.provider === "ssh") {
+    const sshClient = new SshGitClient();
+    await sshClient.clone(link.repoUrl, link.branch);
+    return {
+      provider: {
+        listFiles: () => sshClient.listFiles(),
+        downloadFile: (filePath) => sshClient.downloadFile(filePath),
+      },
+      cleanup: () => sshClient.cleanup(),
+    };
+  }
+
+  // Use inlinePat if provided, otherwise fall back to stored token
+  let patToken: string | undefined = inlinePat;
+  if (!patToken) {
+    const stored = store.getTokenByProvider(link.provider as "github" | "azure-devops");
+    patToken = stored?.token;
+  }
+  if (!patToken) return null;
+
+  if (link.provider === "github") {
+    const { owner, repo } = GitHubClient.parseRepoUrl(link.repoUrl);
+    const client = new GitHubClient(patToken);
+    return {
+      provider: {
+        listFiles: () => client.listFiles(owner, repo, link.branch),
+        downloadFile: (filePath) => client.downloadFile(owner, repo, filePath, link.branch),
+      },
+    };
+  } else {
+    const { org, project, repo } = DevOpsClient.parseRepoUrl(link.repoUrl);
+    const client = new DevOpsClient(patToken, org);
+    return {
+      provider: {
+        listFiles: () => client.listFiles(project, repo, link.branch),
+        downloadFile: (filePath) => client.downloadFile(project, repo, filePath, link.branch),
+      },
+    };
+  }
+}
+
 const MAX_RATE_LIMIT_RETRIES = 5;
 
 /** Fetch with rate-limit retry handling */

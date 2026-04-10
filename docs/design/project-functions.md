@@ -74,6 +74,47 @@ Shared resolution logic is in `src/cli/commands/shared.ts` (`resolveStorageEntry
 - **UI: Unlink** — context menu option with confirmation dialog; files preserved after unlink
 - **UI: Links panel** — view all links for a container with sync and unlink actions per link
 
+## Repository Diff
+
+- **Read-only diff:** Compare files in a container (tracked via `link.fileShas`) against the current remote repository snapshot without making any writes to the container or credential store
+- **File classification:** Every tracked file is classified into one of four categories:
+  - **identical** — same SHA on both the container side and the remote
+  - **modified** — file exists on both sides but SHAs differ
+  - **repo-only** — file is in the remote repo but not yet in the container (never downloaded, or added to repo after last sync)
+  - **container-only** — file is tracked in the container but has been removed from or was never in the remote repo
+- **Untracked category (optional):** When `--physical-check` is enabled, blobs that physically exist in the container prefix but are not recorded in `link.fileShas` are reported as `untracked`
+- **Multi-link support:** For containers with multiple links, diff is run per link; each link's report is presented separately
+- **Never-synced link handling:** Links created via `link-github`/`link-devops` and never synced have empty `fileShas`; all remote files appear as `repo-only` with a human-readable note explaining the state
+- **DiffReport:** Structured report object containing categorised `DiffEntry[]` arrays, a summary (counts per category), `isInSync` boolean, `generatedAt` timestamp, and an optional `note` field
+- **CLI `diff` command:**
+  - `--container <name>` (required), `--storage`, `--account-key`, `--sas-token`, `--account`, `--pat`, `--token-name`
+  - `--prefix`, `--link-id`, `--all` for link selection (mirrors sync command selection logic)
+  - `--format table|json|summary` (default: table)
+  - `--show-identical` — include identical files in output (omitted by default to reduce noise)
+  - `--physical-check` — enable untracked blob cross-reference
+  - `--output <file>` — write JSON report to file
+  - Tri-state exit codes: `0` = in sync, `1` = differences found, `2` = fatal/operational error
+  - SSH warning printed before diff when link uses SSH provider
+- **API endpoints:**
+  - `GET /api/diff/:storage/:container/:linkId` — diff a single link; query params: `physicalCheck`, `showIdentical`
+  - `GET /api/diff-all/:storage/:container` — diff all links; returns `{ reports: DiffReport[] }`
+  - `400` with `code: "MISSING_PAT"` when PAT is required but not configured
+  - `404` when container has no links or specified link ID does not exist
+- **UI — Diff action in Links Panel:**
+  - "Diff" button in each link row (left of "Sync" button): order reads Diff | Sync | Unlink
+  - "Diff All" button in the Links Panel header (left of "Sync All")
+  - Diff result panel displayed inline below the links table within the Links Panel modal
+  - Result panel shows: summary bar (N modified | N repo-only | N container-only | N identical), status badge (IN SYNC / OUT OF SYNC), per-category collapsible sections, optional untracked section
+  - Identical section collapsed by default; expandable by the user
+  - Loading state: button disabled with indicator during API call; restored on completion
+  - Errors displayed as inline message (no `alert()`)
+  - "Sync Now" convenience button triggers the existing sync endpoint and refreshes the links panel
+- **Performance:**
+  - `diffLink()` calls `provider.listFiles()` exactly once; never calls `provider.downloadFile()`
+  - Physical check (`--physical-check`) adds one `listBlobsFlat` call per link; opt-in only
+  - SSH diff requires a shallow clone (same cost as SSH sync); warning shown to user
+  - Multi-link diff runs links sequentially (matches sync-all behaviour)
+
 ## UI Features
 
 - Electron desktop app with Express server backend

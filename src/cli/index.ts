@@ -8,6 +8,7 @@ import { createContainer, renameBlob, deleteBlob, deleteFolder, createBlob } fro
 import { addToken, listTokens, removeToken } from "./commands/token-ops.js";
 import { cloneGitHub, cloneDevOps, cloneSsh, syncContainer } from "./commands/repo-sync.js";
 import { linkGitHub, linkDevOps, linkSsh, unlinkContainer, listLinks } from "./commands/link-ops.js";
+import { diffContainer } from "./commands/diff-ops.js";
 
 const program = new Command();
 
@@ -360,6 +361,41 @@ program
   .option("--account <account>", "Azure Storage account name (with inline key/token)")
   .action(async (opts) => {
     await listLinks(opts.container, { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account });
+  });
+
+// Diff container against linked remote repository
+program
+  .command("diff")
+  .description("Compare container blobs against the linked remote repository (read-only)")
+  .requiredOption("--container <name>", "Container name")
+  .option("--storage <name>", "Storage account name (uses first if omitted)")
+  .option("--account-key <key>", "Inline account key")
+  .option("--sas-token <token>", "Inline SAS token")
+  .option("--account <account>", "Azure Storage account name (required with inline key/token)")
+  .option("--pat <token>", "Inline PAT (overrides stored token)")
+  .option("--token-name <name>", "PAT token name to use")
+  .option("--prefix <path>", "Diff only the link at this target prefix")
+  .option("--link-id <id>", "Diff a specific link by ID")
+  .option("--all", "Diff all links in the container")
+  .option("--format <fmt>", "Output format: table, json, summary (default: table)", "table")
+  .option("--show-identical", "Include identical files in output")
+  .option("--physical-check", "Cross-reference with actual container blobs to detect untracked files")
+  .option("--output <file>", "Write JSON report to file (only with --format json)")
+  .action(async (opts) => {
+    await diffContainer(
+      opts.container,
+      { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account },
+      { pat: opts.pat, tokenName: opts.tokenName },
+      {
+        prefix: opts.prefix,
+        linkId: opts.linkId,
+        all: opts.all,
+        format: opts.format,
+        showIdentical: opts.showIdentical,
+        physicalCheck: opts.physicalCheck,
+        output: opts.output,
+      }
+    );
   });
 
 // Launch Electron UI

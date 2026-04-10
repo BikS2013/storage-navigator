@@ -41,6 +41,7 @@ app.whenReady().then(() => {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      plugins: true,
     },
   });
 

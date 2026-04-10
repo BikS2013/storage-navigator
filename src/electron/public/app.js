@@ -68,6 +68,7 @@
   const linksPanelModal = document.getElementById("links-panel-modal");
   const linksPanelBody = document.getElementById("links-panel-body");
   const linksSyncAll = document.getElementById("links-sync-all");
+  const linksDiffAll = document.getElementById("links-diff-all");
   const linksPanelClose = document.getElementById("links-panel-close");
 
   // --- Add Token Modal elements ---
@@ -375,7 +376,15 @@
 
     try {
       if (ext === "pdf") {
-        contentBody.innerHTML = `<iframe class="pdf-embed" src="${url}"></iframe>`;
+        try {
+          const pdfRes = await fetch(url);
+          if (!pdfRes.ok) throw new Error(`API error: ${pdfRes.status}`);
+          const pdfBlob = await pdfRes.blob();
+          const blobUrl = URL.createObjectURL(new Blob([pdfBlob], { type: "application/pdf" }));
+          contentBody.innerHTML = `<iframe class="pdf-embed" src="${escapeHtml(blobUrl)}"></iframe>`;
+        } catch (e) {
+          contentBody.innerHTML = `<p class="placeholder">Error loading PDF: ${escapeHtml(e.message)}</p>`;
+        }
         return;
       }
 
@@ -941,12 +950,13 @@
 
       html += '<tr>';
       html += `<td><span class="link-provider-icon">${providerIcon(link.provider)}</span></td>`;
-      html += `<td class="link-url" title="${escapeHtml(link.repoUrl)}">${escapeHtml(shortUrl)}</td>`;
+      html += `<td class="link-url" title="Click to copy: ${escapeHtml(link.repoUrl)}" data-url="${escapeHtml(link.repoUrl)}">${escapeHtml(shortUrl)}</td>`;
       html += `<td>${escapeHtml(link.branch)}</td>`;
       html += `<td>${escapeHtml(target)}</td>`;
       html += `<td>${escapeHtml(subPath)}</td>`;
       html += `<td>${escapeHtml(lastSync)}</td>`;
       html += '<td class="link-actions">';
+      html += `<button class="link-diff-btn" data-link-id="${escapeHtml(link.id)}">Diff</button>`;
       html += `<button class="link-sync-btn" data-link-id="${escapeHtml(link.id)}">Sync</button>`;
       html += `<button class="link-unlink-btn" data-link-id="${escapeHtml(link.id)}">Unlink</button>`;
       html += '</td>';
@@ -957,11 +967,25 @@
     linksPanelBody.innerHTML = html;
 
     // Attach per-link action handlers
+    linksPanelBody.querySelectorAll(".link-diff-btn").forEach((btn) => {
+      btn.addEventListener("click", () => diffSingleLink(containerName, btn.dataset.linkId, btn));
+    });
     linksPanelBody.querySelectorAll(".link-sync-btn").forEach((btn) => {
       btn.addEventListener("click", () => syncSingleLink(containerName, btn.dataset.linkId, btn));
     });
     linksPanelBody.querySelectorAll(".link-unlink-btn").forEach((btn) => {
       btn.addEventListener("click", () => unlinkSingleLink(containerName, btn.dataset.linkId));
+    });
+    linksPanelBody.querySelectorAll(".link-url").forEach((cell) => {
+      cell.style.cursor = "pointer";
+      cell.addEventListener("click", () => {
+        const url = cell.dataset.url;
+        navigator.clipboard.writeText(url).then(() => {
+          const orig = cell.textContent;
+          cell.textContent = "Copied!";
+          setTimeout(() => { cell.textContent = orig; }, 1500);
+        });
+      });
     });
   }
 
@@ -1008,6 +1032,203 @@
     }
   }
 
+  // --- Diff single link ---
+  async function diffSingleLink(containerName, linkId, btn) {
+    const origText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Diffing...";
+
+    try {
+      const report = await apiJson(`/api/diff/${currentStorage}/${containerName}/${linkId}`);
+      renderDiffResult(report, containerName);
+    } catch (e) {
+      handleSyncError(e, "Diff failed", async () => {
+        await diffSingleLink(containerName, linkId, btn);
+      });
+    } finally {
+      btn.disabled = false;
+      btn.textContent = origText;
+    }
+  }
+
+  // --- Diff all links ---
+  async function diffAllLinks(containerName) {
+    try {
+      const data = await apiJson(`/api/diff-all/${currentStorage}/${containerName}`);
+      renderDiffAllResults(data, containerName);
+    } catch (e) {
+      handleSyncError(e, "Diff All failed", async () => {
+        await diffAllLinks(containerName);
+      });
+    }
+  }
+
+  // --- Build diff result HTML for a single report (does not touch the DOM) ---
+  function buildDiffResultHtml(report, containerName) {
+    const isInSync = report.summary.isInSync;
+    const syncClass = isInSync ? "diff-in-sync" : "diff-out-of-sync";
+    const syncLabel = isInSync ? "IN SYNC" : `${report.summary.modifiedCount + report.summary.repoOnlyCount + report.summary.containerOnlyCount} difference(s) found`;
+
+    const shortUrl = report.repoUrl.replace(/^https?:\/\//, "").replace(/\.git$/, "");
+    const lastSync = report.lastSyncAt ? new Date(report.lastSyncAt).toLocaleString() : "never";
+    const generatedAt = new Date(report.generatedAt).toLocaleString();
+
+    let html = '<div class="diff-result">';
+    html += `<div class="diff-summary ${syncClass}">${isInSync ? "&#10003;" : "&#9888;"} ${escapeHtml(syncLabel)}</div>`;
+    html += `<div class="diff-meta">`;
+    html += `<strong>Repo:</strong> ${escapeHtml(shortUrl)} &nbsp;|&nbsp; `;
+    html += `<strong>Branch:</strong> ${escapeHtml(report.branch)} &nbsp;|&nbsp; `;
+    if (report.targetPrefix) html += `<strong>Target:</strong> ${escapeHtml(report.targetPrefix)} &nbsp;|&nbsp; `;
+    html += `<strong>Last sync:</strong> ${escapeHtml(lastSync)} &nbsp;|&nbsp; `;
+    html += `<strong>Generated:</strong> ${escapeHtml(generatedAt)}`;
+    html += `</div>`;
+
+    if (report.note) {
+      html += `<div class="diff-note">&#9432; ${escapeHtml(report.note)}</div>`;
+    }
+
+    // MODIFIED
+    if (report.modified.length > 0) {
+      html += `<details class="diff-section" open>`;
+      html += `<summary>Modified (${report.modified.length})</summary>`;
+      html += `<div class="diff-file-list">`;
+      for (const entry of report.modified) {
+        const storedSha = entry.storedSha ? entry.storedSha.slice(0, 8) : "n/a";
+        const remoteSha = entry.remoteSha ? entry.remoteSha.slice(0, 8) : "n/a";
+        html += `<div class="diff-file"><span class="diff-prefix-m">M</span> ${escapeHtml(entry.blobPath)} <span style="color:var(--text-dim)">[stored:${escapeHtml(storedSha)} &rarr; remote:${escapeHtml(remoteSha)}]</span></div>`;
+      }
+      html += `</div></details>`;
+    }
+
+    // REPO-ONLY
+    if (report.repoOnly.length > 0) {
+      html += `<details class="diff-section" open>`;
+      html += `<summary>Repo Only (${report.repoOnly.length})</summary>`;
+      html += `<div class="diff-file-list">`;
+      for (const entry of report.repoOnly) {
+        const remoteSha = entry.remoteSha ? entry.remoteSha.slice(0, 8) : "n/a";
+        const physicalNote = entry.physicallyExists === true ? ` <span style="color:var(--expiry-warn)">[exists in container]</span>` : "";
+        html += `<div class="diff-file"><span class="diff-prefix-add">+</span> ${escapeHtml(entry.blobPath)} <span style="color:var(--text-dim)">[${escapeHtml(remoteSha)}]</span>${physicalNote}</div>`;
+      }
+      html += `</div></details>`;
+    }
+
+    // CONTAINER-ONLY
+    if (report.containerOnly.length > 0) {
+      html += `<details class="diff-section" open>`;
+      html += `<summary>Container Only (${report.containerOnly.length})</summary>`;
+      html += `<div class="diff-file-list">`;
+      for (const entry of report.containerOnly) {
+        const storedSha = entry.storedSha ? entry.storedSha.slice(0, 8) : "n/a";
+        html += `<div class="diff-file"><span class="diff-prefix-del">-</span> ${escapeHtml(entry.blobPath)} <span style="color:var(--text-dim)">[${escapeHtml(storedSha)}]</span></div>`;
+      }
+      html += `</div></details>`;
+    }
+
+    // UNTRACKED
+    if (report.untracked && report.untracked.length > 0) {
+      html += `<details class="diff-section" open>`;
+      html += `<summary>Untracked (${report.untracked.length})</summary>`;
+      html += `<div class="diff-file-list">`;
+      for (const entry of report.untracked) {
+        html += `<div class="diff-file"><span class="diff-prefix-unk">?</span> ${escapeHtml(entry.blobPath)}</div>`;
+      }
+      html += `</div></details>`;
+    }
+
+    // IDENTICAL (collapsed by default — no `open` attribute)
+    if (report.identical && report.identical.length > 0) {
+      html += `<details class="diff-section">`;
+      html += `<summary>Identical (${report.identical.length})</summary>`;
+      html += `<div class="diff-file-list">`;
+      for (const entry of report.identical) {
+        const sha = entry.remoteSha ? entry.remoteSha.slice(0, 8) : "n/a";
+        html += `<div class="diff-file"><span class="diff-prefix-eq">=</span> ${escapeHtml(entry.blobPath)} <span style="color:var(--text-dim)">[${escapeHtml(sha)}]</span></div>`;
+      }
+      html += `</div></details>`;
+    } else if (report.summary.identicalCount > 0) {
+      // identicalCount is set but identical array was stripped by server (showIdentical=false)
+      html += `<div class="diff-section" style="font-size:12px;color:var(--text-dim);padding:4px 0;">&#61; ${report.summary.identicalCount} identical file(s)</div>`;
+    }
+
+    // Sync Now button if out of sync
+    if (!isInSync && containerName) {
+      html += `<div class="diff-actions">`;
+      html += `<button class="diff-sync-now-btn primary" data-link-id="${escapeHtml(report.linkId)}" style="font-size:12px;padding:4px 12px;">Sync Now</button>`;
+      html += `</div>`;
+    }
+
+    html += `</div>`;
+    return html;
+  }
+
+  // --- Attach Sync Now button handlers inside a container element ---
+  function attachDiffSyncHandlers(containerEl, containerName) {
+    containerEl.querySelectorAll(".diff-sync-now-btn").forEach((syncNowBtn) => {
+      syncNowBtn.addEventListener("click", async () => {
+        const linkId = syncNowBtn.dataset.linkId;
+        syncNowBtn.disabled = true;
+        syncNowBtn.textContent = "Syncing...";
+        try {
+          const result = await apiJson(`/api/sync-link/${currentStorage}/${containerName}/${linkId}`, { method: "POST" });
+          alert(`Sync complete!\nUploaded: ${result.uploaded.length}\nDeleted: ${result.deleted.length}\nSkipped: ${result.skipped.length}\nErrors: ${result.errors.length}`);
+          await openLinksPanel(containerName);
+          await buildTree();
+        } catch (e) {
+          handleSyncError(e, "Sync failed", null);
+        } finally {
+          syncNowBtn.disabled = false;
+          syncNowBtn.textContent = "Sync Now";
+        }
+      });
+    });
+  }
+
+  // --- Render diff result for a single link ---
+  function renderDiffResult(report, containerName) {
+    const panel = document.getElementById("diff-result-panel") || createDiffResultPanel();
+    panel.innerHTML = buildDiffResultHtml(report, containerName);
+    panel.style.display = "";
+    attachDiffSyncHandlers(panel, containerName);
+  }
+
+  // --- Render diff results for all links ---
+  function renderDiffAllResults(data, containerName) {
+    const panel = document.getElementById("diff-result-panel") || createDiffResultPanel();
+    if (!data || !data.results || data.results.length === 0) {
+      panel.innerHTML = '<div class="diff-result"><p class="placeholder">No diff results returned.</p></div>';
+      panel.style.display = "";
+      return;
+    }
+
+    let combined = "";
+    for (const item of data.results) {
+      combined += buildDiffResultHtml(item.report, containerName);
+    }
+    panel.innerHTML = combined;
+    panel.style.display = "";
+    attachDiffSyncHandlers(panel, containerName);
+  }
+
+  // --- Render diff error inline ---
+  function renderDiffError(e) {
+    const panel = document.getElementById("diff-result-panel") || createDiffResultPanel();
+    panel.style.display = "";
+    panel.innerHTML = `<div class="diff-error">&#10007; ${escapeHtml(e.message || String(e))}</div>`;
+  }
+
+  // --- Create (or get) the diff result panel below the links table ---
+  function createDiffResultPanel() {
+    let panel = document.getElementById("diff-result-panel");
+    if (!panel) {
+      panel = document.createElement("div");
+      panel.id = "diff-result-panel";
+      panel.style.display = "none";
+      linksPanelBody.appendChild(panel);
+    }
+    return panel;
+  }
+
   // --- Sync All ---
   linksSyncAll.addEventListener("click", async () => {
     if (!linksPanelContainer) return;
@@ -1040,6 +1261,21 @@
     } finally {
       linksSyncAll.disabled = false;
       linksSyncAll.textContent = "Sync All";
+    }
+  });
+
+  // --- Diff All ---
+  linksDiffAll.addEventListener("click", async () => {
+    if (!linksPanelContainer) return;
+
+    linksDiffAll.disabled = true;
+    linksDiffAll.textContent = "Diffing...";
+
+    try {
+      await diffAllLinks(linksPanelContainer);
+    } finally {
+      linksDiffAll.disabled = false;
+      linksDiffAll.textContent = "Diff All";
     }
   });
 

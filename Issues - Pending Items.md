@@ -11,6 +11,8 @@
 - **Dead code**: `promptSecret()` in `src/cli/commands/shared.ts` is defined but never called.
 - **CredentialStore instantiated per request**: Every API request in `server.ts` creates a new `CredentialStore`, reading and decrypting from disk each time. Should use a singleton or request-scoped instance.
 - **Registry race conditions**: `createLink()`, `removeLink()`, `cloneRepo()`, and `syncRepo()` all do read-modify-write on `.repo-links.json` with no locking. Concurrent CLI/UI operations can overwrite each other.
+- **Diff All "Sync Now" button has no PAT retry**: In `attachDiffSyncHandlers()`, when sync fails with MISSING_PAT, `handleSyncError` is called with `null` as `retryAction`. After the user adds a token, the sync is not retried — they must manually click "Sync Now" again.
+- **`findLinkByPrefix` unhandled throw in repo-sync.ts**: The same unhandled-throw pattern fixed in `diff-ops.ts` exists in `repo-sync.ts` line 193 and `link-ops.ts` line 148. If the prefix is not found or ambiguous, an uncaught exception is printed rather than a clean error message with exit code 2.
 
 ### Low Priority
 
@@ -19,6 +21,9 @@
 - **Multi-link sync badge count**: The spec says the container badge should show count (e.g., "2 links") for multi-link containers. Current implementation shows a generic sync arrow icon. The tooltip shows count but the visual badge does not.
 
 ## Completed
+
+- **`renderDiffAllResults` used wrong response key (data.reports vs data.results)**: Fixed. The `/api/diff-all` endpoint returns `{ results: [...] }` but `renderDiffAllResults()` was checking `data.reports`, so "Diff All" always showed "No diff results returned." Fixed by correcting the field name and iterating `item.report` from each result entry.
+- **`findLinkByPrefix` throw not caught in diff-ops.ts**: Fixed. Wrapped the `findLinkByPrefix` call in a try/catch that prints the error message and exits with code 2, consistent with the function's documented error contract.
 
 - **Command injection in ssh-git-client.ts**: Fixed. Replaced `execSync` with string interpolation by `spawnSync` with array args in `clone()` and `getDefaultBranch()` to prevent shell injection via repoUrl/branch. Also added path traversal guard in `downloadFile()`.
 - **Server binding to 0.0.0.0**: Fixed. Express server now binds explicitly to `127.0.0.1` instead of all interfaces, preventing network-adjacent access to the unauthenticated API.

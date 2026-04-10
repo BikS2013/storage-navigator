@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import type { RepoSyncMeta, RepoFileEntry, SyncResult, RepoLink, RepoLinksRegistry } from "./types.js";
+import type { RepoSyncMeta, RepoFileEntry, SyncResult, RepoLink, RepoLinksRegistry, RepoProvider } from "./types.js";
 import { BlobClient } from "./blob-client.js";
 import { processInBatches, inferContentType } from "./repo-utils.js";
 
@@ -7,13 +7,11 @@ const META_BLOB = ".repo-sync-meta.json";
 const LINKS_BLOB = ".repo-links.json";
 const BATCH_CONCURRENCY = 10;
 
-export interface RepoProvider {
-  listFiles(): Promise<RepoFileEntry[]>;
-  downloadFile(filePath: string): Promise<Buffer>;
-}
+// Re-export RepoProvider so existing callers of `import type { RepoProvider } from "./sync-engine.js"` still work
+export type { RepoProvider };
 
 /** Maps a repo file to its target blob location. Internal to sync-engine. */
-interface MappedFileEntry {
+export interface MappedFileEntry {
   /** Original path in the repository (used for provider.downloadFile) */
   repoPath: string;
   /** Target path in the container (used for blobClient.createBlob and fileShas keys) */

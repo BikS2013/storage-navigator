@@ -6,59 +6,12 @@ import { CredentialStore } from "../core/credential-store.js";
 import { BlobClient } from "../core/blob-client.js";
 import { readSyncMeta, syncRepo, resolveLinks, writeLinks, createLink, removeLink } from "../core/sync-engine.js";
 import type { RepoProvider } from "../core/sync-engine.js";
-import type { RepoLink, SyncResult } from "../core/types.js";
-import { GitHubClient } from "../core/github-client.js";
-import { DevOpsClient } from "../core/devops-client.js";
-import { SshGitClient } from "../core/ssh-git-client.js";
+import type { RepoLink, SyncResult, DiffReport } from "../core/types.js";
+import { buildProviderForLink } from "../core/repo-utils.js";
+import { diffLink } from "../core/diff-engine.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-/**
- * Build a RepoProvider + optional cleanup function for a given link.
- * For github/azure-devops, requires a PAT from the credential store.
- * For ssh, uses the system's SSH agent/keys (no PAT needed).
- * Returns null if a PAT is required but not configured.
- */
-async function buildProviderForLink(
-  store: CredentialStore,
-  link: RepoLink
-): Promise<{ provider: RepoProvider; cleanup?: () => void } | null> {
-  if (link.provider === "ssh") {
-    const sshClient = new SshGitClient();
-    await sshClient.clone(link.repoUrl, link.branch);
-    return {
-      provider: {
-        listFiles: () => sshClient.listFiles(),
-        downloadFile: (filePath) => sshClient.downloadFile(filePath),
-      },
-      cleanup: () => sshClient.cleanup(),
-    };
-  }
-
-  const pat = store.getTokenByProvider(link.provider as "github" | "azure-devops");
-  if (!pat) return null;
-
-  if (link.provider === "github") {
-    const { owner, repo } = GitHubClient.parseRepoUrl(link.repoUrl);
-    const client = new GitHubClient(pat.token);
-    return {
-      provider: {
-        listFiles: () => client.listFiles(owner, repo, link.branch),
-        downloadFile: (filePath) => client.downloadFile(owner, repo, filePath, link.branch),
-      },
-    };
-  } else {
-    const { org, project, repo } = DevOpsClient.parseRepoUrl(link.repoUrl);
-    const client = new DevOpsClient(pat.token, org);
-    return {
-      provider: {
-        listFiles: () => client.listFiles(project, repo, link.branch),
-        downloadFile: (filePath) => client.downloadFile(project, repo, filePath, link.branch),
-      },
-    };
-  }
-}
 
 export function createServer(port: number, publicDirOverride?: string): express.Express {
   const app = express();
@@ -163,7 +116,7 @@ export function createServer(port: number, publicDirOverride?: string): express.
       }
 
       res.setHeader("Content-Type", blob.contentType);
-      res.setHeader("X-Blob-Name", blob.name);
+      res.setHeader("X-Blob-Name", encodeURIComponent(blob.name));
       res.setHeader("X-Blob-Size", String(blob.size));
       res.send(blob.content);
     } catch (err: unknown) {
@@ -512,6 +465,87 @@ export function createServer(port: number, publicDirOverride?: string): express.
       // Write updated registry once at the end (unless dry run)
       if (!dryRun) {
         await writeLinks(blobClient, req.params.container, registry);
+      }
+
+      res.json({ results });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  // API: Diff a specific link (read-only comparison of container vs remote repo)
+  app.get("/api/diff/:storage/:container/:linkId", async (req, res) => {
+    try {
+      const store = new CredentialStore();
+      const entry = store.getStorage(req.params.storage);
+      if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
+
+      const blobClient = new BlobClient(entry);
+      const registry = await resolveLinks(blobClient, req.params.container);
+      const link = registry.links.find((l) => l.id === req.params.linkId);
+      if (!link) {
+        res.status(404).json({ error: "Link not found" });
+        return;
+      }
+
+      const built = await buildProviderForLink(store, link);
+      if (!built) {
+        res.status(400).json({ error: `No ${link.provider} personal access token configured.`, code: "MISSING_PAT", provider: link.provider });
+        return;
+      }
+
+      const includePhysicalCheck = req.query.physicalCheck === "true";
+      const showIdentical = req.query.showIdentical === "true";
+
+      let report: DiffReport;
+      try {
+        report = await diffLink(built.provider, link, blobClient, req.params.container, { includePhysicalCheck, showIdentical });
+      } finally {
+        built.cleanup?.();
+      }
+
+      res.json(report);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  // API: Diff all links in a container (read-only comparison)
+  app.get("/api/diff-all/:storage/:container", async (req, res) => {
+    try {
+      const store = new CredentialStore();
+      const entry = store.getStorage(req.params.storage);
+      if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
+
+      const blobClient = new BlobClient(entry);
+      const registry = await resolveLinks(blobClient, req.params.container);
+
+      if (registry.links.length === 0) {
+        res.status(400).json({ error: "No links configured in this container" });
+        return;
+      }
+
+      const includePhysicalCheck = req.query.physicalCheck === "true";
+      const showIdentical = req.query.showIdentical === "true";
+
+      const results: Array<{ linkId: string; provider: string; repoUrl: string; report: DiffReport }> = [];
+
+      for (const link of registry.links) {
+        let built: { provider: RepoProvider; cleanup?: () => void } | null = null;
+        try {
+          built = await buildProviderForLink(store, link);
+          if (!built) {
+            res.status(400).json({ error: `No ${link.provider} personal access token configured for link ${link.id}.`, code: "MISSING_PAT", provider: link.provider, linkId: link.id });
+            return;
+          }
+
+          const report = await diffLink(built.provider, link, blobClient, req.params.container, { includePhysicalCheck, showIdentical });
+          results.push({ linkId: link.id, provider: link.provider, repoUrl: link.repoUrl, report });
+        } finally {
+          built?.cleanup?.();
+        }
       }
 
       res.json({ results });

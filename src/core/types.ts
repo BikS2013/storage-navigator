@@ -107,3 +107,50 @@ export interface BlobContent {
   size: number;
   name: string;
 }
+
+/** A single file entry in a diff report, representing one file across both sides */
+export interface DiffEntry {
+  blobPath: string;             // Path as it appears/would appear in the container
+  repoPath: string;             // Original path in the repository (pre-prefix mapping)
+  remoteSha: string | null;     // Git object SHA from the repo; null for container-only entries
+  storedSha: string | null;     // SHA recorded in link.fileShas; null for repo-only entries
+  physicallyExists?: boolean;   // Only set when includePhysicalCheck=true
+}
+
+/** Category of a diff entry */
+export type DiffCategory = "identical" | "modified" | "repo-only" | "container-only" | "untracked";
+
+/** Full diff report for a single RepoLink */
+export interface DiffReport {
+  linkId: string;
+  provider: "github" | "azure-devops" | "ssh";
+  repoUrl: string;
+  branch: string;
+  targetPrefix: string | undefined;
+  repoSubPath: string | undefined;
+  lastSyncAt: string | undefined;
+  generatedAt: string;         // ISO 8601 timestamp of when the diff was produced
+  note?: string;               // Human-readable note (e.g. "Link has never been synced")
+
+  identical:     DiffEntry[];
+  modified:      DiffEntry[];
+  repoOnly:      DiffEntry[];
+  containerOnly: DiffEntry[];
+  untracked:     DiffEntry[];  // Only populated when includePhysicalCheck=true
+
+  summary: {
+    total: number;
+    identicalCount:     number;
+    modifiedCount:      number;
+    repoOnlyCount:      number;
+    containerOnlyCount: number;
+    untrackedCount:     number;
+    isInSync: boolean;  // true iff modifiedCount + repoOnlyCount + containerOnlyCount === 0
+  };
+}
+
+/** Provider interface for repository operations */
+export interface RepoProvider {
+  listFiles(): Promise<RepoFileEntry[]>;
+  downloadFile(filePath: string): Promise<Buffer>;
+}

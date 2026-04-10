@@ -4502,3 +4502,1183 @@ export async function syncContainer(container: string, storageOpts: StorageOpts,
 | Migration creates duplicate link if retried | Low | Random UUID acceptable; second migration is no-op if `.repo-links.json` already exists |
 | `app.js` growing large (currently 749 lines, adding ~250-300) | Low | New code in clearly-demarcated section; splitting into modules deferred |
 | Rate limiting with many links synced via `--all` | Low | Sequential sync; existing `rateLimitedFetch` handles 429 responses |
+
+---
+
+## Technical Design: Container vs. Repository Diff Feature
+
+**Date:** 2026-04-08
+**References:**
+- `docs/reference/refined-request-container-diff.md` — full requirement specification
+- `docs/design/plan-005-container-diff.md` — phased implementation plan
+- `docs/reference/investigation-container-diff.md` — architecture decision record
+- `docs/reference/codebase-scan-container-diff.md` — codebase analysis and integration points
+
+---
+
+### 1. Overview
+
+The diff feature adds a read-only comparison capability to Storage Navigator. It compares the files currently stored in an Azure Blob Storage container (tracked via `RepoLink.fileShas`) against the current state of the remote repository linked to that container, and classifies every file into one of five categories: **identical**, **modified**, **repo-only**, **container-only**, or **untracked** (the last only with `--physical-check`).
+
+The feature is entirely non-destructive: `diffLink()` makes zero write operations to the container, the credential store, or the link registry.
+
+The feature spans all four layers of the codebase:
+
+| Layer | Primary component |
+|-------|-------------------|
+| Core engine | `src/core/diff-engine.ts` (new) |
+| Shared types | `src/core/types.ts` (extended) |
+| Provider factory | `src/core/repo-utils.ts` (extracted from `server.ts`) |
+| CLI command | `src/cli/commands/diff-ops.ts` (new) |
+| REST API | `src/electron/server.ts` (two new GET endpoints) |
+| UI | `src/electron/public/app.js` + `index.html` (diff panel added) |
+
+---
+
+### 2. New Types — `src/core/types.ts`
+
+Add the following three exports **at the end of the file**, after the existing `BlobContent` interface.
+
+#### 2.1 `DiffCategory`
+
+```typescript
+/**
+ * Classification of a file's diff status between container and remote repository.
+ * "untracked" is only populated when includePhysicalCheck=true.
+ */
+export type DiffCategory =
+  | "identical"       // Same SHA on both sides
+  | "modified"        // File exists on both sides but SHAs differ
+  | "repo-only"       // In repo but not in link.fileShas (never downloaded or new since last sync)
+  | "container-only"  // In link.fileShas but removed from or never in remote repo
+  | "untracked";      // Physically exists in container but not tracked in link.fileShas at all
+```
+
+#### 2.2 `DiffEntry`
+
+```typescript
+/**
+ * A single file entry in a diff report.
+ * blobPath is the canonical key used throughout — it is the path as it appears (or would appear)
+ * in the Azure Blob Storage container. repoPath is the original path in the repository before
+ * any prefix mapping.
+ */
+export interface DiffEntry {
+  blobPath: string;          // Path as it appears/would appear in the container
+  repoPath: string;          // Original path in the repository (pre-prefix mapping)
+  remoteSha: string | null;  // Git object SHA from the repo; null for container-only entries
+  storedSha: string | null;  // SHA recorded in link.fileShas; null for repo-only entries
+  physicallyExists?: boolean; // Set only when includePhysicalCheck=true; true if blob is physically present
+}
+```
+
+**Design notes:**
+- `physicallyExists` is `undefined` (not set) when `includePhysicalCheck=false`. Consumers must check for `=== true`, not just truthiness.
+- For `"untracked"` entries, `remoteSha` is `null` and `storedSha` is `null`. Only `blobPath` is meaningful; `repoPath` is set to the same value as `blobPath` since there is no repo-side counterpart.
+- SHAs are full 40-character git SHAs internally. Truncation to 8 characters is a display concern handled in `diff-ops.ts`, not in the engine or types.
+
+#### 2.3 `DiffReport`
+
+```typescript
+/**
+ * Full diff report for a single RepoLink.
+ * generatedAt records when diffLink() was called; it is always set regardless of link state.
+ * note is set when the link has never been synced (fileShas is empty and lastSyncAt is undefined).
+ *
+ * The summary counts always reflect the complete diff, even when showIdentical=false is applied
+ * at the API or CLI layer (which zeroes out the identical array but preserves identicalCount).
+ */
+export interface DiffReport {
+  linkId: string;
+  provider: "github" | "azure-devops" | "ssh";
+  repoUrl: string;
+  branch: string;
+  targetPrefix: string | undefined;
+  repoSubPath: string | undefined;
+  lastSyncAt: string | undefined;   // ISO 8601; undefined if link has never been synced
+  generatedAt: string;              // ISO 8601 timestamp when diffLink() completed
+
+  /** Set when the link has never been synced; explains why all files appear as repo-only */
+  note?: string;
+
+  identical:     DiffEntry[];
+  modified:      DiffEntry[];
+  repoOnly:      DiffEntry[];
+  containerOnly: DiffEntry[];
+  untracked:     DiffEntry[];  // Only populated when includePhysicalCheck=true; otherwise always []
+
+  summary: {
+    total:              number;  // Sum of all four primary counts (excluding untracked)
+    identicalCount:     number;
+    modifiedCount:      number;
+    repoOnlyCount:      number;
+    containerOnlyCount: number;
+    untrackedCount:     number;
+    /** true iff modifiedCount + repoOnlyCount + containerOnlyCount === 0 */
+    isInSync: boolean;
+  };
+}
+```
+
+**Key invariant:** `summary.total === identicalCount + modifiedCount + repoOnlyCount + containerOnlyCount`. The `untrackedCount` is deliberately excluded from `total` because untracked blobs are outside the link's tracked universe.
+
+**`showIdentical` application:** The `showIdentical=false` filter is applied **after** `diffLink()` returns, by the API endpoint or CLI formatter. The engine always populates `identical[]` fully. The filter sets `report.identical = []` before serialising, but `summary.identicalCount` is always preserved. This ensures the summary line is always accurate regardless of the display filter.
+
+---
+
+### 3. Diff Engine — `src/core/diff-engine.ts`
+
+This is a new file. It imports the path-mapping helpers from `sync-engine.ts` and the types from `types.ts`. It has zero writes to any external system.
+
+#### 3.1 Imports and Dependencies
+
+```typescript
+import type { BlobClient } from "./blob-client.js";
+import type { RepoLink, DiffEntry, DiffReport } from "./types.js";
+import type { RepoProvider, MappedFileEntry } from "./sync-engine.js";
+import { filterByRepoSubPath, mapToTargetPaths } from "./sync-engine.js";
+```
+
+`MappedFileEntry` must be exported from `sync-engine.ts` before this import works (one-line change: `export interface MappedFileEntry`).
+
+`RepoProvider` is a non-exported interface in `sync-engine.ts` — it must be exported as well (change `interface RepoProvider` to `export interface RepoProvider`). The existing `server.ts` already imports it with `import type { RepoProvider } from "../core/sync-engine.js"`, confirming this export exists.
+
+#### 3.2 `DiffOptions` interface
+
+```typescript
+interface DiffOptions {
+  /** When true, calls blobClient.listBlobsFlat() to detect untracked blobs. Default: false */
+  includePhysicalCheck?: boolean;
+  /** Optional progress callback for long-running operations (SSH clone) */
+  onProgress?: (msg: string) => void;
+}
+```
+
+#### 3.3 `diffLink()` function signature
+
+```typescript
+/**
+ * Compare the files currently tracked in a RepoLink against the current remote repository state.
+ *
+ * This function is purely read-only:
+ * - Calls provider.listFiles() exactly once
+ * - Never calls provider.downloadFile()
+ * - Makes zero writes to the container, credential store, or link registry
+ * - Does not mutate the link object
+ *
+ * Errors from provider.listFiles() propagate upward — no silent fallback.
+ *
+ * @param blobClient  Authenticated blob client (only used when includePhysicalCheck=true)
+ * @param container   Container name
+ * @param provider    Repo provider instance (GitHub, DevOps, or SSH)
+ * @param link        The RepoLink to diff
+ * @param options     Optional behaviour flags
+ */
+export async function diffLink(
+  blobClient: BlobClient,
+  container: string,
+  provider: RepoProvider,
+  link: RepoLink,
+  options?: DiffOptions
+): Promise<DiffReport>
+```
+
+#### 3.4 Algorithm — Phase 1 (SHA comparison, always runs)
+
+```
+1. Call provider.listFiles() → RepoFileEntry[]
+   - If this throws, let the exception propagate. Do NOT catch and return partial results.
+
+2. Apply filterByRepoSubPath(remoteFiles, link.repoSubPath)
+   - Returns only files under link.repoSubPath (or all files if repoSubPath is undefined)
+
+3. Apply mapToTargetPaths(filtered, link.repoSubPath, link.targetPrefix)
+   - Returns MappedFileEntry[] where each entry has:
+     - repoPath:  original path in the repo
+     - blobPath:  the container path (repoSubPath stripped, targetPrefix prepended)
+     - sha:       the git object SHA
+
+4. Build remoteMap: Map<string, string> = new Map(mapped.map(e => [e.blobPath, e.sha]))
+   - Key: blobPath, Value: remoteSha
+
+5. Build storedMap: Map<string, string> = new Map(Object.entries(link.fileShas))
+   - Key: blobPath, Value: storedSha (exactly as recorded at last sync)
+
+6. Build repoPathMap: Map<string, string> = new Map(mapped.map(e => [e.blobPath, e.repoPath]))
+   - Needed to populate DiffEntry.repoPath for all non-container-only entries
+
+7. Classify entries:
+
+   identical: []
+   modified: []
+   repoOnly: []
+   containerOnly: []
+
+   FOR EACH [blobPath, remoteSha] IN remoteMap:
+     repoPath = repoPathMap.get(blobPath) ?? blobPath
+     storedSha = storedMap.get(blobPath) ?? null
+
+     IF storedSha === null:
+       repoOnly.push({ blobPath, repoPath, remoteSha, storedSha: null })
+     ELSE IF storedSha === remoteSha:
+       identical.push({ blobPath, repoPath, remoteSha, storedSha })
+     ELSE:
+       modified.push({ blobPath, repoPath, remoteSha, storedSha })
+
+   FOR EACH [blobPath, storedSha] IN storedMap:
+     IF NOT remoteMap.has(blobPath):
+       containerOnly.push({ blobPath, repoPath: blobPath, remoteSha: null, storedSha })
+
+8. Detect never-synced link:
+   IF Object.keys(link.fileShas).length === 0 AND link.lastSyncAt === undefined:
+     note = "Link has never been synced; all repo files appear as repo-only"
+
+9. Build summary:
+   summary = {
+     total: identical.length + modified.length + repoOnly.length + containerOnly.length,
+     identicalCount: identical.length,
+     modifiedCount: modified.length,
+     repoOnlyCount: repoOnly.length,
+     containerOnlyCount: containerOnly.length,
+     untrackedCount: 0,
+     isInSync: modified.length === 0 && repoOnly.length === 0 && containerOnly.length === 0
+   }
+```
+
+#### 3.5 Algorithm — Phase 2 (physical check, only when `includePhysicalCheck=true`)
+
+```
+1. Call blobClient.listBlobsFlat(container, link.targetPrefix)
+   - Returns BlobItem[] filtered to the target prefix
+   - Filter out isPrefix=true entries (virtual directories)
+
+2. Build physicalSet: Set<string> = new Set(physicalBlobs.map(b => b.name))
+
+3. For each entry in repoOnly[]:
+   entry.physicallyExists = physicalSet.has(entry.blobPath)
+
+4. For each physicalBlobPath in physicalSet:
+   IF NOT storedMap.has(physicalBlobPath):
+     untracked.push({
+       blobPath: physicalBlobPath,
+       repoPath: physicalBlobPath,  // no repo counterpart
+       remoteSha: null,
+       storedSha: null,
+       physicallyExists: true
+     })
+
+5. Update summary.untrackedCount = untracked.length
+```
+
+**Important:** `physicallyExists` is set on `repoOnly` entries even if the physical check discovers them. This allows the UI to distinguish between "this file is in the repo but was never downloaded" (physicallyExists=false) and "this file is in the repo and was uploaded manually outside of sync" (physicallyExists=true).
+
+#### 3.6 Return structure construction
+
+```typescript
+const report: DiffReport = {
+  linkId: link.id,
+  provider: link.provider as "github" | "azure-devops" | "ssh",
+  repoUrl: link.repoUrl,
+  branch: link.branch,
+  targetPrefix: link.targetPrefix,
+  repoSubPath: link.repoSubPath,
+  lastSyncAt: link.lastSyncAt,
+  generatedAt: new Date().toISOString(),
+  note,
+  identical,
+  modified,
+  repoOnly,
+  containerOnly,
+  untracked,
+  summary
+};
+return report;
+```
+
+#### 3.7 Error propagation contract
+
+```
+provider.listFiles() throws  →  diffLink() re-throws (do not catch)
+blobClient.listBlobsFlat() throws  →  diffLink() re-throws (Phase 2 error also propagates)
+link.fileShas is empty  →  valid input; all remote files become repoOnly (see Phase 1 step 8)
+link.fileShas has unknown blobPaths  →  those entries become containerOnly (correct behaviour)
+```
+
+---
+
+### 4. Provider Factory Extraction — `src/core/repo-utils.ts`
+
+#### 4.1 Motivation
+
+`buildProviderForLink()` in `server.ts` is currently a private module-level function. The CLI diff command (`diff-ops.ts`) needs identical provider-construction logic but cannot import from `server.ts` (server-side module). Extracting to `repo-utils.ts` gives both layers a single, shared implementation.
+
+#### 4.2 New function signature in `src/core/repo-utils.ts`
+
+```typescript
+import { CredentialStore } from "./credential-store.js";
+import { GitHubClient } from "./github-client.js";
+import { DevOpsClient } from "./devops-client.js";
+import { SshGitClient } from "./ssh-git-client.js";
+import type { RepoLink } from "./types.js";
+import type { RepoProvider } from "./sync-engine.js";
+
+/**
+ * Construct a RepoProvider for the given RepoLink.
+ *
+ * For SSH links: clones the repository; the returned cleanup() MUST be called
+ * in a finally block to remove the temporary directory.
+ *
+ * For GitHub / Azure DevOps links: looks up the PAT from the credential store.
+ * Returns null if no PAT is configured (callers must respond with MISSING_PAT error).
+ *
+ * @param store      Credential store instance
+ * @param link       The RepoLink to build a provider for
+ * @param inlinePat  Optional PAT override (CLI --pat flag); takes priority over stored tokens.
+ *                   If provided, it is used directly without consulting the credential store.
+ */
+export async function buildProviderForLink(
+  store: CredentialStore,
+  link: RepoLink,
+  inlinePat?: string
+): Promise<{ provider: RepoProvider; cleanup?: () => void } | null>
+```
+
+#### 4.3 `inlinePat` precedence logic
+
+```typescript
+// Inside buildProviderForLink, for GitHub and Azure DevOps providers:
+let token: string;
+if (inlinePat) {
+  token = inlinePat;
+} else {
+  const pat = store.getTokenByProvider(link.provider as "github" | "azure-devops");
+  if (!pat) return null;
+  token = pat.token;
+}
+```
+
+For SSH links, `inlinePat` is irrelevant and can be ignored — SSH uses system keys, not PATs.
+
+#### 4.4 Function body
+
+The body is moved verbatim from `server.ts` lines 23–61, with the `inlinePat` precedence inserted as shown in 4.3. No other logic changes.
+
+#### 4.5 `server.ts` changes after extraction
+
+1. Remove the `buildProviderForLink` function body (lines 23–61).
+2. Remove imports that are now only used by `buildProviderForLink`: `GitHubClient`, `DevOpsClient`, `SshGitClient` (verify no other usages before removing).
+3. Add import: `import { buildProviderForLink } from "../core/repo-utils.js";`
+4. All existing call sites in `server.ts` pass no `inlinePat` — the optional third parameter defaults to `undefined`. Existing behaviour is unchanged.
+
+#### 4.6 How CLI uses it
+
+```typescript
+// In diff-ops.ts:
+import { buildProviderForLink } from "../../core/repo-utils.js";
+import { CredentialStore } from "../../core/credential-store.js";
+
+const store = new CredentialStore();
+const result = await buildProviderForLink(store, link, patOpts.pat);
+if (!result) {
+  console.error(`No PAT configured for provider "${link.provider}". Add one with: add-token`);
+  process.exit(2);
+}
+const { provider, cleanup } = result;
+try {
+  const report = await diffLink(blobClient, container, provider, link, diffOptions);
+  // ... format and output report
+} finally {
+  cleanup?.();
+}
+```
+
+---
+
+### 5. CLI Command — `src/cli/commands/diff-ops.ts`
+
+#### 5.1 File structure
+
+```typescript
+// Imports
+import * as fs from "fs";
+import chalk from "chalk";
+import { CredentialStore } from "../../core/credential-store.js";
+import { BlobClient } from "../../core/blob-client.js";
+import { resolveLinks, findLinkByPrefix } from "../../core/sync-engine.js";
+import { diffLink } from "../../core/diff-engine.js";
+import { buildProviderForLink } from "../../core/repo-utils.js";
+import { resolveStorageEntry, resolvePatToken } from "./shared.js";
+import type { StorageOpts, PatOpts } from "./shared.js";
+import type { DiffReport, RepoLink } from "../../core/types.js";
+
+// Exit code constants (documented for developer reference)
+// EXIT_INSYNC  = 0  — all diffed links are in sync
+// EXIT_DIFF    = 1  — one or more links have differences (not an error; expected for diff)
+// EXIT_ERROR   = 2  — fatal/operational error (no links, auth failure, ambiguous selection)
+const EXIT_INSYNC = 0;
+const EXIT_DIFF   = 1;
+const EXIT_ERROR  = 2;
+
+// Main exported function
+export async function diffContainer(
+  container: string,
+  storageOpts: StorageOpts,
+  patOpts: PatOpts,
+  opts: DiffContainerOpts
+): Promise<void>
+
+// Private formatting helpers
+function formatTable(reports: DiffReport[], showIdentical: boolean): void
+function formatSummary(reports: DiffReport[]): void
+function formatJson(reports: DiffReport[], outputFile?: string): void
+function printReport(report: DiffReport, showIdentical: boolean): void
+function truncateSha(sha: string | null): string  // Returns first 8 chars or "--------"
+function statusLine(isInSync: boolean): string    // Returns coloured "IN SYNC" or "OUT OF SYNC"
+```
+
+#### 5.2 `DiffContainerOpts` interface
+
+```typescript
+interface DiffContainerOpts {
+  prefix?: string;
+  linkId?: string;
+  all?: boolean;
+  format: "table" | "summary" | "json";  // Defaults to "table" from Commander
+  showIdentical?: boolean;
+  physicalCheck?: boolean;
+  output?: string;
+}
+```
+
+#### 5.3 Link selection logic
+
+Mirrors `syncContainer()` in `repo-sync.ts` exactly, with exit code 2 for all operational errors:
+
+```
+Step 1: Load registry = await resolveLinks(blobClient, container)
+        IF registry.links.length === 0:
+          console.error("No repository links found in container <name>.")
+          console.error("Use link-github or link-devops to create a link first.")
+          process.exit(EXIT_ERROR)
+
+Step 2: Determine links to diff:
+        IF opts.all:
+          linksToProcess = registry.links
+        ELSE IF opts.linkId:
+          link = registry.links.find(l => l.id === opts.linkId)
+          IF !link:
+            console.error(`No link found with ID "${opts.linkId}".`)
+            process.exit(EXIT_ERROR)
+          linksToProcess = [link]
+        ELSE IF opts.prefix:
+          link = findLinkByPrefix(registry.links, opts.prefix)
+          IF !link:
+            console.error(`No link found at prefix "${opts.prefix}".`)
+            process.exit(EXIT_ERROR)
+          linksToProcess = [link]
+        ELSE IF registry.links.length === 1:
+          linksToProcess = registry.links  // auto-select single link
+        ELSE:
+          console.error(`Container "${container}" has ${n} links. Specify one with:`)
+          registry.links.forEach(l => console.error(`  --link-id ${l.id}  (${l.provider}: ${l.repoUrl})`))
+          console.error("Or use --all to diff all links.")
+          process.exit(EXIT_ERROR)
+```
+
+#### 5.4 Per-link diff loop
+
+```typescript
+const reports: DiffReport[] = [];
+let anyDiff = false;
+
+for (const link of linksToProcess) {
+  // SSH performance warning
+  if (link.provider === "ssh") {
+    console.warn("Warning: this link uses SSH. Diff requires cloning the repository which may take a while...");
+  }
+
+  const result = await buildProviderForLink(store, link, patOpts.pat);
+  if (!result) {
+    console.error(`No PAT configured for provider "${link.provider}" (link: ${link.id}).`);
+    process.exit(EXIT_ERROR);
+  }
+
+  const { provider, cleanup } = result;
+  try {
+    const report = await diffLink(blobClient, container, provider, link, {
+      includePhysicalCheck: opts.physicalCheck,
+      onProgress: (msg) => console.log(msg),
+    });
+    reports.push(report);
+    if (!report.summary.isInSync) anyDiff = true;
+  } finally {
+    cleanup?.();
+  }
+}
+```
+
+#### 5.5 Output formatting — `table` format
+
+```
+Diff Report — container: <container>
+Link: <provider> / <repoUrl> (branch: <branch>)
+Target prefix: <targetPrefix ?? "(root)">   Repo sub-path: <repoSubPath ?? "(all)">
+Last sync: <lastSyncAt ?? "never">
+Generated at: <generatedAt>
+[NOTE: <note> — only printed when report.note is set]
+────────────────────────────────────────────────────────────────────────
+
+[MODIFIED (<n>) — only printed if modified.length > 0]
+  <blobPath>    stored: <storedSha[0..7]>  remote: <remoteSha[0..7]>
+
+[REPO-ONLY (<n>)  [in repo, not yet in container] — only if repoOnly.length > 0]
+  <blobPath>    remote: <remoteSha[0..7]>
+
+[CONTAINER-ONLY (<n>)  [in container, removed from repo] — only if containerOnly.length > 0]
+  <blobPath>    stored: <storedSha[0..7]>
+
+[IDENTICAL (<n>) — only printed when --show-identical is passed AND identical.length > 0]
+  <blobPath>    sha: <remoteSha[0..7]>
+
+[UNTRACKED (<n>)  [in container, not tracked by this link] — only if untracked.length > 0]
+  <blobPath>
+
+────────────────────────────────────────────────────────────────────────
+Summary: <n> modified, <n> repo-only, <n> container-only, <n> identical[, <n> untracked]
+Status: <IN SYNC | OUT OF SYNC>
+```
+
+**Colour rules:**
+- MODIFIED header: `chalk.yellow`
+- REPO-ONLY header: `chalk.blue`
+- CONTAINER-ONLY header: `chalk.red`
+- IDENTICAL header: `chalk.gray`
+- UNTRACKED header: `chalk.magenta`
+- IN SYNC: `chalk.green.bold`
+- OUT OF SYNC: `chalk.red.bold`
+- NOTE text: `chalk.yellow.italic` or plain yellow
+- Colours are suppressed when `process.stdout.isTTY !== true` (chalk handles this automatically via its TTY detection)
+
+**Multi-link table output:** Print one report block per link. Separate consecutive blocks with a blank line plus `=== Link <n> of <total> ===` header.
+
+#### 5.6 Output formatting — `summary` format
+
+One line per link, always to stdout:
+
+```
+<container> / <provider> / <repoUrl> (<branch>) — <n> modified, <n> repo-only, <n> container-only, <n> identical — <STATUS>
+```
+
+No per-file details. Useful for CI pipeline checks.
+
+#### 5.7 Output formatting — `json` format
+
+```typescript
+const json = JSON.stringify(reports, null, 2);
+if (opts.output) {
+  fs.writeFileSync(opts.output, json, "utf-8");
+  // Do NOT print to stdout when writing to file
+} else {
+  process.stdout.write(json + "\n");
+}
+```
+
+`--output` is silently ignored when `--format` is `table` or `summary` (document in help text).
+
+#### 5.8 Exit code logic
+
+```typescript
+if (opts.format === "json" && opts.output) {
+  // File written silently; exit 0 if in sync, 1 if diffs
+}
+
+if (anyDiff) {
+  process.exit(EXIT_DIFF);   // exit 1: differences found (not an error)
+} else {
+  process.exit(EXIT_INSYNC); // exit 0: all in sync
+}
+// EXIT_ERROR (2) is called inline at error sites via process.exit(EXIT_ERROR)
+```
+
+---
+
+### 6. Commander Registration — `src/cli/index.ts`
+
+Add the following block after the existing `sync` command registration. Follow the exact pattern of existing commands:
+
+```typescript
+import { diffContainer } from "./commands/diff-ops.js";
+
+program
+  .command("diff")
+  .description("Compare container blobs against the linked remote repository (read-only)")
+  .requiredOption("--container <name>", "Container name")
+  .option("--storage <name>", "Storage account name")
+  .option("--account-key <key>", "Inline account key")
+  .option("--sas-token <token>", "Inline SAS token")
+  .option("--account <account>", "Azure Storage account name (required with inline key/token)")
+  .option("--pat <token>", "Inline PAT (overrides stored token)")
+  .option("--token-name <name>", "PAT token name to use")
+  .option("--prefix <path>", "Diff only the link at this target prefix")
+  .option("--link-id <id>", "Diff a specific link by ID")
+  .option("--all", "Diff all links in the container")
+  .option("--format <fmt>", "Output format: table, json, summary", "table")
+  .option("--show-identical", "Include identical files in output (hidden by default)")
+  .option("--physical-check", "Cross-reference with actual container blobs to detect untracked files")
+  .option("--output <file>", "Write JSON report to file (only effective with --format json)")
+  .action(async (opts) => {
+    await diffContainer(
+      opts.container,
+      {
+        storage: opts.storage,
+        accountKey: opts.accountKey,
+        sasToken: opts.sasToken,
+        account: opts.account,
+      },
+      { pat: opts.pat, tokenName: opts.tokenName },
+      {
+        prefix: opts.prefix,
+        linkId: opts.linkId,
+        all: opts.all,
+        format: opts.format as "table" | "summary" | "json",
+        showIdentical: opts.showIdentical,
+        physicalCheck: opts.physicalCheck,
+        output: opts.output,
+      }
+    );
+  });
+```
+
+---
+
+### 7. API Endpoints — `src/electron/server.ts`
+
+Two new GET endpoints are added inside `createServer()`, after the existing sync-link endpoints.
+
+#### 7.1 Endpoint 1: `GET /api/diff/:storage/:container/:linkId`
+
+**Purpose:** Diff a single link by its ID.
+
+**Query parameters:**
+- `physicalCheck=true` — enables Phase 2 of `diffLink()` (default: false)
+- `showIdentical=true` — include `identical[]` in response (default: false; summary counts always present)
+
+**Response:** `DiffReport` JSON object on `200`.
+
+**Implementation skeleton:**
+
+```typescript
+app.get("/api/diff/:storage/:container/:linkId", async (req, res) => {
+  try {
+    const store = new CredentialStore();
+    const entry = store.getStorage(req.params.storage);
+    if (!entry) {
+      res.status(404).json({ error: `Storage "${req.params.storage}" not found` });
+      return;
+    }
+
+    const blobClient = new BlobClient(entry);
+    const registry = await resolveLinks(blobClient, req.params.container);
+    if (!registry || registry.links.length === 0) {
+      res.status(404).json({ error: `Container "${req.params.container}" has no repository links` });
+      return;
+    }
+
+    const link = registry.links.find(l => l.id === req.params.linkId);
+    if (!link) {
+      res.status(404).json({ error: `Link "${req.params.linkId}" not found` });
+      return;
+    }
+
+    const providerResult = await buildProviderForLink(store, link);
+    if (!providerResult) {
+      res.status(400).json({ error: `No PAT configured for provider "${link.provider}"`, code: "MISSING_PAT" });
+      return;
+    }
+
+    const { provider, cleanup } = providerResult;
+    try {
+      const includePhysicalCheck = req.query.physicalCheck === "true";
+      const showIdentical = req.query.showIdentical === "true";
+
+      const report = await diffLink(blobClient, req.params.container, provider, link, {
+        includePhysicalCheck,
+      });
+
+      // Apply showIdentical filter: preserve counts, zero out array
+      if (!showIdentical) {
+        report.identical = [];
+      }
+
+      res.json(report);
+    } finally {
+      cleanup?.();
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: msg });
+  }
+});
+```
+
+#### 7.2 Endpoint 2: `GET /api/diff-all/:storage/:container`
+
+**Purpose:** Diff all links in a container in one call.
+
+**Query parameters:** Same as Endpoint 1.
+
+**Response:** `{ reports: DiffReport[] }` on `200`.
+
+**Implementation skeleton:**
+
+```typescript
+app.get("/api/diff-all/:storage/:container", async (req, res) => {
+  try {
+    const store = new CredentialStore();
+    const entry = store.getStorage(req.params.storage);
+    if (!entry) {
+      res.status(404).json({ error: `Storage "${req.params.storage}" not found` });
+      return;
+    }
+
+    const blobClient = new BlobClient(entry);
+    const registry = await resolveLinks(blobClient, req.params.container);
+    if (!registry || registry.links.length === 0) {
+      res.status(404).json({ error: `Container "${req.params.container}" has no repository links` });
+      return;
+    }
+
+    const includePhysicalCheck = req.query.physicalCheck === "true";
+    const showIdentical = req.query.showIdentical === "true";
+    const reports: DiffReport[] = [];
+
+    // Process links sequentially — matches existing sync-all behaviour
+    for (const link of registry.links) {
+      const providerResult = await buildProviderForLink(store, link);
+      if (!providerResult) {
+        res.status(400).json({ error: `No PAT for provider "${link.provider}" (link: ${link.id})`, code: "MISSING_PAT" });
+        return;
+      }
+
+      const { provider, cleanup } = providerResult;
+      try {
+        const report = await diffLink(blobClient, req.params.container, provider, link, {
+          includePhysicalCheck,
+        });
+        if (!showIdentical) report.identical = [];
+        reports.push(report);
+      } finally {
+        cleanup?.();
+      }
+    }
+
+    res.json({ reports });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: msg });
+  }
+});
+```
+
+#### 7.3 Required new imports in `server.ts`
+
+```typescript
+import { diffLink } from "../core/diff-engine.js";
+import type { DiffReport } from "../core/types.js";
+// buildProviderForLink is imported from repo-utils.js after extraction (Phase 2)
+import { buildProviderForLink } from "../core/repo-utils.js";
+// resolveLinks is already imported from sync-engine.js
+```
+
+#### 7.4 HTTP status code summary
+
+| Condition | Endpoint 1 | Endpoint 2 |
+|-----------|------------|------------|
+| Storage not found | 404 | 404 |
+| Container has no links | 404 | 404 |
+| Link ID not found | 404 | N/A |
+| PAT missing | 400 + `code: "MISSING_PAT"` | 400 + `code: "MISSING_PAT"` |
+| `provider.listFiles()` fails | 500 | 500 |
+| Success | 200 with `DiffReport` | 200 with `{ reports: DiffReport[] }` |
+
+---
+
+### 8. UI Design — `src/electron/public/app.js` and `index.html`
+
+#### 8.1 Button placement
+
+**In `renderLinksPanel()` in `app.js`:**
+
+The links table action column currently renders `[Sync] [Unlink]` per row. Change to `[Diff] [Sync] [Unlink]`:
+
+```javascript
+// Inside the link row HTML template string:
+`<button class="btn-diff-link" data-link-id="${link.id}" title="Compare container against repo">Diff</button>
+ <button class="btn-sync-link" data-link-id="${link.id}">Sync</button>
+ <button class="btn-unlink" data-link-id="${link.id}">Unlink</button>`
+```
+
+**In the Links Panel modal header:**
+
+The header currently has `[Sync All] [Close]`. Change to `[Diff All] [Sync All] [Close]`:
+
+```javascript
+`<button id="btn-diff-all">Diff All</button>
+ <button id="btn-sync-all">Sync All</button>
+ <button id="btn-close-links-panel">✕</button>`
+```
+
+#### 8.2 Diff result panel HTML structure
+
+Add a persistent `div` inside the Links Panel modal, immediately below the links table. Hidden by default:
+
+```html
+<!-- In index.html, inside the links-panel-modal div, after the links table -->
+<div id="diff-result-panel" style="display:none; max-height:60vh; overflow-y:auto; border-top:1px solid #ddd; padding-top:12px; margin-top:12px;">
+</div>
+```
+
+This is the only required change to `index.html`. All content within the panel is rendered by `app.js` via `innerHTML`.
+
+#### 8.3 Diff result panel content structure
+
+When a diff completes, `renderDiffResult(report, storage, container)` populates `#diff-result-panel`:
+
+```html
+<!-- Header -->
+<div class="diff-header">
+  <span class="diff-provider-icon"><!-- GitHub/DevOps/SSH icon --></span>
+  <strong><a href="${repoUrl}" target="_blank">${truncateUrl(repoUrl, 60)}</a></strong>
+  (${branch})
+  &nbsp;·&nbsp; prefix: ${targetPrefix ?? "(root)"}
+  &nbsp;·&nbsp; sub-path: ${repoSubPath ?? "(all)"}
+</div>
+<div class="diff-timestamps">
+  Last sync: ${lastSyncAt ?? "never"} &nbsp;·&nbsp; Generated: ${generatedAt}
+</div>
+
+<!-- Note (only if present) -->
+${report.note ? `<div class="diff-note">ℹ ${escapeHtml(report.note)}</div>` : ""}
+
+<!-- Summary bar -->
+<div class="diff-summary-bar">
+  <span class="diff-count-modified">${modifiedCount} modified</span> |
+  <span class="diff-count-repo-only">${repoOnlyCount} repo-only</span> |
+  <span class="diff-count-container-only">${containerOnlyCount} container-only</span> |
+  <span class="diff-count-identical">${identicalCount} identical</span>
+  ${untrackedCount > 0 ? `| <span class="diff-count-untracked">${untrackedCount} untracked</span>` : ""}
+</div>
+
+<!-- Status badge -->
+<div class="diff-status ${isInSync ? 'diff-status-sync' : 'diff-status-diff'}">
+  ${isInSync ? "✓ IN SYNC" : "✗ OUT OF SYNC"}
+</div>
+
+<!-- Per-category sections using <details>/<summary> for collapsibility -->
+
+<!-- MODIFIED (always open by default if non-empty) -->
+${modified.length > 0 ? `
+<details open>
+  <summary class="diff-category-header diff-modified">MODIFIED (${modified.length})</summary>
+  <table class="diff-file-table">
+    ${modified.map(e => `
+    <tr>
+      <td class="diff-filepath">${escapeHtml(e.blobPath)}</td>
+      <td class="diff-sha">stored: ${e.storedSha?.slice(0,8) ?? "--------"}</td>
+      <td class="diff-sha">remote: ${e.remoteSha?.slice(0,8) ?? "--------"}</td>
+    </tr>`).join("")}
+  </table>
+</details>` : ""}
+
+<!-- REPO-ONLY (always open by default if non-empty) -->
+${repoOnly.length > 0 ? `
+<details open>
+  <summary class="diff-category-header diff-repo-only">REPO-ONLY (${repoOnly.length}) — in repo, not yet in container</summary>
+  <table class="diff-file-table">
+    ${repoOnly.map(e => `
+    <tr>
+      <td class="diff-filepath">${escapeHtml(e.blobPath)}</td>
+      <td class="diff-sha">remote: ${e.remoteSha?.slice(0,8) ?? "--------"}</td>
+      ${e.physicallyExists !== undefined ? `<td class="diff-physical">${e.physicallyExists ? "⚠ physically present" : ""}</td>` : ""}
+    </tr>`).join("")}
+  </table>
+</details>` : ""}
+
+<!-- CONTAINER-ONLY (always open by default if non-empty) -->
+${containerOnly.length > 0 ? `
+<details open>
+  <summary class="diff-category-header diff-container-only">CONTAINER-ONLY (${containerOnly.length}) — in container, removed from repo</summary>
+  <table class="diff-file-table">
+    ${containerOnly.map(e => `
+    <tr>
+      <td class="diff-filepath">${escapeHtml(e.blobPath)}</td>
+      <td class="diff-sha">stored: ${e.storedSha?.slice(0,8) ?? "--------"}</td>
+    </tr>`).join("")}
+  </table>
+</details>` : ""}
+
+<!-- IDENTICAL (collapsed by default) -->
+${identical.length > 0 ? `
+<details>
+  <summary class="diff-category-header diff-identical">IDENTICAL (${identical.length}) — click to expand</summary>
+  <table class="diff-file-table">
+    ${identical.map(e => `
+    <tr>
+      <td class="diff-filepath">${escapeHtml(e.blobPath)}</td>
+      <td class="diff-sha">sha: ${e.remoteSha?.slice(0,8) ?? "--------"}</td>
+    </tr>`).join("")}
+  </table>
+</details>` : ""}
+
+<!-- UNTRACKED (collapsed by default, only when non-empty) -->
+${untracked.length > 0 ? `
+<details>
+  <summary class="diff-category-header diff-untracked">UNTRACKED (${untracked.length}) — in container but not tracked by this link</summary>
+  <table class="diff-file-table">
+    ${untracked.map(e => `
+    <tr>
+      <td class="diff-filepath">${escapeHtml(e.blobPath)}</td>
+    </tr>`).join("")}
+  </table>
+</details>` : ""}
+
+<!-- Sync Now button -->
+<div class="diff-actions">
+  <button id="diff-sync-now-btn" data-link-id="${report.linkId}">Sync Now</button>
+</div>
+```
+
+#### 8.4 Event handler patterns
+
+**Single link Diff button click:**
+
+```javascript
+// Attached after renderLinksPanel() renders buttons
+document.querySelectorAll(".btn-diff-link").forEach(btn => {
+  btn.addEventListener("click", async () => {
+    const linkId = btn.dataset.linkId;
+    const origText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Diffing...";
+    const panel = document.getElementById("diff-result-panel");
+    panel.style.display = "";
+    panel.innerHTML = `<div class="diff-loading">Loading diff...</div>`;
+    try {
+      const report = await apiJson(`/api/diff/${currentStorage}/${currentContainer}/${linkId}`);
+      renderDiffResult(report, currentStorage, currentContainer);
+    } catch (e) {
+      renderDiffError(e);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = origText;
+    }
+  });
+});
+```
+
+**Diff All button click:**
+
+```javascript
+document.getElementById("btn-diff-all").addEventListener("click", async () => {
+  const btn = document.getElementById("btn-diff-all");
+  const origText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Diffing...";
+  const panel = document.getElementById("diff-result-panel");
+  panel.style.display = "";
+  panel.innerHTML = `<div class="diff-loading">Loading diffs for all links...</div>`;
+  try {
+    const result = await apiJson(`/api/diff-all/${currentStorage}/${currentContainer}`);
+    renderDiffAllResults(result.reports, currentStorage, currentContainer);
+  } catch (e) {
+    renderDiffError(e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = origText;
+  }
+});
+```
+
+**Sync Now button click (wired after renderDiffResult renders it):**
+
+```javascript
+const syncBtn = document.getElementById("diff-sync-now-btn");
+if (syncBtn) {
+  syncBtn.addEventListener("click", async () => {
+    const linkId = syncBtn.dataset.linkId;
+    syncBtn.disabled = true;
+    syncBtn.textContent = "Syncing...";
+    try {
+      await apiJson(`/api/sync-link/${currentStorage}/${currentContainer}/${linkId}`, { method: "POST" });
+      // Refresh links panel
+      document.getElementById("diff-result-panel").style.display = "none";
+      loadLinksPanel(currentStorage, currentContainer);
+    } catch (e) {
+      renderDiffError(e);
+    } finally {
+      syncBtn.disabled = false;
+      syncBtn.textContent = "Sync Now";
+    }
+  });
+}
+```
+
+**Error rendering (no alert()):**
+
+```javascript
+function renderDiffError(e) {
+  const panel = document.getElementById("diff-result-panel");
+  panel.style.display = "";
+  panel.innerHTML = `<div class="diff-error">✗ ${escapeHtml(e.message || String(e))}</div>`;
+}
+```
+
+#### 8.5 `renderDiffAllResults()` — multi-link display
+
+When `Diff All` returns multiple reports, display them as a sequence of collapsible sections, one per link. Each section contains the same structure as a single-link result. Wrap each in:
+
+```html
+<details open>
+  <summary>Link ${i+1} / ${total}: ${provider} — ${repoUrl} (${branch}) — ${status}</summary>
+  <!-- single-link diff panel content here -->
+</details>
+```
+
+The outer `<details>` for each link is `open` by default so the user sees all results immediately.
+
+#### 8.6 CSS additions (in `styles.css`)
+
+```css
+/* Diff result panel layout */
+#diff-result-panel { font-size: 0.9em; }
+.diff-header { font-weight: bold; margin-bottom: 4px; }
+.diff-timestamps { color: #666; font-size: 0.85em; margin-bottom: 8px; }
+.diff-note { background: #fffbe6; border-left: 3px solid #f0a500; padding: 6px 10px; margin-bottom: 10px; }
+.diff-summary-bar { display: flex; gap: 10px; margin-bottom: 8px; font-weight: 500; }
+.diff-count-modified { color: #c0392b; }
+.diff-count-repo-only { color: #2980b9; }
+.diff-count-container-only { color: #8e44ad; }
+.diff-count-identical { color: #27ae60; }
+.diff-count-untracked { color: #e67e22; }
+.diff-status { display: inline-block; padding: 2px 10px; border-radius: 4px; font-weight: bold; margin-bottom: 12px; }
+.diff-status-sync { background: #d4edda; color: #155724; }
+.diff-status-diff { background: #f8d7da; color: #721c24; }
+.diff-category-header { cursor: pointer; font-weight: bold; padding: 4px 0; }
+.diff-modified { color: #c0392b; }
+.diff-repo-only { color: #2980b9; }
+.diff-container-only { color: #8e44ad; }
+.diff-identical { color: #27ae60; }
+.diff-untracked { color: #e67e22; }
+.diff-file-table { width: 100%; border-collapse: collapse; font-family: monospace; font-size: 0.88em; }
+.diff-file-table tr:hover { background: #f5f5f5; }
+.diff-filepath { padding: 2px 8px 2px 16px; word-break: break-all; }
+.diff-sha { padding: 2px 8px; color: #666; white-space: nowrap; }
+.diff-physical { padding: 2px 8px; color: #e67e22; font-style: italic; }
+.diff-actions { margin-top: 12px; }
+.diff-loading { color: #666; font-style: italic; }
+.diff-error { color: #c0392b; background: #fdecea; padding: 8px 12px; border-radius: 4px; }
+```
+
+---
+
+### 9. Complete File Inventory
+
+#### 9.1 New files to create
+
+| File | Phase | Estimated LOC | Purpose |
+|------|-------|---------------|---------|
+| `src/core/diff-engine.ts` | 3 | 90–110 | Core `diffLink()` — read-only diff logic |
+| `src/cli/commands/diff-ops.ts` | 4 | 160–190 | CLI diff command and all output formatters |
+| `test_scripts/test-diff-engine.ts` | 3 | 100–130 | Unit tests for `diffLink()` covering all AC-CORE scenarios |
+
+#### 9.2 Files to modify
+
+| File | Phase | Change summary |
+|------|-------|----------------|
+| `src/core/types.ts` | 1 | Add `DiffCategory`, `DiffEntry`, `DiffReport` (~45 LOC) |
+| `src/core/sync-engine.ts` | 1 | Export `MappedFileEntry` and `RepoProvider` interfaces (2 lines) |
+| `src/core/repo-utils.ts` | 2 | Add extracted `buildProviderForLink()` with `inlinePat` param (~55 LOC added) |
+| `src/electron/server.ts` | 2 + 5 | Remove `buildProviderForLink` body; add import; add 2 GET endpoints; add diff imports (~+70 net LOC) |
+| `src/cli/index.ts` | 4 | Import `diffContainer`; register `diff` command (~30 LOC) |
+| `src/electron/public/app.js` | 6 | Diff/Diff All buttons; result panel render; event handlers (~180–220 LOC) |
+| `src/electron/public/index.html` | 6 | Add `<div id="diff-result-panel">` inside links-panel-modal (~3 lines) |
+| `src/electron/public/styles.css` | 6 | Diff panel CSS (~30 lines) |
+| `CLAUDE.md` | 7 | Document `diff` command in storage-nav tool block |
+
+#### 9.3 Files NOT modified
+
+| File | Reason |
+|------|--------|
+| `src/core/blob-client.ts` | All required methods (`listBlobsFlat`) already exist |
+| `src/core/github-client.ts` | No changes; `listFiles()` already returns `RepoFileEntry[]` with SHAs |
+| `src/core/devops-client.ts` | Same as above |
+| `src/core/ssh-git-client.ts` | Same as above |
+| `src/core/credential-store.ts` | No changes needed |
+| `src/cli/commands/shared.ts` | `resolveStorageEntry()` and `resolvePatToken()` are reused as-is |
+| `src/electron/main.ts` | No changes to Electron bootstrap |
+| `src/electron/launch.ts` | No changes to launch logic |
+
+---
+
+### 10. Dependency Graph
+
+```
+Phase 1 (Foundation)
+├── 1A: Add DiffCategory, DiffEntry, DiffReport to types.ts
+└── 1B: Export MappedFileEntry, RepoProvider from sync-engine.ts
+     (1A and 1B are independent; both must complete before Phase 2/3)
+
+Phase 2 (Provider Factory Extraction)
+└── 2A: Move buildProviderForLink() from server.ts to repo-utils.ts
+     (Depends on Phase 1 type stability)
+     (VERIFICATION: npx tsc --noEmit + manual sync --dry-run before Phase 3)
+
+Phase 3 (Core Diff Engine)
+└── 3A: Implement diffLink() in diff-engine.ts
+     (Depends on 1A, 1B, 2A)
+     (VERIFICATION: npx tsx test_scripts/test-diff-engine.ts — all AC-CORE pass)
+
+Phase 4 (CLI Command)         Phase 5 (Server Endpoints)
+└── 4A: diff-ops.ts           └── 5A: diff endpoints in server.ts
+     (Depends on 3A)               (Depends on 2A, 3A)
+└── 4B: Register in index.ts  (Phases 4 and 5 can be implemented in parallel)
+
+Phase 6 (UI)
+└── 6A: app.js + index.html + styles.css
+     (Depends on Phase 5)
+
+Phase 7 (Documentation)
+└── 7A: CLAUDE.md diff command entry
+     (Can be written in parallel with Phase 6; requires Phase 4 to be stable)
+```
+
+---
+
+### 11. Inter-Developer Parallelisation
+
+The dependency graph enables two developers to work in parallel from Phase 3 onward:
+
+| Developer A | Developer B |
+|-------------|-------------|
+| Phases 1, 2, 3 (sequential; foundational) | Waits for Phase 3 completion |
+| Phase 4: `diff-ops.ts` CLI command | Phase 5: server.ts diff endpoints |
+| Phase 7: CLAUDE.md documentation | Phase 6: UI diff panel |
+
+Coordination checkpoints:
+1. **After Phase 2:** Developer A signals that `buildProviderForLink` is in `repo-utils.ts` and `npx tsc --noEmit` passes. Developer B confirms sync endpoints still work.
+2. **After Phase 3:** Developer A signals that `diffLink()` is exported and test script passes. Both developers begin their parallel tracks.
+3. **After Phases 4+5:** Integration test — run CLI diff against a linked container, then verify the UI calls the same endpoint and renders matching data.
+
+---
+
+### 12. Risk Assessment
+
+| Risk | Probability | Impact | Mitigation |
+|------|-------------|--------|------------|
+| `buildProviderForLink()` extraction breaks sync (Phase 2) | Low | High | Implement Phase 2 in isolation; run `sync --dry-run` before proceeding to Phase 3 |
+| SSH clone latency confuses CLI users | Medium | Medium | Mandatory warning line before SSH diff; `cleanup?.()` in `finally` |
+| Never-synced link (`fileShas: {}`) produces alarming output | Low | Medium | `DiffReport.note` field; prominently displayed in both CLI table and UI |
+| Large repo with `--show-identical` causes huge output | Low | Low | `showIdentical` defaults to `false`; `--output` flag for file-based output |
+| UI diff panel overflows modal on small screens | Low | Low | `max-height` + `overflow-y: auto` CSS on `#diff-result-panel` |
+| Exit code 1 vs 2 confusion with existing CLI scripts | Low | Low | Document in `diff-ops.ts` source and in `CLAUDE.md`; convention scoped to `diff` command only |
+

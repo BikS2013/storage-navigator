@@ -202,6 +202,24 @@ Azure Blob Storage Navigator — browse containers and view files through CLI or
           All repo commands (clone-github, clone-devops, sync, link-github, link-devops, unlink, list-links) also accept:
             --account-key, --sas-token, --account for inline storage credentials
 
+          diff         Compare container blobs against linked remote repository (read-only)
+            --container <name>    Container name (required)
+            --storage <name>      Storage account (optional)
+            --account-key <key>   Inline account key
+            --sas-token <token>   Inline SAS token
+            --account <account>   Azure Storage account name (required with inline key/token)
+            --pat <token>         Inline PAT (overrides stored token)
+            --token-name <name>   PAT token name
+            --prefix <path>       Diff only the link at this target prefix
+            --link-id <id>        Diff a specific link by ID
+            --all                 Diff all links in the container
+            --format <fmt>        Output format: table (default), json, summary
+            --show-identical      Include identical files in output
+            --physical-check      Cross-reference with actual container blobs to detect untracked files
+            --output <file>       Write JSON report to file (only with --format json)
+
+            Exit codes: 0=in sync, 1=differences found, 2=fatal error
+
           ui           Launch web/Electron UI (--port <port>, default 3100)
 
         Examples:
@@ -286,5 +304,23 @@ Azure Blob Storage Navigator — browse containers and view files through CLI or
 
           # Launch second instance on different port
           npx tsx src/cli/index.ts ui --port 3200
+
+          # Single-link diff, default table output
+          npx tsx src/cli/index.ts diff --container my-container
+
+          # Multi-link container: diff all links
+          npx tsx src/cli/index.ts diff --container my-container --all
+
+          # Diff specific link by prefix
+          npx tsx src/cli/index.ts diff --container my-container --prefix "docs/"
+
+          # JSON output to file for CI pipeline
+          npx tsx src/cli/index.ts diff --container my-container --format json --output /tmp/diff-report.json
+
+          # Show identical files in table output
+          npx tsx src/cli/index.ts diff --container my-container --show-identical
+
+          # Detect untracked blobs (physical check)
+          npx tsx src/cli/index.ts diff --container my-container --physical-check
     </info>
 </storage-nav>
