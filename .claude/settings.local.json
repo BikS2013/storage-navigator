@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"from PIL import Image; print\\(''pillow ok''\\)\")",
+      "Bash(python3:*)",
+      "Bash(sips -z 16 16 assets/icon.png --out assets/icon.iconset/icon_16x16.png)",
+      "Bash(sips -z 32 32 assets/icon.png --out assets/icon.iconset/icon_16x16@2x.png)",
+      "Bash(sips -z 32 32 assets/icon.png --out assets/icon.iconset/icon_32x32.png)",
+      "Bash(sips -z 64 64 assets/icon.png --out assets/icon.iconset/icon_32x32@2x.png)",
+      "Bash(sips -z 128 128 assets/icon.png --out assets/icon.iconset/icon_128x128.png)",
+      "Bash(npx tsx:*)",
+      "Bash(git -C /Users/giorgosmarinos/aiwork/agent-platform/storage-navigator status --porcelain)",
+      "Bash(/Users/giorgosmarinos/ai-coding/claude-workdocs/.claude/scripts/sync-claude-md.sh)"
+    ]
+  }
+}

@@ -2,6 +2,11 @@
 (function () {
   const storageSelect = document.getElementById("storage-select");
   const addBtn = document.getElementById("add-storage-btn");
+  const deleteStorageBtn = document.getElementById("delete-storage-btn");
+  const deleteStorageModal = document.getElementById("delete-storage-modal");
+  const deleteStorageMessage = document.getElementById("delete-storage-message");
+  const deleteStorageCancel = document.getElementById("delete-storage-cancel");
+  const deleteStorageConfirm = document.getElementById("delete-storage-confirm");
   const exportBtn = document.getElementById("export-btn");
   const refreshBtn = document.getElementById("refresh-btn");
   const themeBtn = document.getElementById("theme-btn");
@@ -148,11 +153,17 @@
       storageSelect.value = storages[0].name;
       storageSelect.dispatchEvent(new Event("change"));
     }
+    updateDeleteStorageBtn();
+  }
+
+  function updateDeleteStorageBtn() {
+    deleteStorageBtn.disabled = !storageSelect.value;
   }
 
   storageSelect.addEventListener("change", async () => {
     currentStorage = storageSelect.value;
     currentContainer = "";
+    updateDeleteStorageBtn();
     if (!currentStorage) {
       treeContent.innerHTML = '<p class="placeholder">Select a storage account</p>';
       return;
@@ -487,6 +498,48 @@
       await loadStorages();
     } catch (e) {
       alert("Failed: " + e.message);
+    }
+  });
+
+  // --- Delete Storage ---
+  deleteStorageBtn.addEventListener("click", () => {
+    if (!currentStorage) return;
+    const opt = storageSelect.options[storageSelect.selectedIndex];
+    const label = opt ? opt.textContent : currentStorage;
+    deleteStorageMessage.textContent = `Are you sure you want to delete the storage account "${label}"?`;
+    deleteStorageModal.classList.remove("hidden");
+  });
+
+  deleteStorageCancel.addEventListener("click", () => {
+    deleteStorageModal.classList.add("hidden");
+  });
+
+  deleteStorageConfirm.addEventListener("click", async () => {
+    if (!currentStorage) return;
+    const nameToDelete = currentStorage;
+
+    deleteStorageConfirm.disabled = true;
+    deleteStorageConfirm.textContent = "Deleting...";
+
+    try {
+      await apiJson(`/api/storages/${encodeURIComponent(nameToDelete)}`, { method: "DELETE" });
+      deleteStorageModal.classList.add("hidden");
+
+      // Reset the UI
+      currentStorage = "";
+      currentContainer = "";
+      activeTreeItem = null;
+      treeContent.innerHTML = '<p class="placeholder">Select a storage account to browse</p>';
+      contentTitle.textContent = "No file selected";
+      contentMeta.textContent = "";
+      contentBody.innerHTML = '<p class="placeholder">Click a file to view its contents</p>';
+
+      await loadStorages();
+    } catch (e) {
+      alert("Delete failed: " + e.message);
+    } finally {
+      deleteStorageConfirm.disabled = false;
+      deleteStorageConfirm.textContent = "Delete";
     }
   });
 

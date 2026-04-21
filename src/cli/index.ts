@@ -2,7 +2,7 @@
 import { Command } from "commander";
 import { addStorage } from "./commands/add-storage.js";
 import { listStorages } from "./commands/list-storages.js";
-import { removeStorage } from "./commands/remove-storage.js";
+import { removeStorage, deleteStorage } from "./commands/remove-storage.js";
 import { viewBlob, listContainers, listBlobs, downloadBlob } from "./commands/view.js";
 import { createContainer, renameBlob, deleteBlob, deleteFolder, createBlob } from "./commands/blob-ops.js";
 import { addToken, listTokens, removeToken } from "./commands/token-ops.js";
@@ -44,6 +44,16 @@ program
   .requiredOption("--name <name>", "Name of the storage to remove")
   .action((opts) => {
     removeStorage(opts.name);
+  });
+
+// Delete storage (with confirmation)
+program
+  .command("delete-storage")
+  .description("Delete a storage account from the local credential store (asks for confirmation)")
+  .requiredOption("--name <name>", "Name of the storage to delete")
+  .option("--force", "Skip the confirmation prompt")
+  .action(async (opts) => {
+    await deleteStorage(opts.name, opts.force ?? false);
   });
 
 // List containers

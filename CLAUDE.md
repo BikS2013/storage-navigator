@@ -95,7 +95,13 @@ Azure Blob Storage Navigator — browse containers and view files through CLI or
             --sas-token <token>   SAS token (alternative, may have scope limits)
 
           list         List configured storage accounts
-          remove       Remove a storage account (--name <name>)
+          remove       Remove a storage account (--name <name>) — silent, no confirmation
+
+          delete-storage  Delete a storage account from the local credential store (asks for confirmation)
+            --name <name>         Name of the storage to delete
+            --force               Skip the confirmation prompt
+            Note: only the locally stored credential is removed. The Azure
+            storage account and its blobs are NOT touched.
 
           containers   List containers (--storage <name>)
           ls           List blobs (--container <name> --storage <name> --prefix <path>)
@@ -226,6 +232,12 @@ Azure Blob Storage Navigator — browse containers and view files through CLI or
 
           # Add storage with account key
           npx tsx src/cli/index.ts add --name corporateloans --account corporateloans --account-key "your-key"
+
+          # Delete a storage account from the local credential store (asks for confirmation)
+          npx tsx src/cli/index.ts delete-storage --name corporateloans
+
+          # Delete without confirmation prompt
+          npx tsx src/cli/index.ts delete-storage --name corporateloans --force
 
           # List all containers
           npx tsx src/cli/index.ts containers

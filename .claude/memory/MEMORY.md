@@ -1,0 +1,1 @@
+- [Electron macOS branding](feedback_electron_rename.md) — Rename .app folder; plist-only patching does not work for dock/Cmd+Tab

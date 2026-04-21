@@ -18,6 +18,7 @@
           <option value="">Select storage...</option>
         </select>
         <button id="add-storage-btn" class="icon-btn primary" title="Add storage">+</button>
+        <button id="delete-storage-btn" class="icon-btn" title="Delete selected storage" disabled>&#128465;</button>
         <button id="create-btn" class="icon-btn" title="Create new file">&#9998;</button>
         <button id="refresh-btn" class="icon-btn" title="Refresh">&#8635;</button>
         <button id="export-btn" class="icon-btn" title="Export storage config">&#8681;</button>
@@ -89,6 +90,20 @@
       <div class="modal-actions">
         <button id="delete-cancel">Cancel</button>
         <button id="delete-confirm" class="primary danger">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Delete Storage Confirmation Modal -->
+  <div id="delete-storage-modal" class="modal hidden">
+    <div class="modal-content">
+      <h2>Delete Storage Account</h2>
+      <p id="delete-storage-message" style="font-size:13px;color:var(--text);margin-bottom:12px;"></p>
+      <p style="font-size:12px;color:var(--text-dim);margin-bottom:8px;">This removes the locally stored credential only. The Azure storage account and its blobs are not touched.</p>
+      <p style="font-size:12px;color:var(--expiry-expired);margin-bottom:16px;">This action cannot be undone.</p>
+      <div class="modal-actions">
+        <button id="delete-storage-cancel">Cancel</button>
+        <button id="delete-storage-confirm" class="primary danger">Delete</button>
       </div>
     </div>
   </div>
