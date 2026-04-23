@@ -22,7 +22,15 @@ export class FileService {
   ) {}
 
   private svc(account: string): ShareServiceClient {
-    return new ShareServiceClient(this.resolveEndpoint(account), this.credential);
+    // Azure Files OAuth-on-REST mandates the `x-ms-file-request-intent: backup`
+    // header on every data-plane request. Without it the server returns 400
+    // `MissingRequiredHeader`. Setting `fileRequestIntent: 'backup'` on the
+    // pipeline options injects the header automatically. Required when the
+    // credential is a TokenCredential (Managed Identity / az login); shared-key
+    // / SAS auth ignores it.
+    return new ShareServiceClient(this.resolveEndpoint(account), this.credential, {
+      fileRequestIntent: 'backup',
+    });
   }
   private share(account: string, share: string): ShareClient {
     return this.svc(account).getShareClient(share);
@@ -32,34 +40,52 @@ export class FileService {
   }
 
   async listShares(account: string, page: { pageSize: number; continuationToken?: string }): Promise<{ items: { name: string; quotaGiB?: number }[]; continuationToken: string | null }> {
-    const iter = this.svc(account).listShares().byPage({ maxPageSize: page.pageSize, continuationToken: page.continuationToken });
-    const r = await iter.next();
-    if (r.done) return { items: [], continuationToken: null };
-    return {
-      items: (r.value.shareItems ?? []).map((s) => ({ name: s.name, quotaGiB: s.properties?.quota })),
-      continuationToken: r.value.continuationToken ?? null,
-    };
+    try {
+      const iter = this.svc(account).listShares().byPage({ maxPageSize: page.pageSize, continuationToken: page.continuationToken });
+      const r = await iter.next();
+      if (r.done) return { items: [], continuationToken: null };
+      return {
+        items: (r.value.shareItems ?? []).map((s) => ({ name: s.name, quotaGiB: s.properties?.quota })),
+        continuationToken: r.value.continuationToken ?? null,
+      };
+    } catch (err) {
+      throw mapStorageError(err, () => `Storage account '${account}' not reachable for share listing`);
+    }
   }
 
   async createShare(account: string, name: string, quotaGiB?: number): Promise<void> {
-    const r = await this.share(account, name).createIfNotExists({ quota: quotaGiB });
-    if (!r.succeeded) throw ApiError.conflict(`Share '${name}' already exists`);
+    try {
+      const r = await this.share(account, name).createIfNotExists({ quota: quotaGiB });
+      if (!r.succeeded) throw ApiError.conflict(`Share '${name}' already exists`);
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
+      throw mapStorageError(err, () => `Share '${name}' creation failed`);
+    }
   }
 
   async deleteShare(account: string, name: string): Promise<void> {
-    const r = await this.share(account, name).deleteIfExists();
-    if (!r.succeeded) throw ApiError.notFound(`Share '${name}' not found`);
+    try {
+      const r = await this.share(account, name).deleteIfExists();
+      if (!r.succeeded) throw ApiError.notFound(`Share '${name}' not found`);
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
+      throw mapStorageError(err, () => `Share '${name}' not found`);
+    }
   }
 
   async listDir(account: string, share: string, path: string, page: { pageSize: number; continuationToken?: string }): Promise<{ items: FileListItem[]; continuationToken: string | null }> {
-    const dir = this.dir(account, share, path);
-    const iter = dir.listFilesAndDirectories().byPage({ maxPageSize: page.pageSize, continuationToken: page.continuationToken });
-    const r = await iter.next();
-    if (r.done) return { items: [], continuationToken: null };
-    const items: FileListItem[] = [];
-    for (const f of r.value.segment.fileItems ?? []) items.push({ name: f.name, isDirectory: false, size: f.properties.contentLength });
-    for (const d of r.value.segment.directoryItems ?? []) items.push({ name: d.name, isDirectory: true });
-    return { items, continuationToken: r.value.continuationToken ?? null };
+    try {
+      const dir = this.dir(account, share, path);
+      const iter = dir.listFilesAndDirectories().byPage({ maxPageSize: page.pageSize, continuationToken: page.continuationToken });
+      const r = await iter.next();
+      if (r.done) return { items: [], continuationToken: null };
+      const items: FileListItem[] = [];
+      for (const f of r.value.segment.fileItems ?? []) items.push({ name: f.name, isDirectory: false, size: f.properties.contentLength });
+      for (const d of r.value.segment.directoryItems ?? []) items.push({ name: d.name, isDirectory: true });
+      return { items, continuationToken: r.value.continuationToken ?? null };
+    } catch (err) {
+      throw mapStorageError(err, () => `Directory '${path}' not found in share '${share}'`);
+    }
   }
 
   async readFile(account: string, share: string, path: string, signal?: AbortSignal): Promise<{ stream: NodeJS.ReadableStream; contentType?: string; contentLength?: number; etag?: string; lastModified?: string }> {
