@@ -82,6 +82,19 @@ export function createServer(port: number, publicDirOverride?: string): express.
   });
 
   // API: Register an api-backed storage (called from the UI, T23)
+  // API: proxy `/.well-known/storage-nav-config` for the renderer.
+  // The browser context can't fetch a deployed Azure URL directly without CORS;
+  // this server runs in Node so it has no such restriction.
+  app.get("/api/discovery", async (req, res, next) => {
+    try {
+      const baseUrl = (req.query.url as string | undefined) ?? "";
+      if (!baseUrl) { res.status(400).json({ error: { message: "url query param required" } }); return; }
+      const { fetchDiscovery } = await import("../core/backend/auth/discovery.js");
+      const result = await fetchDiscovery(baseUrl);
+      res.json(result);
+    } catch (err) { next(err); }
+  });
+
   app.post("/api/storage/api-backend", express.json(), (req, res, next) => {
     try {
       const { name, baseUrl, authEnabled, oidc } = req.body as {

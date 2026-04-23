@@ -607,9 +607,12 @@
       apiAddBtn.disabled = true;
       try {
         apiStatus.textContent = "Probing API...";
-        const probeRes = await fetch(`${baseUrl}/.well-known/storage-nav-config`);
+        // Proxy through the embedded server — direct fetch from the renderer
+        // hits CORS on the deployed Azure URL.
+        const probeRes = await fetch(`/api/discovery?url=${encodeURIComponent(baseUrl)}`);
         if (!probeRes.ok) {
-          apiStatus.textContent = `Probe failed: HTTP ${probeRes.status}`;
+          const err = await probeRes.json().catch(() => ({}));
+          apiStatus.textContent = `Probe failed: ${(err && err.error && err.error.message) || `HTTP ${probeRes.status}`}`;
           return;
         }
         const probe = await probeRes.json();
