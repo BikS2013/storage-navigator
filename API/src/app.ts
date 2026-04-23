@@ -10,6 +10,8 @@ import { buildJwksGetter } from './auth/jwks-cache.js';
 import { oidcMiddleware } from './auth/oidc-middleware.js';
 import { anonymousPrincipalMiddleware } from './auth/auth-toggle.js';
 import type { AppRole } from './auth/role-mapper.js';
+import type { AccountDiscovery } from './azure/account-discovery.js';
+import { storagesRouter } from './routes/storages.js';
 
 export type BuildAppOptions = {
   config: Config;
@@ -19,6 +21,7 @@ export type BuildAppOptions = {
    * Test-only.
    */
   authOverride?: RequestHandler;
+  discovery: AccountDiscovery;
 };
 
 export function buildApp(opts: BuildAppOptions): Express {
@@ -49,7 +52,7 @@ export function buildApp(opts: BuildAppOptions): Express {
   const auth = opts.authOverride ?? buildAuthMiddleware(opts.config);
   app.use(auth);
 
-  // Authenticated routers will be mounted in later tasks.
+  app.use(storagesRouter(opts.discovery));
 
   app.use(errorMiddleware());
   return app;

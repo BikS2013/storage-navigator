@@ -1,8 +1,8 @@
-import express from 'express';
 import { buildApp } from '../../src/app.js';
 import type { Config } from '../../src/config.js';
 import { anonymousPrincipalMiddleware } from '../../src/auth/auth-toggle.js';
 import type { AppRole } from '../../src/auth/role-mapper.js';
+import { AccountDiscovery } from '../../src/azure/account-discovery.js';
 
 export function disabledModeConfig(anonRole: AppRole = 'Admin'): Config {
   return {
@@ -18,10 +18,16 @@ export function disabledModeConfig(anonRole: AppRole = 'Admin'): Config {
   };
 }
 
-export function appWithFixedRole(role: AppRole) {
-  const app = express();
+export async function appWithFixedRole(role: AppRole) {
+  const discovery = new AccountDiscovery({
+    adapter: { list: async () => [] },
+    allowed: [],
+    refreshMin: 60,
+  });
+  await discovery.refresh();
   return buildApp({
     config: disabledModeConfig(role),
     authOverride: anonymousPrincipalMiddleware(role),
+    discovery,
   });
 }
