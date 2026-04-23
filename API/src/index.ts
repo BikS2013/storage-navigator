@@ -9,8 +9,12 @@ function main(): void {
   logger.level = config.logLevel;
 
   const app = buildApp({ config });
-  app.listen(config.port, () => {
+  const server = app.listen(config.port, () => {
     logger.info({ port: config.port }, 'storage-navigator-api listening');
+  });
+  server.on('error', (err) => {
+    logger.error({ err, port: config.port }, 'failed to bind port');
+    process.exit(1);
   });
 }
 

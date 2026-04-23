@@ -36,6 +36,23 @@ describe('health endpoints', () => {
     });
     const res = await request(app).get('/readyz');
     expect(res.status).toBe(503);
+    expect(res.body).toEqual({
+      status: 'not_ready',
+      checks: { jwks: true, arm: false },
+    });
+  });
+
+  it('GET /readyz reports false for a check that throws', async () => {
+    const app = buildApp({
+      config: cfg,
+      readinessChecks: {
+        arm: async () => {
+          throw new Error('arm probe boom');
+        },
+      },
+    });
+    const res = await request(app).get('/readyz');
+    expect(res.status).toBe(503);
     expect(res.body.checks.arm).toBe(false);
   });
 });
