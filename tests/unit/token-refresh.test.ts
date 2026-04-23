@@ -1,8 +1,23 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync, existsSync, unlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { refreshTokens, _resetInflight } from '../../src/core/backend/auth/token-refresh.js';
 import type { TokenSet } from '../../src/core/backend/auth/token-store.js';
 
-beforeEach(() => { vi.restoreAllMocks(); _resetInflight(); });
+// refreshTokens persists to disk via TokenStore. Point it at a tmp dir so the
+// test never touches the developer's real ~/.storage-navigator/.
+let tmp: string;
+beforeEach(() => {
+  vi.restoreAllMocks();
+  _resetInflight();
+  tmp = mkdtempSync(join(tmpdir(), 'sn-tref-'));
+  process.env.STORAGE_NAVIGATOR_DIR = tmp;
+});
+afterEach(() => {
+  delete process.env.STORAGE_NAVIGATOR_DIR;
+  rmSync(tmp, { recursive: true, force: true });
+});
 
 describe('refreshTokens', () => {
   it('exchanges refresh_token for new access', async () => {
