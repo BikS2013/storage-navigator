@@ -44,6 +44,12 @@ export class BlobClient {
     await containerClient.create();
   }
 
+  /** Delete a container if it exists. Used by IStorageBackend.deleteContainer. */
+  async deleteContainer(containerName: string): Promise<void> {
+    const containerClient = this.serviceClient.getContainerClient(containerName);
+    await containerClient.deleteIfExists();
+  }
+
   /** List blobs in a container with optional prefix (for folder navigation) */
   async listBlobs(containerName: string, prefix?: string): Promise<BlobItem[]> {
     const containerClient = this.serviceClient.getContainerClient(containerName);
@@ -155,6 +161,23 @@ export class BlobClient {
     }
 
     return blobsToDelete.length;
+  }
+
+  /**
+   * Alias of {@link createBlob} used by IStorageBackend.uploadBlob. Same
+   * semantics: uploads `content` as a block blob with the given content type
+   * (defaults to `application/octet-stream`).
+   */
+  async uploadBlob(containerName: string, blobName: string, content: Buffer | string, contentType?: string): Promise<void> {
+    await this.createBlob(containerName, blobName, content, contentType);
+  }
+
+  /**
+   * Alias of {@link getBlobContent} used by IStorageBackend.readBlob /
+   * headBlob. Returns the blob bytes plus content-type and size.
+   */
+  async viewBlob(containerName: string, blobName: string): Promise<BlobContent> {
+    return this.getBlobContent(containerName, blobName);
   }
 
   /** Download blob content */
