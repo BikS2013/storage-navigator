@@ -3,6 +3,7 @@ import { buildApp } from './app.js';
 import { logger } from './observability/logger.js';
 import { getAzureCredential } from './azure/credential.js';
 import { AccountDiscovery, ArmStorageAdapter } from './azure/account-discovery.js';
+import { BlobService } from './azure/blob-service.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -19,9 +20,15 @@ async function main(): Promise<void> {
   await discovery.refresh();
   discovery.startBackgroundRefresh();
 
+  const blobService = new BlobService(
+    credential,
+    (account) => discovery.lookup(account)?.blobEndpoint ?? `https://${account}.blob.core.windows.net`,
+  );
+
   const app = buildApp({
     config,
     discovery,
+    blobService,
     readinessChecks: {
       arm: async () => discovery.list().length >= 0, // discovery cache populated
     },

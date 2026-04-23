@@ -3,6 +3,13 @@ import type { Config } from '../../src/config.js';
 import { anonymousPrincipalMiddleware } from '../../src/auth/auth-toggle.js';
 import type { AppRole } from '../../src/auth/role-mapper.js';
 import { AccountDiscovery } from '../../src/azure/account-discovery.js';
+import type { BlobService } from '../../src/azure/blob-service.js';
+
+// Stub used for tests that exercise routes mounted before auth (health,
+// well-known) or routes that don't touch blob storage (storages list). The
+// blobService dep on buildApp is required for production, so tests must
+// supply something — the stub is safe because none of these handlers call it.
+export const stubBlobService = {} as unknown as BlobService;
 
 export function disabledModeConfig(anonRole: AppRole = 'Admin'): Config {
   return {
@@ -29,5 +36,6 @@ export async function appWithFixedRole(role: AppRole) {
     config: disabledModeConfig(role),
     authOverride: anonymousPrincipalMiddleware(role),
     discovery,
+    blobService: stubBlobService,
   });
 }
