@@ -1,4 +1,5 @@
 import { CredentialStore } from "../../core/credential-store.js";
+import type { DirectStorageEntry } from "../../core/types.js";
 
 export function addStorage(name: string, account: string, sasToken?: string, accountKey?: string): void {
   if (!sasToken && !accountKey) {
@@ -6,7 +7,14 @@ export function addStorage(name: string, account: string, sasToken?: string, acc
     process.exit(1);
   }
   const store = new CredentialStore();
-  store.addStorage({ name, accountName: account, sasToken, accountKey });
+  const entry: Omit<DirectStorageEntry, "addedAt"> = {
+    kind: 'direct',
+    name,
+    accountName: account,
+    sasToken,
+    accountKey,
+  };
+  store.addStorage(entry);
   const authType = accountKey ? "account key" : "SAS token";
   console.log(`Storage '${name}' added successfully (account: ${account}, auth: ${authType}).`);
 }
