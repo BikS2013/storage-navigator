@@ -18,7 +18,15 @@ async function main(): Promise<void> {
     allowed: config.azure.allowedAccounts,
     refreshMin: config.azure.discoveryRefreshMin,
   });
-  await discovery.refresh();
+  // Initial refresh is best-effort: if Azure credentials are unavailable
+  // (no MI, no `az login`, missing subscription scope) the API still boots
+  // and serves /healthz. The background refresh keeps retrying; /readyz
+  // (via discovery.isHealthy()) reports false until the first success.
+  try {
+    await discovery.refresh();
+  } catch (err) {
+    logger.warn({ err }, 'initial account discovery refresh failed; will retry in background');
+  }
   discovery.startBackgroundRefresh();
 
   const blobService = new BlobService(
@@ -37,7 +45,7 @@ async function main(): Promise<void> {
     blobService,
     fileService,
     readinessChecks: {
-      arm: async () => discovery.list().length >= 0, // discovery cache populated
+      arm: async () => discovery.isHealthy(),
     },
   });
   const server = app.listen(config.port, () => {

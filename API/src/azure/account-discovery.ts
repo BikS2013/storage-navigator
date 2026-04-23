@@ -27,6 +27,7 @@ export class AccountDiscovery {
   private readonly refreshMs: number;
   private cache: Map<string, DiscoveredAccount> = new Map();
   private timer: NodeJS.Timeout | null = null;
+  private lastSuccessAt: number | null = null;
 
   constructor(opts: AccountDiscoveryOptions) {
     this.adapter = opts.adapter;
@@ -42,6 +43,13 @@ export class AccountDiscovery {
     const next = new Map<string, DiscoveredAccount>();
     for (const a of filtered) next.set(a.name, a);
     this.cache = next;
+    this.lastSuccessAt = Date.now();
+  }
+
+  /** True iff a refresh has succeeded within the last 2× refresh interval. */
+  isHealthy(): boolean {
+    if (this.lastSuccessAt === null) return false;
+    return Date.now() - this.lastSuccessAt < 2 * this.refreshMs;
   }
 
   list(): DiscoveredAccount[] {
