@@ -6,9 +6,23 @@ import { CredentialStore } from "../core/credential-store.js";
 import { BlobClient } from "../core/blob-client.js";
 import { readSyncMeta, syncRepo, resolveLinks, writeLinks, createLink, removeLink } from "../core/sync-engine.js";
 import type { RepoProvider } from "../core/sync-engine.js";
-import type { RepoLink, SyncResult, DiffReport } from "../core/types.js";
+import type { DirectStorageEntry, RepoLink, StorageEntry, SyncResult, DiffReport } from "../core/types.js";
 import { buildProviderForLink } from "../core/repo-utils.js";
 import { diffLink } from "../core/diff-engine.js";
+
+/**
+ * Narrow a StorageEntry to a DirectStorageEntry. The Electron HTTP server
+ * currently only supports direct backends; api-backed entries are routed
+ * through the IStorageBackend factory in CLI commands instead. T21 will
+ * refactor this server to support both.
+ */
+function requireDirect(entry: StorageEntry, res: express.Response): DirectStorageEntry | null {
+  if (entry.kind === 'direct') return entry;
+  res.status(400).json({
+    error: "This endpoint currently only supports direct storage backends. Use the CLI for api-backed storages until T21 lands.",
+  });
+  return null;
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -35,7 +49,8 @@ export function createServer(port: number, publicDirOverride?: string): express.
       return;
     }
     const store = new CredentialStore();
-    store.addStorage({ name, accountName, sasToken, accountKey });
+    const direct: Omit<DirectStorageEntry, "addedAt"> = { kind: 'direct', name, accountName, sasToken, accountKey };
+    store.addStorage(direct);
     res.json({ success: true });
   });
 
@@ -60,7 +75,9 @@ export function createServer(port: number, publicDirOverride?: string): express.
       const store = new CredentialStore();
       const entry = store.getStorage(req.params.storage);
       if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
-      const client = new BlobClient(entry);
+      const direct = requireDirect(entry, res);
+      if (!direct) return;
+      const client = new BlobClient(direct);
       const containers = await client.listContainers();
       res.json(containers);
     } catch (err: unknown) {
@@ -75,7 +92,9 @@ export function createServer(port: number, publicDirOverride?: string): express.
       const store = new CredentialStore();
       const entry = store.getStorage(req.params.storage);
       if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
-      const client = new BlobClient(entry);
+      const direct = requireDirect(entry, res);
+      if (!direct) return;
+      const client = new BlobClient(direct);
       const prefix = (req.query.prefix as string) || undefined;
       const items = await client.listBlobs(req.params.container, prefix);
       res.json(items);
@@ -95,7 +114,9 @@ export function createServer(port: number, publicDirOverride?: string): express.
       const blobPath = req.query.blob as string;
       if (!blobPath) { res.status(400).json({ error: "?blob= query parameter required" }); return; }
 
-      const client = new BlobClient(entry);
+      const direct = requireDirect(entry, res);
+      if (!direct) return;
+      const client = new BlobClient(direct);
       const blob = await client.getBlobContent(req.params.container, blobPath);
 
       // Check if this is a docx file and format conversion is requested
@@ -135,7 +156,9 @@ export function createServer(port: number, publicDirOverride?: string): express.
       const { oldName, newName } = req.body;
       if (!oldName || !newName) { res.status(400).json({ error: "oldName and newName are required" }); return; }
 
-      const client = new BlobClient(entry);
+      const direct = requireDirect(entry, res);
+      if (!direct) return;
+      const client = new BlobClient(direct);
       await client.renameBlob(req.params.container, oldName, newName);
       res.json({ success: true });
     } catch (err: unknown) {
@@ -154,7 +177,9 @@ export function createServer(port: number, publicDirOverride?: string): express.
       const blobPath = req.query.blob as string;
       if (!blobPath) { res.status(400).json({ error: "?blob= query parameter required" }); return; }
 
-      const client = new BlobClient(entry);
+      const direct = requireDirect(entry, res);
+      if (!direct) return;
+      const client = new BlobClient(direct);
       await client.deleteBlob(req.params.container, blobPath);
       res.json({ success: true });
     } catch (err: unknown) {
@@ -173,7 +198,9 @@ export function createServer(port: number, publicDirOverride?: string): express.
       const prefix = req.query.prefix as string;
       if (!prefix) { res.status(400).json({ error: "?prefix= query parameter required" }); return; }
 
-      const client = new BlobClient(entry);
+      const direct = requireDirect(entry, res);
+      if (!direct) return;
+      const client = new BlobClient(direct);
       const count = await client.deleteFolder(req.params.container, prefix);
       res.json({ success: true, deleted: count });
     } catch (err: unknown) {
@@ -195,7 +222,9 @@ export function createServer(port: number, publicDirOverride?: string): express.
       const contentType = (req.query.contentType as string) || "application/octet-stream";
       const content = typeof req.body.content === "string" ? req.body.content : JSON.stringify(req.body.content ?? "");
 
-      const client = new BlobClient(entry);
+      const direct = requireDirect(entry, res);
+      if (!direct) return;
+      const client = new BlobClient(direct);
       await client.createBlob(req.params.container, blobPath, content, contentType);
       res.json({ success: true });
     } catch (err: unknown) {
@@ -211,7 +240,9 @@ export function createServer(port: number, publicDirOverride?: string): express.
       const store = new CredentialStore();
       const entry = store.getStorage(req.params.storage);
       if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
-      const client = new BlobClient(entry);
+      const direct = requireDirect(entry, res);
+      if (!direct) return;
+      const client = new BlobClient(direct);
 
       // Try the legacy .repo-sync-meta.json first
       const meta = await readSyncMeta(client, req.params.container);
@@ -246,7 +277,9 @@ export function createServer(port: number, publicDirOverride?: string): express.
       const store = new CredentialStore();
       const entry = store.getStorage(req.params.storage);
       if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
-      const blobClient = new BlobClient(entry);
+      const direct = requireDirect(entry, res);
+      if (!direct) return;
+      const blobClient = new BlobClient(direct);
 
       // Resolve links (auto-migrates from old .repo-sync-meta.json if needed)
       const registry = await resolveLinks(blobClient, req.params.container);
@@ -300,7 +333,9 @@ export function createServer(port: number, publicDirOverride?: string): express.
       const store = new CredentialStore();
       const entry = store.getStorage(req.params.storage);
       if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
-      const client = new BlobClient(entry);
+      const direct = requireDirect(entry, res);
+      if (!direct) return;
+      const client = new BlobClient(direct);
       const registry = await resolveLinks(client, req.params.container);
       res.json(registry);
     } catch (err: unknown) {
@@ -326,7 +361,9 @@ export function createServer(port: number, publicDirOverride?: string): express.
         return;
       }
 
-      const client = new BlobClient(entry);
+      const direct = requireDirect(entry, res);
+      if (!direct) return;
+      const client = new BlobClient(direct);
       const result = await createLink(client, req.params.container, {
         provider,
         repoUrl,
@@ -354,7 +391,9 @@ export function createServer(port: number, publicDirOverride?: string): express.
       const entry = store.getStorage(req.params.storage);
       if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
 
-      const client = new BlobClient(entry);
+      const direct = requireDirect(entry, res);
+      if (!direct) return;
+      const client = new BlobClient(direct);
       const removed = await removeLink(client, req.params.container, req.params.linkId);
       if (!removed) {
         res.status(404).json({ error: "Link not found" });
@@ -374,7 +413,9 @@ export function createServer(port: number, publicDirOverride?: string): express.
       const entry = store.getStorage(req.params.storage);
       if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
 
-      const blobClient = new BlobClient(entry);
+      const direct = requireDirect(entry, res);
+      if (!direct) return;
+      const blobClient = new BlobClient(direct);
       const registry = await resolveLinks(blobClient, req.params.container);
       const link = registry.links.find((l) => l.id === req.params.linkId);
       if (!link) {
@@ -416,7 +457,9 @@ export function createServer(port: number, publicDirOverride?: string): express.
       const entry = store.getStorage(req.params.storage);
       if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
 
-      const blobClient = new BlobClient(entry);
+      const direct = requireDirect(entry, res);
+      if (!direct) return;
+      const blobClient = new BlobClient(direct);
       const registry = await resolveLinks(blobClient, req.params.container);
 
       if (registry.links.length === 0) {
@@ -481,7 +524,9 @@ export function createServer(port: number, publicDirOverride?: string): express.
       const entry = store.getStorage(req.params.storage);
       if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
 
-      const blobClient = new BlobClient(entry);
+      const direct = requireDirect(entry, res);
+      if (!direct) return;
+      const blobClient = new BlobClient(direct);
       const registry = await resolveLinks(blobClient, req.params.container);
       const link = registry.links.find((l) => l.id === req.params.linkId);
       if (!link) {
@@ -519,7 +564,9 @@ export function createServer(port: number, publicDirOverride?: string): express.
       const entry = store.getStorage(req.params.storage);
       if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
 
-      const blobClient = new BlobClient(entry);
+      const direct = requireDirect(entry, res);
+      if (!direct) return;
+      const blobClient = new BlobClient(direct);
       const registry = await resolveLinks(blobClient, req.params.container);
 
       if (registry.links.length === 0) {

@@ -1,17 +1,15 @@
 import * as fs from "fs";
 import * as path from "path";
-import { BlobClient } from "../../core/blob-client.js";
-import { resolveStorageEntry, promptYesNo, type StorageOpts } from "./shared.js";
+import { resolveStorageBackend, promptYesNo, type StorageOpts } from "./shared.js";
 
 export async function createContainer(
   storageOpts: StorageOpts,
   containerName: string
 ): Promise<void> {
-  const { entry } = await resolveStorageEntry(storageOpts);
-  const client = new BlobClient(entry);
+  const { entry, backend } = await resolveStorageBackend(storageOpts, storageOpts.account);
 
-  console.log(`Creating container '${containerName}' in ${entry.accountName}...`);
-  await client.createContainer(containerName);
+  console.log(`Creating container '${containerName}' in ${entry.name}...`);
+  await backend.createContainer(containerName);
   console.log("Done.");
 }
 
@@ -21,11 +19,10 @@ export async function renameBlob(
   oldBlob: string,
   newBlob: string
 ): Promise<void> {
-  const { entry } = await resolveStorageEntry(storageOpts);
-  const client = new BlobClient(entry);
+  const { entry, backend } = await resolveStorageBackend(storageOpts, storageOpts.account);
 
-  console.log(`Renaming '${oldBlob}' -> '${newBlob}' in ${entry.accountName}/${container}...`);
-  await client.renameBlob(container, oldBlob, newBlob);
+  console.log(`Renaming '${oldBlob}' -> '${newBlob}' in ${entry.name}/${container}...`);
+  await backend.renameBlob(container, oldBlob, newBlob);
   console.log("Done.");
 }
 
@@ -34,17 +31,16 @@ export async function deleteBlob(
   container: string,
   blobName: string
 ): Promise<void> {
-  const { entry } = await resolveStorageEntry(storageOpts);
+  const { entry, backend } = await resolveStorageBackend(storageOpts, storageOpts.account);
 
-  const confirmed = await promptYesNo(`Delete '${blobName}' from ${entry.accountName}/${container}?`);
+  const confirmed = await promptYesNo(`Delete '${blobName}' from ${entry.name}/${container}?`);
   if (!confirmed) {
     console.log("Cancelled.");
     return;
   }
 
-  const client = new BlobClient(entry);
   console.log(`Deleting '${blobName}'...`);
-  await client.deleteBlob(container, blobName);
+  await backend.deleteBlob(container, blobName);
   console.log("Done.");
 }
 
@@ -53,17 +49,16 @@ export async function deleteFolder(
   container: string,
   prefix: string
 ): Promise<void> {
-  const { entry } = await resolveStorageEntry(storageOpts);
+  const { entry, backend } = await resolveStorageBackend(storageOpts, storageOpts.account);
 
-  const confirmed = await promptYesNo(`Delete ALL blobs under '${prefix}' from ${entry.accountName}/${container}?`);
+  const confirmed = await promptYesNo(`Delete ALL blobs under '${prefix}' from ${entry.name}/${container}?`);
   if (!confirmed) {
     console.log("Cancelled.");
     return;
   }
 
-  const client = new BlobClient(entry);
   console.log(`Deleting all blobs under '${prefix}'...`);
-  const count = await client.deleteFolder(container, prefix);
+  const count = await backend.deleteFolder(container, prefix);
   console.log(`Done. ${count} blob(s) deleted.`);
 }
 
@@ -74,8 +69,7 @@ export async function createBlob(
   filePath?: string,
   content?: string
 ): Promise<void> {
-  const { entry } = await resolveStorageEntry(storageOpts);
-  const client = new BlobClient(entry);
+  const { entry, backend } = await resolveStorageBackend(storageOpts, storageOpts.account);
 
   let data: Buffer;
   let contentType = "application/octet-stream";
@@ -101,7 +95,7 @@ export async function createBlob(
     process.exit(1);
   }
 
-  console.log(`Uploading to ${entry.accountName}/${container}/${blobName}...`);
-  await client.createBlob(container, blobName, data, contentType);
+  console.log(`Uploading to ${entry.name}/${container}/${blobName}...`);
+  await backend.uploadBlob(container, blobName, data, data.length, contentType);
   console.log(`Done. (${data.length} bytes)`);
 }

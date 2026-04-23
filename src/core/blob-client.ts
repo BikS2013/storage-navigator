@@ -7,11 +7,21 @@ import type { StorageEntry, BlobItem, ContainerInfo, BlobContent } from "./types
 /**
  * Azure Blob Storage client for navigation and content retrieval.
  * Supports both SAS token and account key authentication.
+ *
+ * BlobClient is purely direct-mode infrastructure — it talks straight to
+ * Azure Blob Storage. API-backed entries are rejected at construction;
+ * callers should route those through the IStorageBackend factory
+ * (see core/backend/factory.ts).
  */
 export class BlobClient {
   private serviceClient: BlobServiceClient;
 
   constructor(storage: StorageEntry) {
+    if (storage.kind !== 'direct') {
+      throw new Error(
+        `BlobClient only supports direct-mode storage entries; '${storage.name}' is kind='${storage.kind}'. Use makeBackend() instead.`
+      );
+    }
     if (storage.accountKey) {
       const credential = new StorageSharedKeyCredential(
         storage.accountName,
