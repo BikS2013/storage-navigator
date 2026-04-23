@@ -324,9 +324,114 @@
 
     for (const s of shares) {
       const shareName = typeof s === "string" ? s : (s && (s.name || s.shareName)) || String(s);
-      // Render leaf nodes for now; deeper file-share browsing is a follow-up.
-      const node = createTreeNode(shareName, "📂", 1, false);
+      const node = createTreeNode(shareName, "📂", 1, true);
+      node.dataset.share = shareName;
+      node.querySelector(".tree-item").addEventListener("click", () => toggleShare(node, shareName));
       parentEl.appendChild(node);
+    }
+  }
+
+  async function toggleShare(node, shareName) {
+    const toggle = node.querySelector(".tree-toggle");
+    const children = node.querySelector(".tree-children");
+    if (children.classList.contains("expanded")) {
+      children.classList.remove("expanded");
+      toggle.textContent = "▶";
+      return;
+    }
+    if (children.children.length > 0) {
+      children.classList.add("expanded");
+      toggle.textContent = "▼";
+      return;
+    }
+    children.innerHTML = '<div style="padding:4px 24px;color:var(--text-dim);font-size:12px">Loading...</div>';
+    children.classList.add("expanded");
+    toggle.textContent = "▼";
+    try {
+      await loadShareDir(children, shareName, "", 2);
+    } catch (e) {
+      children.innerHTML = `<div style="padding:4px 24px;color:var(--expiry-expired);font-size:12px">Error: ${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  async function loadShareDir(parentEl, shareName, path, depth) {
+    let url = `/api/files/${encodeURIComponent(currentStorage)}/${encodeURIComponent(shareName)}`;
+    if (path) url += `?path=${encodeURIComponent(path)}`;
+    const result = await apiJson(withAccount(url));
+    const items = (result && result.items) || [];
+    parentEl.innerHTML = "";
+    if (items.length === 0) {
+      parentEl.innerHTML = '<div style="padding:4px 24px;color:var(--text-dim);font-size:12px;font-style:italic">Empty</div>';
+      return;
+    }
+    for (const it of items) {
+      if (it.isDirectory) {
+        const node = createTreeNode(it.name, "📁", depth, true);
+        const childPath = path ? `${path}/${it.name}` : it.name;
+        node.querySelector(".tree-item").addEventListener("click", () => toggleShareDir(node, shareName, childPath, depth + 1));
+        parentEl.appendChild(node);
+      } else {
+        const node = createTreeNode(it.name, "📄", depth, false);
+        const filePath = path ? `${path}/${it.name}` : it.name;
+        const sizeStr = it.size !== undefined ? ` ${(it.size / 1024).toFixed(1)}K` : "";
+        const meta = node.querySelector(".tree-name");
+        if (meta && sizeStr) {
+          const m = document.createElement("span");
+          m.className = "blob-size";
+          m.textContent = sizeStr;
+          node.querySelector(".tree-item").appendChild(m);
+        }
+        node.querySelector(".tree-item").addEventListener("click", () => viewShareFile(shareName, filePath, it.size));
+        parentEl.appendChild(node);
+      }
+    }
+  }
+
+  async function toggleShareDir(node, shareName, path, depth) {
+    const toggle = node.querySelector(".tree-toggle");
+    const children = node.querySelector(".tree-children");
+    if (children.classList.contains("expanded")) {
+      children.classList.remove("expanded");
+      toggle.textContent = "▶";
+      return;
+    }
+    if (children.children.length > 0) {
+      children.classList.add("expanded");
+      toggle.textContent = "▼";
+      return;
+    }
+    children.innerHTML = '<div style="padding:4px 24px;color:var(--text-dim);font-size:12px">Loading...</div>';
+    children.classList.add("expanded");
+    toggle.textContent = "▼";
+    try {
+      await loadShareDir(children, shareName, path, depth);
+    } catch (e) {
+      children.innerHTML = `<div style="padding:4px 24px;color:var(--expiry-expired);font-size:12px">Error: ${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  async function viewShareFile(shareName, filePath, size) {
+    const shortName = filePath.split("/").pop();
+    contentTitle.textContent = shortName;
+    contentMeta.textContent = size ? `${(size / 1024).toFixed(1)} KB` : "";
+    contentBody.innerHTML = '<p class="placeholder">Loading...</p>';
+    const url = withAccount(`/api/file/${encodeURIComponent(currentStorage)}/${encodeURIComponent(shareName)}?path=${encodeURIComponent(filePath)}`);
+    try {
+      const res = await fetch(url);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error((err && err.error && err.error.message) || `HTTP ${res.status}`);
+      }
+      const text = await res.text();
+      const ext = (filePath.split(".").pop() || "").toLowerCase();
+      if (ext === "json") {
+        try { contentBody.innerHTML = `<pre><code>${escapeHtml(JSON.stringify(JSON.parse(text), null, 2))}</code></pre>`; }
+        catch { contentBody.innerHTML = `<pre>${escapeHtml(text)}</pre>`; }
+      } else {
+        contentBody.innerHTML = `<pre>${escapeHtml(text)}</pre>`;
+      }
+    } catch (err) {
+      contentBody.innerHTML = `<p class="placeholder">Error: ${escapeHtml(err.message)}</p>`;
     }
   }
 
