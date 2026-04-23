@@ -28,6 +28,10 @@ export async function startAzurite(): Promise<AzuriteHandle> {
     [
       'azurite',
       '--silent',
+      // @azure/storage-blob 12.31 sends API version 2026-02-06; Azurite 3.35
+      // (latest at plan date) only knows 2025-11-05. Skip the version check
+      // until Azurite catches up — without this the smoke + service tests fail
+      // with "RestError: The API version 2026-02-06 is not supported".
       '--skipApiVersionCheck',
       '--location', workdir,
       '--blobHost', '127.0.0.1',
