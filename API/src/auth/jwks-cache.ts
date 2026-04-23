@@ -1,13 +1,22 @@
 import { createRemoteJWKSet, type JWTVerifyGetKey } from 'jose';
 
-export function buildJwksGetter(jwksUri: string, cacheMinutes: number): JWTVerifyGetKey {
+/**
+ * Build a remote JWKS getter cached locally.
+ *
+ * `cooldownMs` controls how long jose waits before re-fetching JWKS after a
+ * `kid` miss. Default = 30s (jose default + spec). Tests pass 0 to exercise
+ * key rotation without sleeping. Setting it to 0 in production would let
+ * spoofed `kid` values force one outbound JWKS round-trip per request and
+ * amplify bad-actor traffic toward the IdP — keep the default unless you have
+ * a specific reason.
+ */
+export function buildJwksGetter(
+  jwksUri: string,
+  cacheMinutes: number,
+  cooldownMs = 30_000,
+): JWTVerifyGetKey {
   return createRemoteJWKSet(new URL(jwksUri), {
     cacheMaxAge: cacheMinutes * 60 * 1000,
-    // Cooldown gates the refetch on kid-miss. Setting it to 0 lets us pick
-    // up rotated signing keys on the next request (the cacheMaxAge above
-    // still throttles the happy-path refresh interval). Plan Task 8 specced
-    // 30s here, but that prevented the rotation test from ever passing
-    // without a 30s sleep — see auth.test.ts "honours rotated signing key".
-    cooldownDuration: 0,
+    cooldownDuration: cooldownMs,
   });
 }

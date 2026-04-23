@@ -1,11 +1,17 @@
 import type { RequestHandler } from 'express';
 import { jwtVerify, type JWTVerifyGetKey, type JWTPayload } from 'jose';
 import { ApiError } from '../errors/api-error.js';
+import { logger } from '../observability/logger.js';
 import { mapRoles, type AppRole } from './role-mapper.js';
 
 export type Principal = {
   sub: string;
   roles: Set<AppRole>;
+  /**
+   * Full JWT payload. WARNING: may contain PII (email, name, custom claims).
+   * Do NOT log `principal` or `principal.raw` directly — strip to `{sub,
+   * roles}` before emitting.
+   */
   raw: JWTPayload;
 };
 
@@ -37,7 +43,14 @@ export function oidcMiddleware(opts: OidcMiddlewareOptions): RequestHandler {
       req.principal = { sub, roles, raw: payload };
       next();
     } catch (err) {
-      next(ApiError.unauthenticated((err as Error).message));
+      // Log the verbose jose reason at debug level for operator triage,
+      // but return a generic message to the caller — the verbose detail
+      // (e.g. "unexpected aud claim value") is a probing oracle.
+      logger.debug(
+        { reqId: req.requestId, reason: (err as Error).message },
+        'JWT verification failed',
+      );
+      next(ApiError.unauthenticated('Invalid or expired token'));
     }
   };
 }

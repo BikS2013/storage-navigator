@@ -19,7 +19,9 @@ function buildAuthenticatedApp() {
   app.use(requestIdMiddleware());
   app.use(
     oidcMiddleware({
-      jwks: buildJwksGetter(idp.jwksUri, 10),
+      // cooldownMs=0 lets the rotation test pick up the new key immediately;
+      // production callers omit the third arg and get the safe 30s default.
+      jwks: buildJwksGetter(idp.jwksUri, 10, 0),
       issuer: idp.issuer,
       audience: 'storage-nav-api',
       clockToleranceSec: 5,
@@ -103,6 +105,41 @@ describe('OIDC middleware + RBAC', () => {
     );
     const res = await request(app).get('/r').set('Authorization', `Bearer ${token}`);
     expect(res.status).toBe(200);
+  });
+
+  it('401 when signature is tampered', async () => {
+    const token = await idp.signToken(
+      { sub: 'alice', role: 'StorageReader' },
+      { audience: 'storage-nav-api' }
+    );
+    // Flip a single character in the signature segment (the third dot-segment)
+    const parts = token.split('.');
+    const sigChars = parts[2]!.split('');
+    sigChars[0] = sigChars[0] === 'A' ? 'B' : 'A';
+    parts[2] = sigChars.join('');
+    const tampered = parts.join('.');
+    const res = await request(app).get('/r').set('Authorization', `Bearer ${tampered}`);
+    expect(res.status).toBe(401);
+    expect(res.body.error.message).toBe('Invalid or expired token');
+  });
+
+  it('falls back to sub="unknown" when token has no sub claim', async () => {
+    const token = await idp.signToken(
+      { role: 'StorageReader' },
+      { audience: 'storage-nav-api' }
+    );
+    const res = await request(app).get('/r').set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(200);
+    expect(res.body.sub).toBe('unknown');
+  });
+
+  it('does not leak jose-specific reasons in the error body', async () => {
+    const res = await request(app).get('/r').set('Authorization', 'Bearer not-a-jwt');
+    expect(res.status).toBe(401);
+    expect(res.body.error.message).toBe('Invalid or expired token');
+    // Sanity: typical jose strings ("aud claim value", "signature verification
+    // failed", "Invalid Compact JWS") must not appear verbatim.
+    expect(res.body.error.message).not.toMatch(/claim|signature|kid|JWS|compact/i);
   });
 });
 
