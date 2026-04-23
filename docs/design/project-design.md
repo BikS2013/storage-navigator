@@ -5686,3 +5686,15 @@ Coordination checkpoints:
 
 The `API/` folder houses a separate Node/TS deployable that exposes the same blob ops as the CLI/UI (plus Azure Files) behind an HTTP surface protected by OIDC. It uses System-Assigned Managed Identity to access Storage and the NBG IdentityServer for caller authentication. See `docs/design/plan-006-rbac-api.md` for the design and `docs/design/plan-006-rbac-api-impl.md` for the implementation plan. The Storage Navigator client gets a third backend type `api` (covered by a follow-up plan) that talks to this API instead of going to Azure Storage directly.
 
+## Backend types (Plan 007)
+
+Storage Navigator client supports three backend kinds:
+
+| kind | Auth | File shares | Repo sync | Notes |
+|---|---|---|---|---|
+| `direct` (account-key) | Account key | yes | yes | Existing default |
+| `direct` (sas-token) | SAS token | yes | yes | Existing |
+| `api` | OIDC (Bearer JWT) or anonymous | yes | no (deferred) | Added in Plan 007; talks to the deployed Storage Navigator API |
+
+All consumers route through `IStorageBackend` (`src/core/backend/backend.ts`). The factory `makeBackend(entry, account?)` dispatches by `kind`.
+

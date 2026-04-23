@@ -228,6 +228,53 @@ Azure Blob Storage Navigator — browse containers and view files through CLI or
 
           ui           Launch web/Electron UI (--port <port>, default 3100)
 
+          add-api      Register a Storage Navigator API as a backend
+            --name <name>         Display name
+            --base-url <url>      API base URL
+
+          login        Re-run OIDC login for an existing api backend
+            --name <name>         API backend name
+
+          logout       Clear stored OIDC tokens for an api backend
+            --name <name>         API backend name
+
+          shares       List file shares (works with direct + api backends)
+          share-create Create a file share
+            --name <name>         Share name
+            --quota <gib>         Quota in GiB (optional)
+          share-delete Delete a file share
+            --name <name>         Share name
+
+          files        List directory contents in a file share
+            --share <name>        Share name
+            --path <dir>          Directory path (default: root)
+
+          file-view    View a file (UTF-8 text)
+            --share <name>        Share name
+            --file <path>         File path
+
+          file-upload  Upload a file
+            --share <name>        Share name
+            --file <path>         Destination path
+            --source <path>       Local file to upload (or use --content)
+            --content <text>      Inline text content
+
+          file-rename  Rename a file
+            --share <name>        Share name
+            --file <path>         Current path
+            --new-name <path>     New path
+
+          file-delete  Delete a file
+            --share <name>        Share name
+            --file <path>         File path
+
+          file-delete-folder  Delete a directory recursively
+            --share <name>        Share name
+            --path <dir>          Directory path
+
+          All blob commands (containers, ls, view, etc.) accept api backends
+          via `--storage <api-backend-name> --account <azure-account>`.
+
         Examples:
 
           # Add storage with account key

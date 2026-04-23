@@ -148,3 +148,11 @@ Shared resolution logic is in `src/cli/commands/shared.ts` (`resolveStorageEntry
 - Errors: `{error: {code, message, correlationId}}`.
 - Tests: vitest unit + integration (Azurite + mock IdP).
 - Deployment: Azure App Service Linux Node 22 with System-Assigned MI; container via multi-stage Dockerfile.
+
+## API backend client (Plan 007)
+
+- New CLI commands: `add-api`, `login`, `logout`, `shares`, `share-create`, `share-delete`, `files`, `file-view`, `file-upload`, `file-rename`, `file-delete`, `file-delete-folder`.
+- All existing blob commands gain `--account` to disambiguate Azure storage account when targeting an api backend.
+- Electron "Add Storage" dialog has a third tab for connecting to a Storage Navigator API. Storage tree shows a Shares sibling node under each backend.
+- OIDC login flows: PKCE via system browser + loopback redirect (Electron); device-code (CLI). Tokens persisted via Electron `safeStorage` or chmod-600 file (CLI), keyed by api backend name.
+- File-share support added to the existing `direct` backends as well, via the new `FileShareClient` wrapping `@azure/storage-file-share` with the same account-key / SAS the user already provides.
