@@ -1,6 +1,7 @@
 import { StorageManagementClient } from '@azure/arm-storage';
 import { SubscriptionClient } from '@azure/arm-subscriptions';
 import type { TokenCredential } from '@azure/identity';
+import { logger } from '../observability/logger.js';
 
 export type DiscoveredAccount = {
   name: string;
@@ -54,7 +55,11 @@ export class AccountDiscovery {
   startBackgroundRefresh(): void {
     if (this.timer) return;
     this.timer = setInterval(() => {
-      void this.refresh().catch(() => undefined);
+      // Surface ARM-side failures (permission revocation, throttling, network)
+      // so they don't silently freeze the cache against a stale snapshot.
+      void this.refresh().catch((err: unknown) => {
+        logger.warn({ err }, 'account discovery background refresh failed');
+      });
     }, this.refreshMs);
     // Don't keep the event loop alive solely for this timer.
     if (this.timer && typeof this.timer.unref === 'function') this.timer.unref();
@@ -83,9 +88,15 @@ export class ArmStorageAdapter implements ArmAdapter {
     for (const subscriptionId of subs) {
       const client = new StorageManagementClient(this.credential, subscriptionId);
       for await (const acct of client.storageAccounts.list()) {
-        if (!acct.name || !acct.id) continue;
+        if (!acct.name || !acct.id) {
+          logger.warn({ accountId: acct.id, name: acct.name }, 'skipping account: missing name or id');
+          continue;
+        }
         const rg = parseResourceGroup(acct.id);
-        if (!rg) continue;
+        if (!rg) {
+          logger.warn({ accountId: acct.id }, 'skipping account: cannot parse resource group');
+          continue;
+        }
         out.push({
           name: acct.name,
           subscriptionId,
@@ -110,6 +121,9 @@ export class ArmStorageAdapter implements ArmAdapter {
 
 function parseResourceGroup(id: string): string | null {
   // /subscriptions/{sub}/resourceGroups/{rg}/...
+  // Case-sensitive: ARM canonically returns "resourceGroups" with a capital G.
+  // If Azure ever changes canonical casing, every account skips with a warn
+  // log (see callsite). Do not add /i — allowlists assume canonical casing.
   const match = /\/resourceGroups\/([^/]+)\//.exec(id);
   return match?.[1] ?? null;
 }

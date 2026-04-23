@@ -1,5 +1,7 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { AccountDiscovery, type ArmAdapter, type DiscoveredAccount } from '../../src/azure/account-discovery.js';
+
+afterEach(() => { vi.useRealTimers(); });
 
 const A1: DiscoveredAccount = {
   name: 'acct1',
@@ -58,5 +60,17 @@ describe('AccountDiscovery', () => {
     await d.refresh();
     await d.refresh();
     expect(adapter.list).toHaveBeenCalledTimes(2);
+  });
+
+  it('background refresh ticks at the configured interval', async () => {
+    vi.useFakeTimers();
+    const adapter = makeAdapter([A1]);
+    const d = new AccountDiscovery({ adapter, allowed: [], refreshMin: 1 });
+    await d.refresh();
+    d.startBackgroundRefresh();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(60_000);
+    d.stopBackgroundRefresh();
+    expect(adapter.list).toHaveBeenCalledTimes(3);
   });
 });
