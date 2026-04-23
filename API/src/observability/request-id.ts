@@ -1,11 +1,8 @@
 import type { RequestHandler } from 'express';
 import { v7 as uuidv7 } from 'uuid';
 
-declare module 'express-serve-static-core' {
-  interface Request {
-    requestId: string;
-  }
-}
+// `Request.requestId` augmentation lives in src/types/express.d.ts so the type
+// is available regardless of which file imports `requestIdMiddleware()` first.
 
 export function requestIdMiddleware(): RequestHandler {
   return (req, res, next) => {

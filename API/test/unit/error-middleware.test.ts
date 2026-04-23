@@ -50,4 +50,18 @@ describe('errorMiddleware', () => {
     const res = await request(app).get('/x');
     expect(res.headers['x-request-id']).toMatch(/^[0-9a-f-]{36}$/);
   });
+
+  it('mints a fresh X-Request-Id when inbound header fails the regex', async () => {
+    const app = buildApp((_req, _res, next) => next(ApiError.badRequest('x')));
+    const res = await request(app).get('/x').set('X-Request-Id', 'has spaces and!chars');
+    expect(res.headers['x-request-id']).not.toBe('has spaces and!chars');
+    expect(res.headers['x-request-id']).toMatch(/^[0-9a-f-]{36}$/);
+    expect(res.body.error.correlationId).toBe(res.headers['x-request-id']);
+  });
+
+  it('correlationId in response body matches X-Request-Id response header on the mint path', async () => {
+    const app = buildApp((_req, _res, next) => next(ApiError.badRequest('x')));
+    const res = await request(app).get('/x');
+    expect(res.body.error.correlationId).toBe(res.headers['x-request-id']);
+  });
 });
