@@ -1,0 +1,162 @@
+openapi: 3.1.0
+info:
+  title: Storage Navigator API
+  version: 0.1.0
+  description: HTTP API brokering Azure Blob and Azure Files access behind toggleable OIDC and three global roles.
+servers:
+  - url: http://localhost:3000
+    description: Local dev
+security:
+  - bearerAuth: []
+paths:
+  /.well-known/storage-nav-config:
+    get:
+      summary: Client auto-config
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - { $ref: '#/components/schemas/AuthEnabledConfig' }
+                  - { $ref: '#/components/schemas/AuthDisabledConfig' }
+  /healthz:
+    get: { summary: Liveness, security: [], responses: { '200': { description: OK } } }
+  /readyz:
+    get: { summary: Readiness, security: [], responses: { '200': { description: Ready }, '503': { description: Not ready } } }
+  /storages:
+    get:
+      summary: List visible storage accounts
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StorageList' }
+  /storages/{account}/containers:
+    parameters: [ { $ref: '#/components/parameters/account' } ]
+    get:
+      summary: List containers
+      parameters: [ { $ref: '#/components/parameters/pageSize' }, { $ref: '#/components/parameters/continuationToken' } ]
+      responses: { '200': { description: OK } }
+    post:
+      summary: Create container
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [name], properties: { name: { type: string } } } } }
+      responses: { '201': { description: Created } }
+  /storages/{account}/containers/{container}:
+    parameters:
+      - { $ref: '#/components/parameters/account' }
+      - { $ref: '#/components/parameters/container' }
+    delete:
+      summary: Delete container
+      responses: { '204': { description: Deleted } }
+  /storages/{account}/containers/{container}/blobs:
+    parameters:
+      - { $ref: '#/components/parameters/account' }
+      - { $ref: '#/components/parameters/container' }
+    get:
+      summary: List blobs
+      parameters:
+        - { name: prefix, in: query, schema: { type: string } }
+        - { name: delimiter, in: query, schema: { type: string } }
+        - { $ref: '#/components/parameters/pageSize' }
+        - { $ref: '#/components/parameters/continuationToken' }
+      responses: { '200': { description: OK } }
+    delete:
+      summary: Delete folder (recursive)
+      parameters:
+        - { name: prefix, in: query, required: true, schema: { type: string } }
+        - { name: confirm, in: query, required: true, schema: { type: string, enum: ['true'] } }
+      responses: { '200': { description: OK } }
+  /storages/{account}/containers/{container}/blobs/{path}:
+    parameters:
+      - { $ref: '#/components/parameters/account' }
+      - { $ref: '#/components/parameters/container' }
+      - { name: path, in: path, required: true, schema: { type: string } }
+    get: { summary: Read blob, responses: { '200': { description: OK }, '404': { description: NotFound } } }
+    head: { summary: Blob metadata, responses: { '200': { description: OK } } }
+    put: { summary: Upload blob, responses: { '201': { description: Created } } }
+    delete: { summary: Delete blob, responses: { '204': { description: Deleted } } }
+  /storages/{account}/shares:
+    parameters: [ { $ref: '#/components/parameters/account' } ]
+    get: { summary: List file shares, responses: { '200': { description: OK } } }
+    post:
+      summary: Create share
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [name], properties: { name: { type: string }, quotaGiB: { type: integer, minimum: 1 } } } } }
+      responses: { '201': { description: Created } }
+  /storages/{account}/shares/{share}:
+    parameters:
+      - { $ref: '#/components/parameters/account' }
+      - { name: share, in: path, required: true, schema: { type: string } }
+    delete: { summary: Delete share, responses: { '204': { description: Deleted } } }
+  /storages/{account}/shares/{share}/files:
+    parameters:
+      - { $ref: '#/components/parameters/account' }
+      - { name: share, in: path, required: true, schema: { type: string } }
+    get: { summary: List dir, responses: { '200': { description: OK } } }
+    delete:
+      summary: Delete folder
+      parameters:
+        - { name: path, in: query, required: true, schema: { type: string } }
+        - { name: confirm, in: query, required: true, schema: { type: string, enum: ['true'] } }
+      responses: { '200': { description: OK } }
+  /storages/{account}/shares/{share}/files/{path}:
+    parameters:
+      - { $ref: '#/components/parameters/account' }
+      - { name: share, in: path, required: true, schema: { type: string } }
+      - { name: path, in: path, required: true, schema: { type: string } }
+    get: { summary: Read file, responses: { '200': { description: OK }, '404': { description: NotFound } } }
+    head: { summary: File metadata, responses: { '200': { description: OK } } }
+    put: { summary: Upload file, responses: { '201': { description: Created } } }
+    delete: { summary: Delete file, responses: { '204': { description: Deleted } } }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+  parameters:
+    account: { name: account, in: path, required: true, schema: { type: string } }
+    container: { name: container, in: path, required: true, schema: { type: string } }
+    pageSize: { name: pageSize, in: query, schema: { type: integer, minimum: 1, maximum: 1000 } }
+    continuationToken: { name: continuationToken, in: query, schema: { type: string } }
+  schemas:
+    AuthEnabledConfig:
+      type: object
+      required: [authEnabled, issuer, clientId, audience, scopes]
+      properties:
+        authEnabled: { type: boolean, enum: [true] }
+        issuer: { type: string, format: uri }
+        clientId: { type: string }
+        audience: { type: string }
+        scopes: { type: array, items: { type: string } }
+    AuthDisabledConfig:
+      type: object
+      required: [authEnabled]
+      properties:
+        authEnabled: { type: boolean, enum: [false] }
+    StorageList:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              blobEndpoint: { type: string }
+              fileEndpoint: { type: string }
+        continuationToken:
+          type: [string, 'null']
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+            correlationId: { type: string }
