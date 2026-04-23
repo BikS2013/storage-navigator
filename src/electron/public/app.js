@@ -214,33 +214,78 @@
   async function buildTree() {
     treeContent.innerHTML = '<p class="placeholder">Loading...</p>';
     try {
-      const containers = await apiJson(withAccount(`/api/containers/${currentStorage}`));
+      const info = storageInfo[currentStorage] || { kind: "direct" };
       treeContent.innerHTML = "";
-
-      for (const c of containers) {
-        const node = createTreeNode(c.name, "\uD83D\uDCE6", 0, true);
-        node.dataset.container = c.name;
-        node.querySelector(".tree-item").addEventListener("click", () => toggleContainer(node, c.name));
-        node.querySelector(".tree-item").addEventListener("contextmenu", (e) => {
-          e.preventDefault();
-          containerContextTarget = { containerName: c.name, node };
-          containerCtxMenu.style.left = e.clientX + "px";
-          containerCtxMenu.style.top = e.clientY + "px";
-          containerCtxMenu.classList.remove("hidden");
-        });
-        treeContent.appendChild(node);
+      if (info.kind === "api") {
+        const r = await apiJson(`/api/accounts/${encodeURIComponent(currentStorage)}`);
+        const accounts = (r && r.items) || [];
+        if (accounts.length === 0) {
+          treeContent.innerHTML = '<p class="placeholder">No storage accounts visible to this API.</p>';
+          return;
+        }
+        for (const a of accounts) {
+          const node = createTreeNode(a.name, "🔑", 0, true);
+          node.dataset.account = a.name;
+          node.querySelector(".tree-item").addEventListener("click", () => toggleAccount(node, a.name));
+          treeContent.appendChild(node);
+        }
+        if (accounts.length === 1) {
+          const onlyNode = treeContent.firstElementChild;
+          if (onlyNode) onlyNode.querySelector(".tree-item").click();
+        }
+      } else {
+        await renderContainersAndShares(treeContent, 0);
       }
-
-      // Sibling Shares node (file-share browsing). Rendered after containers
-      // and lazy-loaded on click to keep buildTree fast for storages without
-      // file shares configured.
-      const sharesRoot = createTreeNode("Shares", "📁", 0, true);
-      sharesRoot.classList.add("shares-tree");
-      sharesRoot.querySelector(".tree-item").addEventListener("click", () => toggleSharesRoot(sharesRoot));
-      treeContent.appendChild(sharesRoot);
     } catch (e) {
       treeContent.innerHTML = `<p class="placeholder">Error: ${escapeHtml(e.message)}</p>`;
     }
+  }
+
+  async function toggleAccount(node, accountName) {
+    const toggle = node.querySelector(".tree-toggle");
+    const children = node.querySelector(".tree-children");
+    if (children.classList.contains("expanded")) {
+      children.classList.remove("expanded");
+      toggle.textContent = "▶";
+      return;
+    }
+    if (children.children.length > 0) {
+      children.classList.add("expanded");
+      toggle.textContent = "▼";
+      currentAccount = accountName;
+      return;
+    }
+    children.innerHTML = '<div style="padding:4px 24px;color:var(--text-dim);font-size:12px">Loading...</div>';
+    children.classList.add("expanded");
+    toggle.textContent = "▼";
+    currentAccount = accountName;
+    try {
+      children.innerHTML = "";
+      await renderContainersAndShares(children, 1);
+    } catch (e) {
+      children.innerHTML = `<div style="padding:4px 24px;color:var(--expiry-expired);font-size:12px">Error: ${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  async function renderContainersAndShares(parentEl, depth) {
+    const containers = await apiJson(withAccount(`/api/containers/${currentStorage}`));
+    for (const c of containers) {
+      const node = createTreeNode(c.name, "📦", depth, true);
+      node.dataset.container = c.name;
+      node.querySelector(".tree-item").addEventListener("click", () => toggleContainer(node, c.name));
+      node.querySelector(".tree-item").addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        containerContextTarget = { containerName: c.name, node };
+        containerCtxMenu.style.left = e.clientX + "px";
+        containerCtxMenu.style.top = e.clientY + "px";
+        containerCtxMenu.classList.remove("hidden");
+      });
+      parentEl.appendChild(node);
+    }
+    const sharesRoot = createTreeNode("Shares", "📁", depth, true);
+    sharesRoot.classList.add("shares-tree");
+    sharesRoot.querySelector(".tree-item").addEventListener("click", () => toggleSharesRoot(sharesRoot));
+    parentEl.appendChild(sharesRoot);
   }
 
   async function toggleSharesRoot(node) {
