@@ -6,6 +6,7 @@ import { CredentialStore } from "../core/credential-store.js";
 import { BlobClient } from "../core/blob-client.js";
 import { makeBackend } from "../core/backend/factory.js";
 import type { IStorageBackend } from "../core/backend/backend.js";
+import { fetchDiscovery } from "../core/backend/auth/discovery.js";
 import { readSyncMeta, syncRepo, resolveLinks, writeLinks, createLink, removeLink } from "../core/sync-engine.js";
 import type { RepoProvider } from "../core/sync-engine.js";
 import type { ApiBackendEntry, DirectStorageEntry, RepoLink, StorageEntry, SyncResult, DiffReport } from "../core/types.js";
@@ -89,7 +90,6 @@ export function createServer(port: number, publicDirOverride?: string): express.
     try {
       const baseUrl = (req.query.url as string | undefined) ?? "";
       if (!baseUrl) { res.status(400).json({ error: { message: "url query param required" } }); return; }
-      const { fetchDiscovery } = await import("../core/backend/auth/discovery.js");
       const result = await fetchDiscovery(baseUrl);
       res.json(result);
     } catch (err) { next(err); }
