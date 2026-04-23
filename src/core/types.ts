@@ -1,11 +1,29 @@
-/** A configured storage account with encrypted credentials */
-export interface StorageEntry {
+export type DirectStorageEntry = {
+  kind: 'direct';
   name: string;
   accountName: string;
   sasToken?: string;       // SAS token (container or account level)
   accountKey?: string;     // Account key (full access)
   addedAt: string;
-}
+};
+
+export type OidcConfig = {
+  issuer: string;
+  clientId: string;
+  audience: string;
+  scopes: string[];
+};
+
+export type ApiBackendEntry = {
+  kind: 'api';
+  name: string;
+  baseUrl: string;
+  authEnabled: boolean;
+  oidc?: OidcConfig;
+  addedAt: string;
+};
+
+export type StorageEntry = DirectStorageEntry | ApiBackendEntry;
 
 /** Personal access token for GitHub or Azure DevOps */
 export interface TokenEntry {
