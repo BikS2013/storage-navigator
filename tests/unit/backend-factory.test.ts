@@ -19,7 +19,7 @@ describe('makeBackend', () => {
   it('returns an object exposing IStorageBackend method names for api kind', () => {
     const b = makeBackend({
       kind: 'api', name: 'x', baseUrl: 'https://x.example.com', authEnabled: false, addedAt: '2025-01-01',
-    });
+    }, 'someacct');
     expect(typeof b.listContainers).toBe('function');
     expect(typeof b.listShares).toBe('function');
   });
