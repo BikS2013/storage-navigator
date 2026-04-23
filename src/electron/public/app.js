@@ -153,63 +153,32 @@
   async function apiJson(url, opts) { return (await api(url, opts)).json(); }
 
   // --- Storages ---
-  // For api backends, one entry expands into N options (one per Azure account
-  // visible to the API). The dropdown <option> uses a composite key
-  // "<storageName>::<azureAccount>"; the rest of the UI splits it.
-  let storageInfo = {}; // composite key -> { kind, storage, account }
+  // One dropdown entry per backend connection. For api backends with many
+  // Azure accounts, those appear as a top-level branch INSIDE the tree.
+  let storageInfo = {}; // entry name -> { kind, accountName? }
 
   async function loadStorages() {
     const storages = await apiJson("/api/storages");
     storageSelect.innerHTML = '<option value="">Select storage...</option>';
     storageInfo = {};
-
-    // Each entry can expand into multiple options. Resolve in parallel.
-    const allOptions = await Promise.all(
-      storages.map(async (s) => {
-        try {
-          const r = await apiJson(`/api/accounts/${encodeURIComponent(s.name)}`);
-          return { storage: s, accounts: (r && r.items) || [] };
-        } catch (err) {
-          return { storage: s, accounts: [], error: err && err.message };
-        }
-      }),
-    );
-
-    let selectableCount = 0;
-    for (const { storage: s, accounts, error } of allOptions) {
-      const expiry = s.expiresAt
-        ? (s.isExpired ? " [EXPIRED]" : (() => {
-            const days = Math.ceil((new Date(s.expiresAt) - Date.now()) / 86400000);
-            return days < 30 ? ` [${days}d left]` : "";
-          })())
-        : "";
-      if (accounts.length === 0) {
-        // No accounts (probe failed or empty list). Render a disabled marker.
-        const opt = document.createElement("option");
-        opt.value = "";
-        opt.disabled = true;
-        opt.textContent = `${storageIcon(s.kind)} ${s.name} — ${error ? "error: " + error : "no accounts visible"}`;
-        storageSelect.appendChild(opt);
-        continue;
+    for (const s of storages) {
+      const kind = s.kind || "direct";
+      storageInfo[s.name] = { kind, accountName: s.accountName };
+      const opt = document.createElement("option");
+      opt.value = s.name;
+      let label = `${storageIcon(kind)} ${s.name}`;
+      if (kind === "direct" && s.accountName) label += ` (${s.accountName})`;
+      if (s.expiresAt) {
+        const days = Math.ceil((new Date(s.expiresAt) - Date.now()) / 86400000);
+        if (s.isExpired) label += " [EXPIRED]";
+        else if (days < 30) label += ` [${days}d left]`;
       }
-      for (const a of accounts) {
-        const key = `${s.name}::${a.name}`;
-        storageInfo[key] = { kind: s.kind || "direct", storage: s.name, account: a.name };
-        const opt = document.createElement("option");
-        opt.value = key;
-        opt.textContent = `${storageIcon(s.kind)} ${s.name} → ${a.name}${expiry}`;
-        storageSelect.appendChild(opt);
-        selectableCount++;
-      }
+      opt.textContent = label;
+      storageSelect.appendChild(opt);
     }
-
-    if (selectableCount === 1) {
-      // Find first non-disabled option
-      const firstOpt = Array.from(storageSelect.options).find(o => o.value && !o.disabled);
-      if (firstOpt) {
-        storageSelect.value = firstOpt.value;
-        storageSelect.dispatchEvent(new Event("change"));
-      }
+    if (storages.length === 1) {
+      storageSelect.value = storages[0].name;
+      storageSelect.dispatchEvent(new Event("change"));
     }
     updateDeleteStorageBtn();
   }
@@ -218,14 +187,11 @@
     deleteStorageBtn.disabled = !storageSelect.value;
   }
 
-  // currentStorage holds the backend NAME (entry.name); currentAccount holds
-  // the Azure account chosen for this dropdown row. The dropdown's composite
-  // value is "<storage>::<account>" — split here.
+  // currentAccount = Azure account currently active for view/right-click ops.
+  // For direct kind: empty (server falls back to entry.accountName).
+  // For api kind: set when the user clicks an account node in the tree.
   let currentAccount = "";
 
-  // Append ?account=<azure-account> to a URL when an account is selected.
-  // Direct-backend routes (sync/link/diff) don't need this — they use the
-  // entry's stored accountName server-side.
   function withAccount(url) {
     if (!currentAccount) return url;
     const sep = url.includes("?") ? "&" : "?";
@@ -233,20 +199,14 @@
   }
 
   storageSelect.addEventListener("change", async () => {
-    const key = storageSelect.value;
-    if (!key) {
-      currentStorage = "";
-      currentAccount = "";
-      currentContainer = "";
-      updateDeleteStorageBtn();
+    currentStorage = storageSelect.value;
+    currentAccount = "";
+    currentContainer = "";
+    updateDeleteStorageBtn();
+    if (!currentStorage) {
       treeContent.innerHTML = '<p class="placeholder">Select a storage account</p>';
       return;
     }
-    const info = storageInfo[key];
-    currentStorage = info ? info.storage : key;
-    currentAccount = info ? info.account : "";
-    currentContainer = "";
-    updateDeleteStorageBtn();
     await buildTree();
   });
 
