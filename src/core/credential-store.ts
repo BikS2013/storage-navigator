@@ -77,7 +77,7 @@ export class CredentialStore {
       const raw = fs.readFileSync(STORE_FILE, "utf-8");
       const payload = JSON.parse(raw) as EncryptedPayload;
       const decrypted = decrypt(payload);
-      this.data = JSON.parse(decrypted) as CredentialData;
+      this.data = this.migrate(JSON.parse(decrypted) as CredentialData);
     } catch {
       // Try to migrate from the old hostname-based key derivation
       if (this.tryMigrateFromHostnameKey()) {
@@ -86,6 +86,22 @@ export class CredentialStore {
       console.error("Failed to decrypt credentials. File may be corrupted or from another machine.");
       this.data = { storages: [] };
     }
+  }
+
+  /**
+   * Migrate legacy CredentialData (StorageEntry without `kind`) to the
+   * tagged-union form by stamping `kind: 'direct'` on every entry that lacks
+   * it. Idempotent. Called from load() after decryption.
+   */
+  private migrate(data: CredentialData): CredentialData {
+    let changed = false;
+    const storages = (data.storages ?? []).map((entry: any) => {
+      if (entry.kind) return entry;
+      changed = true;
+      return { ...entry, kind: 'direct' };
+    });
+    if (!changed) return data;
+    return { ...data, storages };
   }
 
   /**
@@ -116,7 +132,7 @@ export class CredentialStore {
         decipher.setAuthTag(Buffer.from(payload.tag, "hex"));
         let decrypted = decipher.update(payload.data, "hex", "utf8");
         decrypted += decipher.final("utf8");
-        this.data = JSON.parse(decrypted) as CredentialData;
+        this.data = this.migrate(JSON.parse(decrypted) as CredentialData);
 
         // Re-encrypt with the new stable key
         console.log(`Migrated credentials from hostname-based key (${hostname}). Re-encrypting with stable key...`);
