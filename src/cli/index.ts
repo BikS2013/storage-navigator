@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import { addStorage } from "./commands/add-storage.js";
+import { addApi } from "./commands/add-api.js";
 import { listStorages } from "./commands/list-storages.js";
 import { removeStorage, deleteStorage } from "./commands/remove-storage.js";
 import { viewBlob, listContainers, listBlobs, downloadBlob } from "./commands/view.js";
@@ -27,6 +28,16 @@ program
   .option("--account-key <key>", "Account key for full access (recommended)")
   .action((opts) => {
     addStorage(opts.name, opts.account, opts.sasToken, opts.accountKey);
+  });
+
+// Register an API backend
+program
+  .command("add-api")
+  .description("Register a Storage Navigator API as a backend")
+  .requiredOption("--name <name>", "Display name")
+  .requiredOption("--base-url <url>", "API base URL (e.g. https://your-api.azurewebsites.net)")
+  .action(async (opts) => {
+    await addApi(opts.name, opts.baseUrl);
   });
 
 // List storages
