@@ -4,22 +4,44 @@ import { fileURLToPath } from "url";
 import mammoth from "mammoth";
 import { CredentialStore } from "../core/credential-store.js";
 import { BlobClient } from "../core/blob-client.js";
+import { makeBackend } from "../core/backend/factory.js";
+import type { IStorageBackend } from "../core/backend/backend.js";
 import { readSyncMeta, syncRepo, resolveLinks, writeLinks, createLink, removeLink } from "../core/sync-engine.js";
 import type { RepoProvider } from "../core/sync-engine.js";
-import type { DirectStorageEntry, RepoLink, StorageEntry, SyncResult, DiffReport } from "../core/types.js";
+import type { ApiBackendEntry, DirectStorageEntry, RepoLink, StorageEntry, SyncResult, DiffReport } from "../core/types.js";
 import { buildProviderForLink } from "../core/repo-utils.js";
 import { diffLink } from "../core/diff-engine.js";
 
 /**
- * Narrow a StorageEntry to a DirectStorageEntry. The Electron HTTP server
- * currently only supports direct backends; api-backed entries are routed
- * through the IStorageBackend factory in CLI commands instead. T21 will
- * refactor this server to support both.
+ * Build the appropriate IStorageBackend for a request.
+ *
+ * For direct storages, the entry already carries its Azure account name.
+ * For api-backed storages, the request must specify which Azure storage
+ * account to operate against via `?account=`. We fall back to the entry's
+ * own name if `?account=` is omitted (UI is expected to pass it explicitly).
+ *
+ * Throws Error if the named storage is missing — caller should translate to 404.
+ */
+function backendFor(req: express.Request, store: CredentialStore): IStorageBackend {
+  const name = req.params.storage as string;
+  const entry = store.getStorage(name);
+  if (!entry) throw new Error(`Storage '${name}' not found`);
+  if (entry.kind === 'direct') return makeBackend(entry);
+  // api kind needs an account name
+  const account = (req.query.account as string | undefined) ?? entry.name;
+  return makeBackend(entry, account);
+}
+
+/**
+ * Narrow a StorageEntry to a DirectStorageEntry. The sync/links/diff
+ * endpoints still depend on BlobClient + sync-engine, which only know how
+ * to talk to direct backends. T21 leaves that surface alone — it will be
+ * lifted in a later task once sync-engine itself moves to IStorageBackend.
  */
 function requireDirect(entry: StorageEntry, res: express.Response): DirectStorageEntry | null {
   if (entry.kind === 'direct') return entry;
   res.status(400).json({
-    error: "This endpoint currently only supports direct storage backends. Use the CLI for api-backed storages until T21 lands.",
+    error: "This endpoint currently only supports direct storage backends.",
   });
   return null;
 }
@@ -35,13 +57,18 @@ export function createServer(port: number, publicDirOverride?: string): express.
   const publicDir = publicDirOverride || path.join(__dirname, "public");
   app.use(express.static(publicDir));
 
-  // API: List configured storages
+  // API: List configured storages — includes `kind` so the UI can render
+  // the appropriate icon/badge for direct vs api-backed entries.
   app.get("/api/storages", (_req, res) => {
     const store = new CredentialStore();
-    res.json(store.listStorages());
+    const items = store.listStorages().map((s) => {
+      const entry = store.getStorage(s.name);
+      return { ...s, kind: entry?.kind ?? 'direct' };
+    });
+    res.json(items);
   });
 
-  // API: Add storage
+  // API: Add storage (direct only — api backends use POST /api/storage/api-backend)
   app.post("/api/storages", (req, res) => {
     const { name, accountName, sasToken, accountKey } = req.body;
     if (!name || !accountName || (!sasToken && !accountKey)) {
@@ -52,6 +79,28 @@ export function createServer(port: number, publicDirOverride?: string): express.
     const direct: Omit<DirectStorageEntry, "addedAt"> = { kind: 'direct', name, accountName, sasToken, accountKey };
     store.addStorage(direct);
     res.json({ success: true });
+  });
+
+  // API: Register an api-backed storage (called from the UI, T23)
+  app.post("/api/storage/api-backend", express.json(), (req, res, next) => {
+    try {
+      const { name, baseUrl, authEnabled, oidc } = req.body as {
+        name: string; baseUrl: string; authEnabled: boolean;
+        oidc?: { issuer: string; clientId: string; audience: string; scopes: string[] };
+      };
+      if (!name || !baseUrl || authEnabled === undefined) {
+        res.status(400).json({ error: { message: "name, baseUrl, and authEnabled are required" } });
+        return;
+      }
+      const store = new CredentialStore();
+      if (store.getStorage(name)) {
+        res.status(409).json({ error: { message: `Storage "${name}" already exists` } });
+        return;
+      }
+      const entry: Omit<ApiBackendEntry, 'addedAt'> = { kind: 'api', name, baseUrl, authEnabled, oidc };
+      store.addStorage(entry);
+      res.status(201).json({ name });
+    } catch (err) { next(err); }
   });
 
   // API: Remove storage
@@ -73,16 +122,13 @@ export function createServer(port: number, publicDirOverride?: string): express.
   app.get("/api/containers/:storage", async (req, res) => {
     try {
       const store = new CredentialStore();
-      const entry = store.getStorage(req.params.storage);
-      if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
-      const direct = requireDirect(entry, res);
-      if (!direct) return;
-      const client = new BlobClient(direct);
-      const containers = await client.listContainers();
-      res.json(containers);
+      const backend = backendFor(req, store);
+      const r = await backend.listContainers();
+      res.json(r.items);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      res.status(500).json({ error: msg });
+      const status = msg.includes("not found") ? 404 : 500;
+      res.status(status).json({ error: msg });
     }
   });
 
@@ -90,17 +136,14 @@ export function createServer(port: number, publicDirOverride?: string): express.
   app.get("/api/blobs/:storage/:container", async (req, res) => {
     try {
       const store = new CredentialStore();
-      const entry = store.getStorage(req.params.storage);
-      if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
-      const direct = requireDirect(entry, res);
-      if (!direct) return;
-      const client = new BlobClient(direct);
+      const backend = backendFor(req, store);
       const prefix = (req.query.prefix as string) || undefined;
-      const items = await client.listBlobs(req.params.container, prefix);
-      res.json(items);
+      const r = await backend.listBlobs(req.params.container, { prefix });
+      res.json(r.items);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      res.status(500).json({ error: msg });
+      const status = msg.includes("not found") ? 404 : 500;
+      res.status(status).json({ error: msg });
     }
   });
 
@@ -108,41 +151,48 @@ export function createServer(port: number, publicDirOverride?: string): express.
   app.get("/api/blob/:storage/:container", async (req, res) => {
     try {
       const store = new CredentialStore();
-      const entry = store.getStorage(req.params.storage);
-      if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
+      const backend = backendFor(req, store);
 
       const blobPath = req.query.blob as string;
       if (!blobPath) { res.status(400).json({ error: "?blob= query parameter required" }); return; }
 
-      const direct = requireDirect(entry, res);
-      if (!direct) return;
-      const client = new BlobClient(direct);
-      const blob = await client.getBlobContent(req.params.container, blobPath);
+      const handle = await backend.readBlob(req.params.container, blobPath);
+
+      // Collect stream into a Buffer for docx mammoth conversion or for
+      // legacy X-Blob-* response semantics. Streaming straight through is
+      // an option for the api-only paths but the original UI relies on the
+      // header shape, so we keep buffering for now.
+      const chunks: Buffer[] = [];
+      for await (const chunk of handle.stream) {
+        chunks.push(chunk instanceof Buffer ? chunk : Buffer.from(chunk));
+      }
+      const content = Buffer.concat(chunks);
+      const contentType = handle.contentType ?? "application/octet-stream";
 
       // Check if this is a docx file and format conversion is requested
       const format = req.query.format as string | undefined;
       if (blobPath.endsWith(".docx") && format) {
-        const buffer = Buffer.isBuffer(blob.content) ? blob.content : Buffer.from(blob.content);
         if (format === "html") {
-          const result = await mammoth.convertToHtml({ buffer });
+          const result = await mammoth.convertToHtml({ buffer: content });
           res.setHeader("Content-Type", "text/html; charset=utf-8");
           res.send(result.value);
           return;
         } else if (format === "text") {
-          const result = await mammoth.extractRawText({ buffer });
+          const result = await mammoth.extractRawText({ buffer: content });
           res.setHeader("Content-Type", "text/plain; charset=utf-8");
           res.send(result.value);
           return;
         }
       }
 
-      res.setHeader("Content-Type", blob.contentType);
-      res.setHeader("X-Blob-Name", encodeURIComponent(blob.name));
-      res.setHeader("X-Blob-Size", String(blob.size));
-      res.send(blob.content);
+      res.setHeader("Content-Type", contentType);
+      res.setHeader("X-Blob-Name", encodeURIComponent(blobPath));
+      res.setHeader("X-Blob-Size", String(handle.contentLength ?? content.length));
+      res.send(content);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      res.status(500).json({ error: msg });
+      const status = msg.includes("not found") ? 404 : 500;
+      res.status(status).json({ error: msg });
     }
   });
 
@@ -150,20 +200,17 @@ export function createServer(port: number, publicDirOverride?: string): express.
   app.post("/api/rename/:storage/:container", async (req, res) => {
     try {
       const store = new CredentialStore();
-      const entry = store.getStorage(req.params.storage);
-      if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
+      const backend = backendFor(req, store);
 
       const { oldName, newName } = req.body;
       if (!oldName || !newName) { res.status(400).json({ error: "oldName and newName are required" }); return; }
 
-      const direct = requireDirect(entry, res);
-      if (!direct) return;
-      const client = new BlobClient(direct);
-      await client.renameBlob(req.params.container, oldName, newName);
+      await backend.renameBlob(req.params.container, oldName, newName);
       res.json({ success: true });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      res.status(500).json({ error: msg });
+      const status = msg.includes("not found") ? 404 : 500;
+      res.status(status).json({ error: msg });
     }
   });
 
@@ -171,20 +218,17 @@ export function createServer(port: number, publicDirOverride?: string): express.
   app.delete("/api/blob/:storage/:container", async (req, res) => {
     try {
       const store = new CredentialStore();
-      const entry = store.getStorage(req.params.storage);
-      if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
+      const backend = backendFor(req, store);
 
       const blobPath = req.query.blob as string;
       if (!blobPath) { res.status(400).json({ error: "?blob= query parameter required" }); return; }
 
-      const direct = requireDirect(entry, res);
-      if (!direct) return;
-      const client = new BlobClient(direct);
-      await client.deleteBlob(req.params.container, blobPath);
+      await backend.deleteBlob(req.params.container, blobPath);
       res.json({ success: true });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      res.status(500).json({ error: msg });
+      const status = msg.includes("not found") ? 404 : 500;
+      res.status(status).json({ error: msg });
     }
   });
 
@@ -192,20 +236,17 @@ export function createServer(port: number, publicDirOverride?: string): express.
   app.delete("/api/folder/:storage/:container", async (req, res) => {
     try {
       const store = new CredentialStore();
-      const entry = store.getStorage(req.params.storage);
-      if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
+      const backend = backendFor(req, store);
 
       const prefix = req.query.prefix as string;
       if (!prefix) { res.status(400).json({ error: "?prefix= query parameter required" }); return; }
 
-      const direct = requireDirect(entry, res);
-      if (!direct) return;
-      const client = new BlobClient(direct);
-      const count = await client.deleteFolder(req.params.container, prefix);
+      const count = await backend.deleteFolder(req.params.container, prefix);
       res.json({ success: true, deleted: count });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      res.status(500).json({ error: msg });
+      const status = msg.includes("not found") ? 404 : 500;
+      res.status(status).json({ error: msg });
     }
   });
 
@@ -213,25 +254,123 @@ export function createServer(port: number, publicDirOverride?: string): express.
   app.post("/api/blob/:storage/:container", async (req, res) => {
     try {
       const store = new CredentialStore();
-      const entry = store.getStorage(req.params.storage);
-      if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
+      const backend = backendFor(req, store);
 
       const blobPath = req.query.blob as string;
       if (!blobPath) { res.status(400).json({ error: "?blob= query parameter required" }); return; }
 
       const contentType = (req.query.contentType as string) || "application/octet-stream";
       const content = typeof req.body.content === "string" ? req.body.content : JSON.stringify(req.body.content ?? "");
+      const buf = Buffer.from(content, "utf-8");
 
-      const direct = requireDirect(entry, res);
-      if (!direct) return;
-      const client = new BlobClient(direct);
-      await client.createBlob(req.params.container, blobPath, content, contentType);
+      await backend.uploadBlob(req.params.container, blobPath, buf, buf.byteLength, contentType);
       res.json({ success: true });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      res.status(500).json({ error: msg });
+      const status = msg.includes("not found") ? 404 : 500;
+      res.status(status).json({ error: msg });
     }
   });
+
+  // ============================================================
+  // File Share API Endpoints (Azure Files)
+  // ============================================================
+
+  // API: List shares
+  app.get("/api/shares/:storage", async (req, res, next) => {
+    try {
+      const store = new CredentialStore();
+      const backend = backendFor(req, store);
+      const r = await backend.listShares();
+      res.json(r);
+    } catch (err) { next(err); }
+  });
+
+  // API: Create a share
+  app.post("/api/shares/:storage", async (req, res, next) => {
+    try {
+      const store = new CredentialStore();
+      const backend = backendFor(req, store);
+      const { name, quotaGiB } = req.body as { name: string; quotaGiB?: number };
+      if (!name) {
+        res.status(400).json({ error: "name is required" });
+        return;
+      }
+      await backend.createShare(name, quotaGiB);
+      res.status(201).json({ name });
+    } catch (err) { next(err); }
+  });
+
+  // API: Delete a share
+  app.delete("/api/shares/:storage/:share", async (req, res, next) => {
+    try {
+      const store = new CredentialStore();
+      const backend = backendFor(req, store);
+      await backend.deleteShare(req.params.share as string);
+      res.status(204).end();
+    } catch (err) { next(err); }
+  });
+
+  // API: List directory contents within a share
+  app.get("/api/files/:storage/:share", async (req, res, next) => {
+    try {
+      const store = new CredentialStore();
+      const backend = backendFor(req, store);
+      const path = (req.query.path as string | undefined) ?? '';
+      const r = await backend.listDir(req.params.share as string, path);
+      res.json(r);
+    } catch (err) { next(err); }
+  });
+
+  // API: Read a file from a share — file path passed as ?path= query param
+  // (matches the existing /api/blob convention; avoids Express 5 wildcard
+  // ambiguity around encoded slashes).
+  app.get("/api/file/:storage/:share", async (req, res, next) => {
+    try {
+      const store = new CredentialStore();
+      const backend = backendFor(req, store);
+      const filePath = req.query.path as string;
+      if (!filePath) { res.status(400).json({ error: "?path= query parameter required" }); return; }
+      const handle = await backend.readFile(req.params.share as string, filePath);
+      if (handle.contentType) res.setHeader("Content-Type", handle.contentType);
+      if (handle.contentLength !== undefined) res.setHeader("Content-Length", String(handle.contentLength));
+      if (handle.etag) res.setHeader("ETag", handle.etag);
+      if (handle.lastModified) res.setHeader("Last-Modified", handle.lastModified);
+      const { pipeline } = await import("node:stream/promises");
+      await pipeline(handle.stream, res);
+    } catch (err) { next(err); }
+  });
+
+  // API: Upload a file to a share — file path passed as ?path= query param.
+  // Body is streamed directly from the request into the backend.
+  app.put("/api/file/:storage/:share", async (req, res, next) => {
+    try {
+      const store = new CredentialStore();
+      const backend = backendFor(req, store);
+      const filePath = req.query.path as string;
+      if (!filePath) { res.status(400).json({ error: "?path= query parameter required" }); return; }
+      const len = Number(req.header("content-length") ?? 0);
+      const ct = req.header("content-type");
+      const r = await backend.uploadFile(req.params.share as string, filePath, req, len, ct);
+      res.status(201).json(r);
+    } catch (err) { next(err); }
+  });
+
+  // API: Delete a file from a share
+  app.delete("/api/file/:storage/:share", async (req, res, next) => {
+    try {
+      const store = new CredentialStore();
+      const backend = backendFor(req, store);
+      const filePath = req.query.path as string;
+      if (!filePath) { res.status(400).json({ error: "?path= query parameter required" }); return; }
+      await backend.deleteFile(req.params.share as string, filePath);
+      res.status(204).end();
+    } catch (err) { next(err); }
+  });
+
+  // ============================================================
+  // Sync / Links / Diff (still direct-only — see requireDirect note)
+  // ============================================================
 
   // API: Get sync metadata for a container (backward compatible)
   // Falls back to .repo-links.json if .repo-sync-meta.json is not found
