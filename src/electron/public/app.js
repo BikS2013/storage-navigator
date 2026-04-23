@@ -153,29 +153,63 @@
   async function apiJson(url, opts) { return (await api(url, opts)).json(); }
 
   // --- Storages ---
-  let storageInfo = {}; // name -> { kind, accountName }
+  // For api backends, one entry expands into N options (one per Azure account
+  // visible to the API). The dropdown <option> uses a composite key
+  // "<storageName>::<azureAccount>"; the rest of the UI splits it.
+  let storageInfo = {}; // composite key -> { kind, storage, account }
 
   async function loadStorages() {
     const storages = await apiJson("/api/storages");
     storageSelect.innerHTML = '<option value="">Select storage...</option>';
     storageInfo = {};
-    for (const s of storages) {
-      storageInfo[s.name] = { kind: s.kind || "direct", accountName: s.accountName };
-      const opt = document.createElement("option");
-      opt.value = s.name;
-      const account = s.accountName ? ` (${s.accountName})` : "";
-      let label = `${storageIcon(s.kind)} ${s.name}${account}`;
-      if (s.expiresAt) {
-        const days = Math.ceil((new Date(s.expiresAt) - Date.now()) / 86400000);
-        if (s.isExpired) label += " [EXPIRED]";
-        else if (days < 30) label += ` [${days}d left]`;
+
+    // Each entry can expand into multiple options. Resolve in parallel.
+    const allOptions = await Promise.all(
+      storages.map(async (s) => {
+        try {
+          const r = await apiJson(`/api/accounts/${encodeURIComponent(s.name)}`);
+          return { storage: s, accounts: (r && r.items) || [] };
+        } catch (err) {
+          return { storage: s, accounts: [], error: err && err.message };
+        }
+      }),
+    );
+
+    let selectableCount = 0;
+    for (const { storage: s, accounts, error } of allOptions) {
+      const expiry = s.expiresAt
+        ? (s.isExpired ? " [EXPIRED]" : (() => {
+            const days = Math.ceil((new Date(s.expiresAt) - Date.now()) / 86400000);
+            return days < 30 ? ` [${days}d left]` : "";
+          })())
+        : "";
+      if (accounts.length === 0) {
+        // No accounts (probe failed or empty list). Render a disabled marker.
+        const opt = document.createElement("option");
+        opt.value = "";
+        opt.disabled = true;
+        opt.textContent = `${storageIcon(s.kind)} ${s.name} — ${error ? "error: " + error : "no accounts visible"}`;
+        storageSelect.appendChild(opt);
+        continue;
       }
-      opt.textContent = label;
-      storageSelect.appendChild(opt);
+      for (const a of accounts) {
+        const key = `${s.name}::${a.name}`;
+        storageInfo[key] = { kind: s.kind || "direct", storage: s.name, account: a.name };
+        const opt = document.createElement("option");
+        opt.value = key;
+        opt.textContent = `${storageIcon(s.kind)} ${s.name} → ${a.name}${expiry}`;
+        storageSelect.appendChild(opt);
+        selectableCount++;
+      }
     }
-    if (storages.length === 1) {
-      storageSelect.value = storages[0].name;
-      storageSelect.dispatchEvent(new Event("change"));
+
+    if (selectableCount === 1) {
+      // Find first non-disabled option
+      const firstOpt = Array.from(storageSelect.options).find(o => o.value && !o.disabled);
+      if (firstOpt) {
+        storageSelect.value = firstOpt.value;
+        storageSelect.dispatchEvent(new Event("change"));
+      }
     }
     updateDeleteStorageBtn();
   }
@@ -184,14 +218,35 @@
     deleteStorageBtn.disabled = !storageSelect.value;
   }
 
+  // currentStorage holds the backend NAME (entry.name); currentAccount holds
+  // the Azure account chosen for this dropdown row. The dropdown's composite
+  // value is "<storage>::<account>" — split here.
+  let currentAccount = "";
+
+  // Append ?account=<azure-account> to a URL when an account is selected.
+  // Direct-backend routes (sync/link/diff) don't need this — they use the
+  // entry's stored accountName server-side.
+  function withAccount(url) {
+    if (!currentAccount) return url;
+    const sep = url.includes("?") ? "&" : "?";
+    return `${url}${sep}account=${encodeURIComponent(currentAccount)}`;
+  }
+
   storageSelect.addEventListener("change", async () => {
-    currentStorage = storageSelect.value;
-    currentContainer = "";
-    updateDeleteStorageBtn();
-    if (!currentStorage) {
+    const key = storageSelect.value;
+    if (!key) {
+      currentStorage = "";
+      currentAccount = "";
+      currentContainer = "";
+      updateDeleteStorageBtn();
       treeContent.innerHTML = '<p class="placeholder">Select a storage account</p>';
       return;
     }
+    const info = storageInfo[key];
+    currentStorage = info ? info.storage : key;
+    currentAccount = info ? info.account : "";
+    currentContainer = "";
+    updateDeleteStorageBtn();
     await buildTree();
   });
 
@@ -199,7 +254,7 @@
   async function buildTree() {
     treeContent.innerHTML = '<p class="placeholder">Loading...</p>';
     try {
-      const containers = await apiJson(`/api/containers/${currentStorage}`);
+      const containers = await apiJson(withAccount(`/api/containers/${currentStorage}`));
       treeContent.innerHTML = "";
 
       for (const c of containers) {
@@ -248,8 +303,7 @@
     toggle.textContent = "▼";
 
     try {
-      const account = storageInfo[currentStorage] && storageInfo[currentStorage].accountName;
-      await loadSharesNode(currentStorage, account, children);
+      await loadSharesNode(currentStorage, currentAccount, children);
     } catch (e) {
       children.innerHTML = `<div style="padding:4px 24px;color:var(--expiry-expired);font-size:12px">Error: ${escapeHtml(e.message)}</div>`;
     }
@@ -367,7 +421,7 @@
   async function loadTreeLevel(parentEl, container, prefix, depth) {
     let url = `/api/blobs/${currentStorage}/${container}`;
     if (prefix) url += `?prefix=${encodeURIComponent(prefix)}`;
-    const items = await apiJson(url);
+    const items = await apiJson(withAccount(url));
 
     parentEl.innerHTML = "";
 
@@ -463,7 +517,7 @@
     contentBody.innerHTML = '<p class="placeholder">Loading...</p>';
 
     const ext = blobName.split(".").pop()?.toLowerCase();
-    const url = `/api/blob/${currentStorage}/${container}?blob=${encodeURIComponent(blobName)}`;
+    const url = withAccount(`/api/blob/${currentStorage}/${container}?blob=${encodeURIComponent(blobName)}`);
 
     try {
       if (ext === "pdf") {
@@ -754,7 +808,7 @@
     renameSave.textContent = "Renaming...";
 
     try {
-      await apiJson(`/api/rename/${currentStorage}/${contextTarget.container}`, {
+      await apiJson(withAccount(`/api/rename/${currentStorage}/${contextTarget.container}`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ oldName, newName }),
@@ -842,7 +896,7 @@
     deleteConfirm.textContent = "Deleting...";
 
     try {
-      const url = `/api/blob/${currentStorage}/${contextTarget.container}?blob=${encodeURIComponent(contextTarget.blobName)}`;
+      const url = withAccount(`/api/blob/${currentStorage}/${contextTarget.container}?blob=${encodeURIComponent(contextTarget.blobName)}`);
       await apiJson(url, { method: "DELETE" });
 
       deleteModal.classList.add("hidden");
@@ -891,7 +945,7 @@
     deleteFolderConfirm.textContent = "Deleting...";
 
     try {
-      const url = `/api/folder/${currentStorage}/${folderContextTarget.container}?prefix=${encodeURIComponent(folderContextTarget.folderPrefix)}`;
+      const url = withAccount(`/api/folder/${currentStorage}/${folderContextTarget.container}?prefix=${encodeURIComponent(folderContextTarget.folderPrefix)}`);
       await apiJson(url, { method: "DELETE" });
 
       deleteFolderModal.classList.add("hidden");
@@ -924,7 +978,7 @@
 
     // Populate container dropdown
     try {
-      const containers = await apiJson(`/api/containers/${currentStorage}`);
+      const containers = await apiJson(withAccount(`/api/containers/${currentStorage}`));
       createContainer.innerHTML = '<option value="">Select container...</option>';
       for (const c of containers) {
         const opt = document.createElement("option");
@@ -965,7 +1019,7 @@
       else if (ext === "html") contentType = "text/html";
       else if (ext === "md") contentType = "text/plain";
 
-      const url = `/api/blob/${currentStorage}/${container}?blob=${encodeURIComponent(blobPath)}&contentType=${encodeURIComponent(contentType)}`;
+      const url = withAccount(`/api/blob/${currentStorage}/${container}?blob=${encodeURIComponent(blobPath)}&contentType=${encodeURIComponent(contentType)}`);
       await apiJson(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },

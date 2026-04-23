@@ -86,6 +86,37 @@ export function createServer(port: number, publicDirOverride?: string): express.
   // API: proxy `/.well-known/storage-nav-config` for the renderer.
   // The browser context can't fetch a deployed Azure URL directly without CORS;
   // this server runs in Node so it has no such restriction.
+  // API: list Azure storage accounts a backend exposes.
+  // For direct backends this is the single account stored on the entry.
+  // For api backends this proxies the upstream GET /storages.
+  app.get("/api/accounts/:storage", async (req, res, next) => {
+    try {
+      const store = new CredentialStore();
+      const entry = store.getStorage(req.params.storage);
+      if (!entry) {
+        res.status(404).json({ error: { message: `Storage '${req.params.storage}' not found` } });
+        return;
+      }
+      if (entry.kind === "direct") {
+        res.json({ items: [{ name: entry.accountName }] });
+        return;
+      }
+      // api kind — proxy upstream GET /storages
+      const headers: Record<string, string> = {};
+      if (entry.authEnabled && entry.oidc) {
+        const { TokenStore } = await import("../core/backend/auth/token-store.js");
+        const tokens = await new TokenStore().load(entry.name);
+        if (tokens) headers.Authorization = `Bearer ${tokens.accessToken}`;
+      }
+      const r = await fetch(`${entry.baseUrl.replace(/\/$/, "")}/storages`, { headers });
+      if (!r.ok) {
+        res.status(r.status).json({ error: { message: `Upstream HTTP ${r.status}` } });
+        return;
+      }
+      res.json(await r.json());
+    } catch (err) { next(err); }
+  });
+
   app.get("/api/discovery", async (req, res, next) => {
     try {
       const baseUrl = (req.query.url as string | undefined) ?? "";
