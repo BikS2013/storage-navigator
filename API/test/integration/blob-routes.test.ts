@@ -3,7 +3,7 @@ import request from 'supertest';
 import { BlobService } from '../../src/azure/blob-service.js';
 import { AccountDiscovery } from '../../src/azure/account-discovery.js';
 import { buildApp } from '../../src/app.js';
-import { disabledModeConfig } from '../helpers/test-app.js';
+import { disabledModeConfig, stubFileService } from '../helpers/test-app.js';
 import { anonymousPrincipalMiddleware } from '../../src/auth/auth-toggle.js';
 import { startAzurite, type AzuriteHandle } from '../helpers/azurite.js';
 import { StorageSharedKeyCredential } from '@azure/storage-blob';
@@ -35,6 +35,7 @@ async function appFor(role: 'Reader' | 'Writer' | 'Admin') {
     authOverride: anonymousPrincipalMiddleware(role),
     discovery,
     blobService,
+    fileService: stubFileService,
   });
 }
 

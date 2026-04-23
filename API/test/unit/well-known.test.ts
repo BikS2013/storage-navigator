@@ -3,7 +3,7 @@ import request from 'supertest';
 import { buildApp } from '../../src/app.js';
 import { loadConfig } from '../../src/config.js';
 import { AccountDiscovery } from '../../src/azure/account-discovery.js';
-import { stubBlobService } from '../helpers/test-app.js';
+import { stubBlobService, stubFileService } from '../helpers/test-app.js';
 
 const stubDiscovery = new AccountDiscovery({
   adapter: { list: async () => [] },
@@ -22,7 +22,7 @@ describe('GET /.well-known/storage-nav-config', () => {
       OIDC_SCOPES: 'openid,role',
       ROLE_MAP: '{"Foo":"Reader"}',
     });
-    const app = buildApp({ config: cfg, discovery: stubDiscovery, blobService: stubBlobService });
+    const app = buildApp({ config: cfg, discovery: stubDiscovery, blobService: stubBlobService, fileService: stubFileService });
     const res = await request(app).get('/.well-known/storage-nav-config');
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
@@ -36,7 +36,7 @@ describe('GET /.well-known/storage-nav-config', () => {
 
   it('returns minimal config when auth disabled', async () => {
     const cfg = loadConfig({ AUTH_ENABLED: 'false', ANON_ROLE: 'Reader' });
-    const app = buildApp({ config: cfg, discovery: stubDiscovery, blobService: stubBlobService });
+    const app = buildApp({ config: cfg, discovery: stubDiscovery, blobService: stubBlobService, fileService: stubFileService });
     const res = await request(app).get('/.well-known/storage-nav-config');
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ authEnabled: false });

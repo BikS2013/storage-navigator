@@ -12,9 +12,12 @@ import { anonymousPrincipalMiddleware } from './auth/auth-toggle.js';
 import type { AppRole } from './auth/role-mapper.js';
 import type { AccountDiscovery } from './azure/account-discovery.js';
 import type { BlobService } from './azure/blob-service.js';
+import type { FileService } from './azure/file-service.js';
 import { storagesRouter } from './routes/storages.js';
 import { containersRouter } from './routes/containers.js';
 import { blobsRouter } from './routes/blobs.js';
+import { sharesRouter } from './routes/shares.js';
+import { filesRouter } from './routes/files.js';
 
 export type BuildAppOptions = {
   config: Config;
@@ -26,6 +29,7 @@ export type BuildAppOptions = {
   authOverride?: RequestHandler;
   discovery: AccountDiscovery;
   blobService: BlobService;
+  fileService: FileService;
 };
 
 export function buildApp(opts: BuildAppOptions): Express {
@@ -59,6 +63,8 @@ export function buildApp(opts: BuildAppOptions): Express {
   app.use(storagesRouter(opts.discovery));
   app.use(containersRouter(opts.blobService, opts.discovery, opts.config));
   app.use(blobsRouter(opts.blobService, opts.discovery, opts.config));
+  app.use(sharesRouter(opts.fileService, opts.discovery, opts.config));
+  app.use(filesRouter(opts.fileService, opts.discovery, opts.config));
 
   app.use(errorMiddleware());
   return app;

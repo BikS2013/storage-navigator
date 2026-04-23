@@ -3,7 +3,7 @@ import request from 'supertest';
 import { buildApp } from '../../src/app.js';
 import { loadConfig } from '../../src/config.js';
 import { AccountDiscovery } from '../../src/azure/account-discovery.js';
-import { stubBlobService } from '../helpers/test-app.js';
+import { stubBlobService, stubFileService } from '../helpers/test-app.js';
 
 const cfg = loadConfig({ AUTH_ENABLED: 'false', ANON_ROLE: 'Reader' });
 const stubDiscovery = new AccountDiscovery({
@@ -15,7 +15,7 @@ await stubDiscovery.refresh();
 
 describe('health endpoints', () => {
   it('GET /healthz returns 200', async () => {
-    const app = buildApp({ config: cfg, discovery: stubDiscovery, blobService: stubBlobService });
+    const app = buildApp({ config: cfg, discovery: stubDiscovery, blobService: stubBlobService, fileService: stubFileService });
     const res = await request(app).get('/healthz');
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: 'ok' });
@@ -26,6 +26,7 @@ describe('health endpoints', () => {
       config: cfg,
       discovery: stubDiscovery,
       blobService: stubBlobService,
+      fileService: stubFileService,
       readinessChecks: {
         jwks: async () => true,
         arm: async () => true,
@@ -41,6 +42,7 @@ describe('health endpoints', () => {
       config: cfg,
       discovery: stubDiscovery,
       blobService: stubBlobService,
+      fileService: stubFileService,
       readinessChecks: {
         jwks: async () => true,
         arm: async () => false,
@@ -59,6 +61,7 @@ describe('health endpoints', () => {
       config: cfg,
       discovery: stubDiscovery,
       blobService: stubBlobService,
+      fileService: stubFileService,
       readinessChecks: {
         arm: async () => {
           throw new Error('arm probe boom');

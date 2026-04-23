@@ -4,6 +4,7 @@ import { logger } from './observability/logger.js';
 import { getAzureCredential } from './azure/credential.js';
 import { AccountDiscovery, ArmStorageAdapter } from './azure/account-discovery.js';
 import { BlobService } from './azure/blob-service.js';
+import { FileService } from './azure/file-service.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -25,10 +26,16 @@ async function main(): Promise<void> {
     (account) => discovery.lookup(account)?.blobEndpoint ?? `https://${account}.blob.core.windows.net`,
   );
 
+  const fileService = new FileService(
+    credential,
+    (account) => discovery.lookup(account)?.fileEndpoint ?? `https://${account}.file.core.windows.net`,
+  );
+
   const app = buildApp({
     config,
     discovery,
     blobService,
+    fileService,
     readinessChecks: {
       arm: async () => discovery.list().length >= 0, // discovery cache populated
     },
