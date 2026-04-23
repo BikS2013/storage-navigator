@@ -36,9 +36,30 @@ describe('loadConfig — auth enabled', () => {
     expect(() => loadConfig(env)).toThrow();
   });
 
+  it('throws with friendly error when ROLE_MAP is malformed JSON', () => {
+    const env = { ...validEnv, ROLE_MAP: 'not-json' };
+    expect(() => loadConfig(env)).toThrow(/ROLE_MAP is not valid JSON/);
+  });
+
+  it('throws when OIDC_ISSUER is not a URL', () => {
+    const env = { ...validEnv, OIDC_ISSUER: 'not-a-url' };
+    expect(() => loadConfig(env)).toThrow();
+  });
+
   it('honors PORT override', () => {
     const cfg = loadConfig({ ...validEnv, PORT: '4040' });
     expect(cfg.port).toBe(4040);
+  });
+
+  it('rejects negative PORT with named error', () => {
+    expect(() => loadConfig({ ...validEnv, PORT: '-1' }))
+      .toThrow(/PORT must be a positive integer/);
+  });
+
+  it('accepts OIDC_CLOCK_TOLERANCE_SEC=0', () => {
+    const cfg = loadConfig({ ...validEnv, OIDC_CLOCK_TOLERANCE_SEC: '0' });
+    if (cfg.oidc.mode !== 'enabled') throw new Error('discriminator');
+    expect(cfg.oidc.clockToleranceSec).toBe(0);
   });
 });
 
@@ -62,5 +83,12 @@ describe('loadConfig — auth disabled', () => {
 
   it('throws when AUTH_ENABLED missing entirely', () => {
     expect(() => loadConfig({})).toThrow(/AUTH_ENABLED/);
+  });
+
+  it('rejects AUTH_ENABLED with a non-boolean value', () => {
+    expect(() => loadConfig({ AUTH_ENABLED: '1' }))
+      .toThrow(/AUTH_ENABLED must be 'true' or 'false'/);
+    expect(() => loadConfig({ AUTH_ENABLED: 'yes', ANON_ROLE: 'Reader' }))
+      .toThrow(/AUTH_ENABLED must be 'true' or 'false'/);
   });
 });
