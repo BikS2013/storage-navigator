@@ -182,7 +182,10 @@ export function createServer(port: number, publicDirOverride?: string): express.
       const store = new CredentialStore();
       const backend = backendFor(req, store);
       const prefix = (req.query.prefix as string) || undefined;
-      const r = await backend.listBlobs(req.params.container, { prefix });
+      // Always pass delimiter:'/' so the response is hierarchical (folders +
+      // immediate blobs only). Without it the api backend returns a flat
+      // recursive listing, which the UI tree can't expand/collapse.
+      const r = await backend.listBlobs(req.params.container, { prefix, delimiter: "/" });
       res.json(r.items);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
