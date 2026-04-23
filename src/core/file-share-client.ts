@@ -99,7 +99,9 @@ export class FileShareClient {
     await this.ensureDirChain(share, dir);
     const f = this.serviceClient.getShareClient(share).getDirectoryClient(dir).getFileClient(file);
     await f.create(sizeBytes);
-    const stream = body instanceof Buffer ? Readable.from(body) : body;
+    // TS 6.0 + @types/node 25.x types Buffer as Buffer<ArrayBufferLike>, which
+    // breaks `body instanceof Buffer` narrowing — annotate explicitly.
+    const stream: Readable = body instanceof Buffer ? Readable.from(body) : body;
     await f.uploadStream(stream, sizeBytes, 4 * 1024 * 1024, 4, {
       fileHttpHeaders: contentType ? { fileContentType: contentType } : undefined,
     });
