@@ -167,15 +167,100 @@ export class ApiBackend implements IStorageBackend {
     return r.deleted;
   }
 
-  // ---- shares + files (Task 14 fills in) ----
-  async listShares(): Promise<Page<ShareInfo>> { throw new Error('NotImplemented: T14'); }
-  async createShare(): Promise<void> { throw new Error('NotImplemented: T14'); }
-  async deleteShare(): Promise<void> { throw new Error('NotImplemented: T14'); }
-  async listDir(): Promise<Page<FileItem>> { throw new Error('NotImplemented: T14'); }
-  async readFile(): Promise<BlobReadHandle> { throw new Error('NotImplemented: T14'); }
-  async headFile(): Promise<Omit<BlobReadHandle, 'stream'>> { throw new Error('NotImplemented: T14'); }
-  async uploadFile(): Promise<{ etag?: string; lastModified?: string }> { throw new Error('NotImplemented: T14'); }
-  async deleteFile(): Promise<void> { throw new Error('NotImplemented: T14'); }
-  async renameFile(): Promise<void> { throw new Error('NotImplemented: T14'); }
-  async deleteFileFolder(): Promise<number> { throw new Error('NotImplemented: T14'); }
+  // ---- shares ----
+  async listShares(opts: PageOpts = {}): Promise<Page<ShareInfo>> {
+    const params = new URLSearchParams();
+    if (opts.pageSize) params.set('pageSize', String(opts.pageSize));
+    if (opts.continuationToken) params.set('continuationToken', opts.continuationToken);
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    return this.json(`/storages/${this.account}/shares${qs}`);
+  }
+  async createShare(name: string, quotaGiB?: number): Promise<void> {
+    await this.json(`/storages/${this.account}/shares`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(quotaGiB ? { name, quotaGiB } : { name }),
+    });
+  }
+  async deleteShare(name: string): Promise<void> {
+    await this.json(`/storages/${this.account}/shares/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  }
+
+  // ---- files ----
+  async listDir(share: string, path: string, opts: PageOpts = {}): Promise<Page<FileItem>> {
+    const params = new URLSearchParams();
+    if (path) params.set('path', path);
+    if (opts.pageSize) params.set('pageSize', String(opts.pageSize));
+    if (opts.continuationToken) params.set('continuationToken', opts.continuationToken);
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    return this.json(`/storages/${this.account}/shares/${encodeURIComponent(share)}/files${qs}`);
+  }
+
+  async readFile(share: string, path: string): Promise<BlobReadHandle> {
+    const headers = await this.authHeaders();
+    let res: Response;
+    try {
+      res = await fetch(`${this.base()}/storages/${this.account}/shares/${encodeURIComponent(share)}/files/${this.encodePath(path)}`, { headers });
+    } catch (err) { throw new NetworkError(err as Error); }
+    if (!res.ok) {
+      const ct = res.headers.get('content-type') ?? '';
+      const body = ct.includes('application/json') ? await res.json().catch(() => undefined) : undefined;
+      throw fromResponseBody(res.status, body, this.entry.name);
+    }
+    return {
+      stream: Readable.fromWeb(res.body as never) as NodeJS.ReadableStream,
+      contentType: res.headers.get('content-type') ?? undefined,
+      contentLength: res.headers.has('content-length') ? Number(res.headers.get('content-length')) : undefined,
+      etag: res.headers.get('etag') ?? undefined,
+      lastModified: res.headers.get('last-modified') ?? undefined,
+    };
+  }
+
+  async headFile(share: string, path: string): Promise<Omit<BlobReadHandle, 'stream'>> {
+    let res: Response;
+    try {
+      res = await fetch(`${this.base()}/storages/${this.account}/shares/${encodeURIComponent(share)}/files/${this.encodePath(path)}`, {
+        method: 'HEAD', headers: await this.authHeaders(),
+      });
+    } catch (err) { throw new NetworkError(err as Error); }
+    if (!res.ok) throw fromResponseBody(res.status, undefined, this.entry.name);
+    return {
+      contentType: res.headers.get('content-type') ?? undefined,
+      contentLength: res.headers.has('content-length') ? Number(res.headers.get('content-length')) : undefined,
+      etag: res.headers.get('etag') ?? undefined,
+      lastModified: res.headers.get('last-modified') ?? undefined,
+    };
+  }
+
+  async uploadFile(share: string, path: string, body: NodeJS.ReadableStream | Buffer, sizeBytes: number, contentType?: string): Promise<{ etag?: string; lastModified?: string }> {
+    return this.json(`/storages/${this.account}/shares/${encodeURIComponent(share)}/files/${this.encodePath(path)}`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': contentType ?? 'application/octet-stream',
+        'Content-Length': String(sizeBytes),
+      },
+      body: body as BodyInit,
+      duplex: 'half',
+    } as RequestInit & { duplex?: 'half' });
+  }
+
+  async deleteFile(share: string, path: string): Promise<void> {
+    await this.json(`/storages/${this.account}/shares/${encodeURIComponent(share)}/files/${this.encodePath(path)}`, { method: 'DELETE' });
+  }
+
+  async renameFile(share: string, fromPath: string, toPath: string): Promise<void> {
+    await this.json(`/storages/${this.account}/shares/${encodeURIComponent(share)}/files/${this.encodePath(fromPath)}:rename`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ newPath: toPath }),
+    });
+  }
+
+  async deleteFileFolder(share: string, path: string): Promise<number> {
+    const r = await this.json<{ deleted: number }>(
+      `/storages/${this.account}/shares/${encodeURIComponent(share)}/files?path=${encodeURIComponent(path)}&confirm=true`,
+      { method: 'DELETE' },
+    );
+    return r.deleted;
+  }
 }
