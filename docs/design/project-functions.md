@@ -128,3 +128,23 @@ Shared resolution logic is in `src/cli/commands/shared.ts` (`resolveStorageEntry
 - Custom app icon and "Storage Navigator" branding in macOS dock
 - Sync badge on containers that mirror a repository
 - Sync confirmation modal showing repo URL, branch, last sync time, and file count
+
+## RBAC API (`API/`)
+
+- HTTP API exposing Azure Blob + Azure Files behind OIDC + three roles (`StorageReader`, `StorageWriter`, `StorageAdmin`).
+- Auth provider: NBG IdentityServer at `https://my.nbg.gr/identity`. JWT validated locally via JWKS.
+- Toggleable auth: `AUTH_ENABLED=true|false`. When false, `ANON_ROLE` decides the default role.
+- Discovery endpoint: `GET /.well-known/storage-nav-config` returns `{authEnabled, issuer, clientId, audience, scopes}`.
+- URL shape:
+  - `/storages` — list visible accounts
+  - `/storages/{account}/containers[/{c}]` — container CRUD
+  - `/storages/{account}/containers/{c}/blobs[/{path}]` — blob CRUD + rename + delete-folder
+  - `/storages/{account}/shares[/{s}]` — share CRUD
+  - `/storages/{account}/shares/{s}/files[/{path}]` — file CRUD + rename + delete-folder
+- Storage access: `DefaultAzureCredential` (Managed Identity in App Service).
+- Storage account discovery: ARM scan via `@azure/arm-storage`.
+- Reads proxy-streamed through the API; writes streamed; client disconnects cancel via `AbortSignal`.
+- Pagination: `?pageSize=` (default 200, max 1000), `?continuationToken=`.
+- Errors: `{error: {code, message, correlationId}}`.
+- Tests: vitest unit + integration (Azurite + mock IdP).
+- Deployment: Azure App Service Linux Node 22 with System-Assigned MI; container via multi-stage Dockerfile.

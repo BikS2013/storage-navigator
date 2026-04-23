@@ -4,6 +4,11 @@
 
 ### Medium Priority
 
+- **Storage Navigator client adapter for the new `api` backend type (Plan 006 spec, Section 11)**: The API service in `API/` is implemented (Plan 006 impl), but the Storage Navigator client (CLI + Electron) does not yet support the `api` backend type. Follow-up plan needed: introduce `src/core/backend/` abstraction with `direct-backend.ts` and `api-backend.ts`, OIDC client (PKCE for Electron, device-code for CLI), token store (Electron `safeStorage` / CLI chmod-600), discovery client. Add `add-api`, `shares`, `files`, `file-view` CLI commands. Add "Connect to Storage Navigator API" option in Electron "Add Storage" dialog.
+
+- **API: 14 transitive npm vulns from `azurite` test dep**: `npm install --save-dev azurite` in `API/` pulls a vulnerable transitive tree (9 moderate, 4 high, 1 critical via `azurite → @azure/ms-rest-js → xml2js`). All confined to `devDependencies` — never bundled into `dist/` or the Docker image. Documented + accepted; revisit when Azurite ships a clean release. Baseline snapshot: `docs/reference/api-npm-audit-baseline-2026-04-23.json`.
+
+
 - **Test coverage**: No automated tests exist yet for repo sync features. Tests needed for: GitHub/DevOps client URL parsing, sync engine SHA diffing, token CRUD operations, link registry CRUD, path filtering/mapping, migration logic.
 - **Link dialog does not validate repo access before creating link**: The CLI commands (`link-github`, `link-devops`) validate that the repo is accessible by resolving the default branch, but the UI's `POST /api/links` endpoint only writes metadata without validating repo accessibility. The spec requires validation.
 - **Git LFS files**: LFS-tracked files return pointer files, not actual content. Not handled in v1.
@@ -13,6 +18,8 @@
 - **Registry race conditions**: `createLink()`, `removeLink()`, `cloneRepo()`, and `syncRepo()` all do read-modify-write on `.repo-links.json` with no locking. Concurrent CLI/UI operations can overwrite each other.
 - **Diff All "Sync Now" button has no PAT retry**: In `attachDiffSyncHandlers()`, when sync fails with MISSING_PAT, `handleSyncError` is called with `null` as `retryAction`. After the user adds a token, the sync is not retried — they must manually click "Sync Now" again.
 - **`findLinkByPrefix` unhandled throw in repo-sync.ts**: The same unhandled-throw pattern fixed in `diff-ops.ts` exists in `repo-sync.ts` line 193 and `link-ops.ts` line 148. If the prefix is not found or ambiguous, an uncaught exception is printed rather than a clean error message with exit code 2.
+- **Express server coupled to Electron main process**: `src/electron/server.ts` is invoked from `src/electron/main.ts`. The same HTTP surface should be runnable as a standalone process to enable shared backend-server use cases. Extract into `src/api-server/` (or similar) with a thin Electron entry point that imports it. Prerequisite for any future hosted/RBAC API to reuse logic.
+- **Token expiry warning surfaced only in CLI**: `list-tokens` warns about PATs expiring within 14 days. The Electron UI does not surface the same warning in the tokens panel. Add a visual badge / banner on tokens approaching expiry.
 
 ### Low Priority
 

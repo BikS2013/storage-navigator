@@ -5682,3 +5682,7 @@ Coordination checkpoints:
 | UI diff panel overflows modal on small screens | Low | Low | `max-height` + `overflow-y: auto` CSS on `#diff-result-panel` |
 | Exit code 1 vs 2 confusion with existing CLI scripts | Low | Low | Document in `diff-ops.ts` source and in `CLAUDE.md`; convention scoped to `diff` command only |
 
+## API service (Plan 006)
+
+The `API/` folder houses a separate Node/TS deployable that exposes the same blob ops as the CLI/UI (plus Azure Files) behind an HTTP surface protected by OIDC. It uses System-Assigned Managed Identity to access Storage and the NBG IdentityServer for caller authentication. See `docs/design/plan-006-rbac-api.md` for the design and `docs/design/plan-006-rbac-api-impl.md` for the implementation plan. The Storage Navigator client gets a third backend type `api` (covered by a follow-up plan) that talks to this API instead of going to Azure Storage directly.
+
