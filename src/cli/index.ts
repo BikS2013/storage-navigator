@@ -2,6 +2,7 @@
 import { Command } from "commander";
 import { addStorage } from "./commands/add-storage.js";
 import { addApi } from "./commands/add-api.js";
+import { login, logout } from "./commands/auth-ops.js";
 import { listStorages } from "./commands/list-storages.js";
 import { removeStorage, deleteStorage } from "./commands/remove-storage.js";
 import { viewBlob, listContainers, listBlobs, downloadBlob } from "./commands/view.js";
@@ -38,6 +39,24 @@ program
   .requiredOption("--base-url <url>", "API base URL (e.g. https://your-api.azurewebsites.net)")
   .action(async (opts) => {
     await addApi(opts.name, opts.baseUrl);
+  });
+
+// Re-run OIDC login for an api backend
+program
+  .command("login")
+  .description("Re-run OIDC login for an existing api backend")
+  .requiredOption("--name <name>", "API backend name")
+  .action(async (opts) => {
+    await login(opts.name);
+  });
+
+// Clear stored OIDC tokens for an api backend
+program
+  .command("logout")
+  .description("Delete stored OIDC tokens for an api backend")
+  .requiredOption("--name <name>", "API backend name")
+  .action(async (opts) => {
+    await logout(opts.name);
   });
 
 // List storages
