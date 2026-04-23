@@ -11,8 +11,18 @@ import { addToken, listTokens, removeToken } from "./commands/token-ops.js";
 import { cloneGitHub, cloneDevOps, cloneSsh, syncContainer } from "./commands/repo-sync.js";
 import { linkGitHub, linkDevOps, linkSsh, unlinkContainer, listLinks } from "./commands/link-ops.js";
 import { diffContainer } from "./commands/diff-ops.js";
+import {
+  listShares, createShare, deleteShareCmd,
+  listDir, viewFile, uploadFileCmd, renameFileCmd, deleteFileCmd, deleteFileFolderCmd,
+} from "./commands/shares-ops.js";
 
 const program = new Command();
+
+const commonStorageOpts = (cmd: import('commander').Command) =>
+  cmd.option('--storage <name>', 'Storage backend name')
+     .option('--account <account>', 'Azure storage account name (required for api backends)')
+     .option('--account-key <key>', 'Inline account key (direct only)')
+     .option('--sas-token <token>', 'Inline SAS token (direct only)');
 
 program
   .name("storage-nav")
@@ -437,6 +447,52 @@ program
       }
     );
   });
+
+// File share commands
+commonStorageOpts(program.command('shares').description('List file shares'))
+  .action(async (opts) => { await listShares(opts); });
+
+commonStorageOpts(program.command('share-create').description('Create a file share')
+  .requiredOption('--name <name>', 'Share name')
+  .option('--quota <gib>', 'Quota in GiB', (v) => parseInt(v, 10)))
+  .action(async (opts) => { await createShare(opts); });
+
+commonStorageOpts(program.command('share-delete').description('Delete a file share')
+  .requiredOption('--name <name>', 'Share name'))
+  .action(async (opts) => { await deleteShareCmd(opts); });
+
+commonStorageOpts(program.command('files').description('List directory contents in a file share')
+  .requiredOption('--share <name>', 'Share name')
+  .option('--path <dir>', 'Directory path (default: root)'))
+  .action(async (opts) => { await listDir(opts); });
+
+commonStorageOpts(program.command('file-view').description('View a file (UTF-8 text)')
+  .requiredOption('--share <name>', 'Share name')
+  .requiredOption('--file <path>', 'File path'))
+  .action(async (opts) => { await viewFile(opts); });
+
+commonStorageOpts(program.command('file-upload').description('Upload a file')
+  .requiredOption('--share <name>', 'Share name')
+  .requiredOption('--file <path>', 'Destination path')
+  .option('--source <path>', 'Local file to upload')
+  .option('--content <text>', 'Inline text content'))
+  .action(async (opts) => { await uploadFileCmd(opts); });
+
+commonStorageOpts(program.command('file-rename').description('Rename a file')
+  .requiredOption('--share <name>', 'Share name')
+  .requiredOption('--file <path>', 'Current path')
+  .requiredOption('--new-name <path>', 'New path'))
+  .action(async (opts) => { await renameFileCmd(opts); });
+
+commonStorageOpts(program.command('file-delete').description('Delete a file')
+  .requiredOption('--share <name>', 'Share name')
+  .requiredOption('--file <path>', 'File path'))
+  .action(async (opts) => { await deleteFileCmd(opts); });
+
+commonStorageOpts(program.command('file-delete-folder').description('Delete a directory recursively')
+  .requiredOption('--share <name>', 'Share name')
+  .requiredOption('--path <dir>', 'Directory path'))
+  .action(async (opts) => { await deleteFileFolderCmd(opts); });
 
 // Launch Electron UI
 program
