@@ -4,9 +4,53 @@
  * This file is invoked as: electron <this-file> [--port <port>]
  * It starts an Express server and opens a BrowserWindow pointing at it.
  */
-import { app, BrowserWindow } from "electron";
+import { app, BrowserWindow, ipcMain, shell, safeStorage } from "electron";
 import * as path from "path";
 import { createServer } from "./server.js";
+import { generatePkce, buildAuthorizeUrl, exchangeCode } from "../core/backend/auth/oidc-client.js";
+import { startLoopback } from "./oidc-loopback.js";
+import { TokenStore } from "../core/backend/auth/token-store.js";
+import { writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+ipcMain.handle('oidc:login', async (_event, args: { name: string; issuer: string; clientId: string; audience: string; scopes: string[] }) => {
+  const lp = await startLoopback();
+  const pkce = generatePkce();
+  const state = Math.random().toString(36).slice(2);
+  const url = buildAuthorizeUrl({
+    issuer: args.issuer, clientId: args.clientId, scopes: args.scopes, audience: args.audience,
+    redirectUri: lp.redirectUri, codeChallenge: pkce.codeChallenge, state,
+  });
+  await shell.openExternal(url.toString());
+  const cb = await lp.waitForCallback();
+  if (cb.state !== state) throw new Error('OIDC state mismatch');
+  const tokens = await exchangeCode({
+    issuer: args.issuer, clientId: args.clientId, code: cb.code,
+    redirectUri: lp.redirectUri, codeVerifier: pkce.codeVerifier,
+  });
+  lp.close();
+  // Encrypt with safeStorage and write to ~/.storage-navigator/oidc-tokens.bin
+  // (Electron-side store; CLI uses the JSON path. The map structure is the same.)
+  const dir = join(homedir(), '.storage-navigator');
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const file = join(dir, 'oidc-tokens.bin');
+  let map: Record<string, unknown> = {};
+  if (existsSync(file)) {
+    const enc = readFileSync(file);
+    if (safeStorage.isEncryptionAvailable()) {
+      try { map = JSON.parse(safeStorage.decryptString(enc)) as Record<string, unknown>; } catch { map = {}; }
+    }
+  }
+  map[args.name] = tokens;
+  if (safeStorage.isEncryptionAvailable()) {
+    writeFileSync(file, safeStorage.encryptString(JSON.stringify(map)) as Buffer);
+  } else {
+    // Fall back to fs-backed plaintext (TokenStore default behavior)
+    await new TokenStore().save(args.name, tokens);
+  }
+  return { ok: true };
+});
 
 // Set app name so macOS shows "Storage Navigator" in the app switcher/menu bar
 app.name = "Storage Navigator";
