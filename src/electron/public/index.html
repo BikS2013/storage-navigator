@@ -52,18 +52,33 @@
   <div id="add-modal" class="modal hidden">
     <div class="modal-content">
       <h2>Add Storage Account</h2>
-      <label>Display Name<input type="text" id="modal-name" placeholder="e.g. corporateloans"></label>
-      <label>Account Name<input type="text" id="modal-account" placeholder="Azure storage account name"></label>
-      <label>Auth Type
-        <select id="modal-auth-type" style="display:block;width:100%;margin-top:4px;padding:8px;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:13px;">
-          <option value="account-key">Account Key (recommended)</option>
-          <option value="sas-token">SAS Token</option>
-        </select>
-      </label>
-      <label id="modal-key-label">Account Key<textarea id="modal-key" rows="2" placeholder="Azure storage account key"></textarea></label>
-      <div class="modal-actions">
-        <button id="modal-cancel">Cancel</button>
-        <button id="modal-save" class="primary">Save</button>
+      <div class="tab-bar">
+        <button class="tab-btn active" data-tab="direct">Direct (Account Key / SAS)</button>
+        <button class="tab-btn" data-tab="api">Connect to Storage Navigator API</button>
+      </div>
+      <div class="tab-body" data-tab="direct">
+        <label>Display Name<input type="text" id="modal-name" placeholder="e.g. corporateloans"></label>
+        <label>Account Name<input type="text" id="modal-account" placeholder="Azure storage account name"></label>
+        <label>Auth Type
+          <select id="modal-auth-type" style="display:block;width:100%;margin-top:4px;padding:8px;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:13px;">
+            <option value="account-key">Account Key (recommended)</option>
+            <option value="sas-token">SAS Token</option>
+          </select>
+        </label>
+        <label id="modal-key-label">Account Key<textarea id="modal-key" rows="2" placeholder="Azure storage account key"></textarea></label>
+        <div class="modal-actions">
+          <button id="modal-cancel">Cancel</button>
+          <button id="modal-save" class="primary">Save</button>
+        </div>
+      </div>
+      <div class="tab-body" data-tab="api" hidden>
+        <label>Friendly name<input type="text" id="api-name" placeholder="e.g. corp-api" required></label>
+        <label>Base URL<input type="text" id="api-url" placeholder="https://your-api.azurewebsites.net" required></label>
+        <div class="modal-actions">
+          <button id="api-cancel">Cancel</button>
+          <button id="api-add-btn" class="primary">Connect</button>
+        </div>
+        <div id="api-status" class="status-line"></div>
       </div>
     </div>
   </div>

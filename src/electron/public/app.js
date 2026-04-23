@@ -118,6 +118,25 @@
     modalKeyLabel.childNodes[0].textContent = label;
   });
 
+  // --- Tab switching inside the Add Storage modal ---
+  function activateTab(tabName) {
+    const buttons = modal.querySelectorAll(".tab-btn");
+    const bodies = modal.querySelectorAll(".tab-body");
+    buttons.forEach((b) => b.classList.toggle("active", b.dataset.tab === tabName));
+    bodies.forEach((body) => {
+      if (body.dataset.tab === tabName) body.removeAttribute("hidden");
+      else body.setAttribute("hidden", "");
+    });
+  }
+  modal.querySelectorAll(".tab-btn").forEach((btn) => {
+    btn.addEventListener("click", () => activateTab(btn.dataset.tab));
+  });
+
+  // --- Storage kind icon helper ---
+  function storageIcon(kind) {
+    return kind === "api" ? "\u{1F517}" : "\u{1F511}"; // link vs key
+  }
+
   // --- API helpers ---
   async function api(url, opts) {
     const res = await fetch(url, opts);
@@ -134,13 +153,18 @@
   async function apiJson(url, opts) { return (await api(url, opts)).json(); }
 
   // --- Storages ---
+  let storageInfo = {}; // name -> { kind, accountName }
+
   async function loadStorages() {
     const storages = await apiJson("/api/storages");
     storageSelect.innerHTML = '<option value="">Select storage...</option>';
+    storageInfo = {};
     for (const s of storages) {
+      storageInfo[s.name] = { kind: s.kind || "direct", accountName: s.accountName };
       const opt = document.createElement("option");
       opt.value = s.name;
-      let label = `${s.name} (${s.accountName})`;
+      const account = s.accountName ? ` (${s.accountName})` : "";
+      let label = `${storageIcon(s.kind)} ${s.name}${account}`;
       if (s.expiresAt) {
         const days = Math.ceil((new Date(s.expiresAt) - Date.now()) / 86400000);
         if (s.isExpired) label += " [EXPIRED]";
@@ -191,8 +215,64 @@
         });
         treeContent.appendChild(node);
       }
+
+      // Sibling Shares node (file-share browsing). Rendered after containers
+      // and lazy-loaded on click to keep buildTree fast for storages without
+      // file shares configured.
+      const sharesRoot = createTreeNode("Shares", "📁", 0, true);
+      sharesRoot.classList.add("shares-tree");
+      sharesRoot.querySelector(".tree-item").addEventListener("click", () => toggleSharesRoot(sharesRoot));
+      treeContent.appendChild(sharesRoot);
     } catch (e) {
       treeContent.innerHTML = `<p class="placeholder">Error: ${escapeHtml(e.message)}</p>`;
+    }
+  }
+
+  async function toggleSharesRoot(node) {
+    const toggle = node.querySelector(".tree-toggle");
+    const children = node.querySelector(".tree-children");
+
+    if (children.classList.contains("expanded")) {
+      children.classList.remove("expanded");
+      toggle.textContent = "▶";
+      return;
+    }
+    if (children.children.length > 0) {
+      children.classList.add("expanded");
+      toggle.textContent = "▼";
+      return;
+    }
+
+    children.innerHTML = '<div style="padding:4px 24px;color:var(--text-dim);font-size:12px">Loading shares...</div>';
+    children.classList.add("expanded");
+    toggle.textContent = "▼";
+
+    try {
+      const account = storageInfo[currentStorage] && storageInfo[currentStorage].accountName;
+      await loadSharesNode(currentStorage, account, children);
+    } catch (e) {
+      children.innerHTML = `<div style="padding:4px 24px;color:var(--expiry-expired);font-size:12px">Error: ${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  async function loadSharesNode(storage, account, parentEl) {
+    // For api-kind storages the server expects the Azure account name as a
+    // query param. For direct-kind it's optional (entry carries the account).
+    const qs = account ? `?account=${encodeURIComponent(account)}` : "";
+    const result = await apiJson(`/api/shares/${encodeURIComponent(storage)}${qs}`);
+    const shares = Array.isArray(result) ? result : (result && result.items) || [];
+
+    parentEl.innerHTML = "";
+    if (shares.length === 0) {
+      parentEl.innerHTML = '<div style="padding:4px 24px;color:var(--text-dim);font-size:12px;font-style:italic">No shares</div>';
+      return;
+    }
+
+    for (const s of shares) {
+      const shareName = typeof s === "string" ? s : (s && (s.name || s.shareName)) || String(s);
+      // Render leaf nodes for now; deeper file-share browsing is a follow-up.
+      const node = createTreeNode(shareName, "📂", 1, false);
+      parentEl.appendChild(node);
     }
   }
 
@@ -500,6 +580,89 @@
       alert("Failed: " + e.message);
     }
   });
+
+  // --- Add Storage Modal: API tab ("Connect to Storage Navigator API") ---
+  const apiCancelBtn = document.getElementById("api-cancel");
+  const apiAddBtn = document.getElementById("api-add-btn");
+  const apiNameInput = document.getElementById("api-name");
+  const apiUrlInput = document.getElementById("api-url");
+  const apiStatus = document.getElementById("api-status");
+
+  if (apiCancelBtn) {
+    apiCancelBtn.addEventListener("click", () => {
+      modal.classList.add("hidden");
+      if (apiStatus) apiStatus.textContent = "";
+    });
+  }
+
+  if (apiAddBtn) {
+    apiAddBtn.addEventListener("click", async () => {
+      const name = apiNameInput.value.trim();
+      const baseUrl = apiUrlInput.value.trim().replace(/\/$/, "");
+      if (!name || !baseUrl) {
+        apiStatus.textContent = "Name and base URL are required";
+        return;
+      }
+
+      apiAddBtn.disabled = true;
+      try {
+        apiStatus.textContent = "Probing API...";
+        const probeRes = await fetch(`${baseUrl}/.well-known/storage-nav-config`);
+        if (!probeRes.ok) {
+          apiStatus.textContent = `Probe failed: HTTP ${probeRes.status}`;
+          return;
+        }
+        const probe = await probeRes.json();
+
+        if (probe.authEnabled) {
+          apiStatus.textContent = "Opening browser for OIDC login...";
+          // Electron preload should expose window.electron.invoke. If not
+          // exposed, fall back to a register-only path: the CLI can finish
+          // the login afterwards via `storage-nav login --name <name>`.
+          if (window.electron && typeof window.electron.invoke === "function") {
+            const r = await window.electron.invoke("oidc:login", {
+              name,
+              issuer: probe.issuer,
+              clientId: probe.clientId,
+              audience: probe.audience,
+              scopes: probe.scopes,
+            });
+            if (!r || !r.ok) { apiStatus.textContent = "OIDC login failed"; return; }
+          } else {
+            apiStatus.textContent = `OIDC login required — run \`storage-nav login --name ${name}\` after registration.`;
+          }
+        }
+
+        const res = await fetch("/api/storage/api-backend", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            name,
+            baseUrl,
+            authEnabled: probe.authEnabled,
+            oidc: probe.authEnabled
+              ? { issuer: probe.issuer, clientId: probe.clientId, audience: probe.audience, scopes: probe.scopes }
+              : undefined,
+          }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          apiStatus.textContent = (err && err.error && err.error.message) || `HTTP ${res.status}`;
+          return;
+        }
+
+        apiStatus.textContent = `Added "${name}".`;
+        apiNameInput.value = "";
+        apiUrlInput.value = "";
+        modal.classList.add("hidden");
+        await loadStorages();
+      } catch (err) {
+        apiStatus.textContent = "Error: " + (err && err.message ? err.message : String(err));
+      } finally {
+        apiAddBtn.disabled = false;
+      }
+    });
+  }
 
   // --- Delete Storage ---
   deleteStorageBtn.addEventListener("click", () => {
