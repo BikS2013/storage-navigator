@@ -5,6 +5,7 @@ import { logger } from './observability/logger.js';
 import { requestIdMiddleware } from './observability/request-id.js';
 import { errorMiddleware } from './errors/error-middleware.js';
 import { healthRouter, type ReadinessChecks } from './routes/health.js';
+import { wellKnownRouter } from './routes/well-known.js';
 
 export type BuildAppOptions = {
   config: Config;
@@ -37,6 +38,7 @@ export function buildApp(opts: BuildAppOptions): Express {
     })
   );
 
+  app.use(wellKnownRouter(opts.config));
   app.use(healthRouter(opts.readinessChecks));
 
   app.use(errorMiddleware());
