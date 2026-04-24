@@ -3,8 +3,9 @@ import type { ApiBackendEntry } from '../../core/types.js';
 import { fetchDiscovery } from '../../core/backend/auth/discovery.js';
 import { deviceCodeFlow } from '../../core/backend/auth/oidc-client.js';
 import { TokenStore } from '../../core/backend/auth/token-store.js';
+import { promptSecret } from './shared.js';
 
-export async function addApi(name: string, baseUrl: string): Promise<void> {
+export async function addApi(name: string, baseUrl: string, opts: { staticSecret?: string } = {}): Promise<void> {
   const store = new CredentialStore();
   if (store.getStorage(name)) {
     console.error(`Storage with name "${name}" already exists.`);
@@ -14,6 +15,20 @@ export async function addApi(name: string, baseUrl: string): Promise<void> {
   console.log(`Probing ${baseUrl} ...`);
   const discovery = await fetchDiscovery(baseUrl);
   console.log(`  authEnabled = ${discovery.authEnabled}`);
+  if (discovery.staticAuthHeaderRequired) {
+    console.log(`  staticAuthHeaderRequired = true (header: ${discovery.staticAuthHeaderName})`);
+  }
+
+  let staticAuthHeader: { name: string; value: string } | undefined;
+  if (discovery.staticAuthHeaderRequired) {
+    const headerName = discovery.staticAuthHeaderName!;
+    const value = opts.staticSecret ?? await promptSecret(`Enter ${headerName} value: `);
+    if (!value) {
+      console.error(`A value for ${headerName} is required.`);
+      process.exit(1);
+    }
+    staticAuthHeader = { name: headerName, value };
+  }
 
   const entry: Omit<ApiBackendEntry, 'addedAt'> = {
     kind: 'api',
@@ -23,6 +38,7 @@ export async function addApi(name: string, baseUrl: string): Promise<void> {
     oidc: discovery.authEnabled
       ? { issuer: discovery.issuer, clientId: discovery.clientId, audience: discovery.audience, scopes: discovery.scopes }
       : undefined,
+    staticAuthHeader,
   };
 
   if (discovery.authEnabled) {

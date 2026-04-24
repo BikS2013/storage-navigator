@@ -47,8 +47,9 @@ program
   .description("Register a Storage Navigator API as a backend")
   .requiredOption("--name <name>", "Display name")
   .requiredOption("--base-url <url>", "API base URL (e.g. https://your-api.azurewebsites.net)")
+  .option("--static-secret <value>", "Value for the static auth header (use when API requires it; CLI prompts otherwise)")
   .action(async (opts) => {
-    await addApi(opts.name, opts.baseUrl);
+    await addApi(opts.name, opts.baseUrl, { staticSecret: opts.staticSecret });
   });
 
 // Re-run OIDC login for an api backend
