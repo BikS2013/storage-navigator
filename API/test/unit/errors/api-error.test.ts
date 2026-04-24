@@ -26,4 +26,10 @@ describe('ApiError', () => {
     expect(ApiError.internal('oops').status).toBe(500);
     expect(ApiError.upstream('storage 503').status).toBe(502);
   });
+
+  it('STATIC_AUTH_FAILED is an accepted code', () => {
+    const e = new ApiError(401, 'STATIC_AUTH_FAILED', 'bad header');
+    expect(e.code).toBe('STATIC_AUTH_FAILED');
+    expect(e.status).toBe(401);
+  });
 });

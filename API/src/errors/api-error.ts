@@ -5,7 +5,8 @@ export type ApiErrorCode =
   | 'CONFLICT'
   | 'BAD_REQUEST'
   | 'UPSTREAM_ERROR'
-  | 'INTERNAL';
+  | 'INTERNAL'
+  | 'STATIC_AUTH_FAILED';
 
 export class ApiError extends Error {
   readonly status: number;
