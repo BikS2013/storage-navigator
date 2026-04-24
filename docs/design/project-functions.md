@@ -156,3 +156,15 @@ Shared resolution logic is in `src/cli/commands/shared.ts` (`resolveStorageEntry
 - Electron "Add Storage" dialog has a third tab for connecting to a Storage Navigator API. Storage tree shows a Shares sibling node under each backend.
 - OIDC login flows: PKCE via system browser + loopback redirect (Electron); device-code (CLI). Tokens persisted via Electron `safeStorage` or chmod-600 file (CLI), keyed by api backend name.
 - File-share support added to the existing `direct` backends as well, via the new `FileShareClient` wrapping `@azure/storage-file-share` with the same account-key / SAS the user already provides.
+
+## Static auth header (Plan 008)
+
+- API has an opt-in perimeter API-key gate via `STATIC_AUTH_HEADER_VALUE`.
+- Independent of OIDC: when both are configured, every request needs the header AND a valid Bearer JWT.
+- Header NAME is operator-configurable (`STATIC_AUTH_HEADER_NAME`, default `X-Storage-Nav-Auth`).
+- Comma-separated values for zero-downtime rotation.
+- Discovery exposes `staticAuthHeaderRequired` + `staticAuthHeaderName` (never the value).
+- `/.well-known/*`, `/healthz`, `/readyz`, `/openapi.yaml`, `/docs` remain public.
+- Client persists the value on `ApiBackendEntry.staticAuthHeader` (encrypted via the existing credential store) and sends it on every request.
+- CLI: `add-api --static-secret <v>` or hidden interactive prompt; `login --static-secret <v>` for rotation.
+- Electron UI: Add Storage tab reveals a password input when the API requires it.

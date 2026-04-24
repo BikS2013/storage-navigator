@@ -231,9 +231,13 @@ Azure Blob Storage Navigator — browse containers and view files through CLI or
           add-api      Register a Storage Navigator API as a backend
             --name <name>         Display name
             --base-url <url>      API base URL
+            --static-secret <value>  Value for the static auth header (when API requires it).
+                                      CLI prompts hidden if omitted and discovery says it's required.
 
           login        Re-run OIDC login for an existing api backend
             --name <name>         API backend name
+            --static-secret <value>  New static header value (e.g. after rotation).
+                                      CLI prompts hidden if omitted and discovery says it's required.
 
           logout       Clear stored OIDC tokens for an api backend
             --name <name>         API backend name
@@ -395,6 +399,13 @@ Azure Blob Storage Navigator — browse containers and view files through CLI or
         Lives in the `API/` folder at repo root. Own package.json, own deploy artifact (Azure App Service, Linux, Node 22).
 
         Auth: in-app OIDC via NBG IdentityServer (`https://my.nbg.gr/identity`). JWT validated locally via JWKS (`jose`). Toggleable with `AUTH_ENABLED=true|false`; when false `ANON_ROLE` env decides default role.
+
+        Static auth header (perimeter API key, Plan 008):
+        STATIC_AUTH_HEADER_VALUE   When set, every protected route requires this header
+                                   value. Comma-separated list = zero-downtime rotation.
+                                   Typically referenced from Key Vault:
+                                   @Microsoft.KeyVault(VaultName=...;SecretName=...)
+        STATIC_AUTH_HEADER_NAME    Header name (default: X-Storage-Nav-Auth)
 
         Storage access: `DefaultAzureCredential` from `@azure/identity` resolves to System-Assigned MI on App Service and `az login` locally. Storage account discovery via `@azure/arm-storage` (MI needs Reader on subscription).
 
