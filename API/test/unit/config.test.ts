@@ -92,3 +92,31 @@ describe('loadConfig — auth disabled', () => {
       .toThrow(/AUTH_ENABLED must be 'true' or 'false'/);
   });
 });
+
+describe('loadConfig — staticAuth', () => {
+  const validEnv = {
+    AUTH_ENABLED: 'false',
+    ANON_ROLE: 'Reader',
+  };
+
+  it('defaults to empty values + default header name when env unset', () => {
+    const cfg = loadConfig(validEnv);
+    expect(cfg.staticAuth.values).toEqual([]);
+    expect(cfg.staticAuth.headerName).toBe('X-Storage-Nav-Auth');
+  });
+
+  it('parses single value', () => {
+    const cfg = loadConfig({ ...validEnv, STATIC_AUTH_HEADER_VALUE: 'abc' });
+    expect(cfg.staticAuth.values).toEqual(['abc']);
+  });
+
+  it('parses comma-separated values, trims whitespace, drops blanks', () => {
+    const cfg = loadConfig({ ...validEnv, STATIC_AUTH_HEADER_VALUE: 'a, b , , c' });
+    expect(cfg.staticAuth.values).toEqual(['a', 'b', 'c']);
+  });
+
+  it('honours STATIC_AUTH_HEADER_NAME override', () => {
+    const cfg = loadConfig({ ...validEnv, STATIC_AUTH_HEADER_NAME: 'X-Api-Key' });
+    expect(cfg.staticAuth.headerName).toBe('X-Api-Key');
+  });
+});

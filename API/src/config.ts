@@ -39,6 +39,10 @@ const ConfigSchema = z.object({
   }),
   swaggerUiEnabled: z.boolean().default(true),
   corsOrigins: z.array(z.string()).default([]),
+  staticAuth: z.object({
+    values: z.array(z.string().min(1)).default([]),
+    headerName: z.string().min(1).default('X-Storage-Nav-Auth'),
+  }),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -134,6 +138,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         ? true
         : parseBool('SWAGGER_UI_ENABLED', env.SWAGGER_UI_ENABLED),
     corsOrigins: csv(env.CORS_ORIGINS),
+    staticAuth: {
+      values: csv(env.STATIC_AUTH_HEADER_VALUE),
+      headerName: env.STATIC_AUTH_HEADER_NAME ?? 'X-Storage-Nav-Auth',
+    },
   };
 
   return ConfigSchema.parse(raw);
