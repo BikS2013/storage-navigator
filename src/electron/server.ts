@@ -108,6 +108,9 @@ export function createServer(port: number, publicDirOverride?: string): express.
         const tokens = await new TokenStore().load(entry.name);
         if (tokens) headers.Authorization = `Bearer ${tokens.accessToken}`;
       }
+      if (entry.staticAuthHeader) {
+        headers[entry.staticAuthHeader.name] = entry.staticAuthHeader.value;
+      }
       const r = await fetch(`${entry.baseUrl.replace(/\/$/, "")}/storages`, { headers });
       if (!r.ok) {
         res.status(r.status).json({ error: { message: `Upstream HTTP ${r.status}` } });

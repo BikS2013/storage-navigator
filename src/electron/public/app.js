@@ -152,8 +152,12 @@
     if (!res.ok) {
       let body = {};
       try { body = await res.json(); } catch {}
-      const err = new Error(body.error || `API error: ${res.status}`);
-      err.code = body.code;
+      const errField = body.error;
+      const msg = (errField && typeof errField === 'object')
+        ? (errField.message || JSON.stringify(errField))
+        : (errField || `API error: ${res.status}`);
+      const err = new Error(msg);
+      err.code = body.code || (errField && errField.code);
       err.provider = body.provider;
       throw err;
     }
