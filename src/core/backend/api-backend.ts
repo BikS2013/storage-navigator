@@ -27,14 +27,19 @@ export class ApiBackend implements IStorageBackend {
   private base(): string { return this.entry.baseUrl.replace(/\/$/, ''); }
 
   private async authHeaders(): Promise<Record<string, string>> {
-    if (!this.entry.authEnabled) return {};
+    const out: Record<string, string> = {};
+    if (this.entry.staticAuthHeader) {
+      out[this.entry.staticAuthHeader.name] = this.entry.staticAuthHeader.value;
+    }
+    if (!this.entry.authEnabled) return out;
     if (!this.entry.oidc) throw new NeedsLoginError(this.entry.name);
     let t = await this.tokens.load(this.entry.name);
     if (!t) throw new NeedsLoginError(this.entry.name);
     if (t.expiresAt < Date.now() + 60_000) {
       t = await refreshTokens(this.entry.name, this.entry.oidc, t);
     }
-    return { Authorization: `Bearer ${t.accessToken}` };
+    out.Authorization = `Bearer ${t.accessToken}`;
+    return out;
   }
 
   private async json<T>(path: string, init: RequestInit = {}): Promise<T> {

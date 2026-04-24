@@ -72,4 +72,26 @@ describe('ApiBackend (blobs)', () => {
     const b = new ApiBackend(authEntry, acct);
     await expect(b.listContainers()).rejects.toThrow(/login required/);
   });
+
+  it('sends staticAuthHeader on every request when entry has it', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      items: [], continuationToken: null,
+    }), { status: 200, headers: { 'content-type': 'application/json' } })));
+    const e: ApiBackendEntry = {
+      ...entry,
+      staticAuthHeader: { name: 'X-Storage-Nav-Auth', value: 'sekret' },
+    };
+    const b = new ApiBackend(e, acct);
+    await b.listContainers();
+    const init = (fetch as unknown as { mock: { calls: Array<[string, RequestInit]> } }).mock.calls[0][1];
+    expect((init.headers as Record<string, string>)['X-Storage-Nav-Auth']).toBe('sekret');
+  });
+
+  it('throws StaticAuthFailedError on 401 with STATIC_AUTH_FAILED code', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      error: { code: 'STATIC_AUTH_FAILED', message: 'bad', correlationId: 'c' },
+    }), { status: 401, headers: { 'content-type': 'application/json' } })));
+    const b = new ApiBackend(entry, acct);
+    await expect(b.listContainers()).rejects.toThrow(/Re-register/);
+  });
 });
