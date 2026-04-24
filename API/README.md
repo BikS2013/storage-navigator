@@ -39,6 +39,55 @@ See `.env.example` for every supported variable. All required vars are validated
 | `AUTH_ENABLED` | always | `true` or `false` |
 | `OIDC_ISSUER`, `OIDC_AUDIENCE`, `OIDC_CLIENT_ID`, `OIDC_SCOPES`, `ROLE_MAP` | when `AUTH_ENABLED=true` | OIDC + role mapping |
 | `ANON_ROLE` | when `AUTH_ENABLED=false` | Default role for anonymous callers |
+| `STATIC_AUTH_HEADER_VALUE` | optional | Perimeter static-header gate (Plan 008). When set, every protected route requires this exact value in the request header. Comma-separated list = zero-downtime rotation (any value in the list passes). Typically a Key Vault reference: `@Microsoft.KeyVault(VaultName=...;SecretName=...)`. Unset = gate disabled. |
+| `STATIC_AUTH_HEADER_NAME` | optional | Header name for the static-auth gate. Default: `X-Storage-Nav-Auth`. |
+
+## Perimeter static-auth header (Plan 008)
+
+Optional API-key gate that wraps every protected route in front of OIDC. Designed for deploys where the API has Storage Blob Data Contributor via Managed Identity (so callers can't be compromised by leaked tokens) but you still want a tenancy boundary at the edge.
+
+Behavior:
+- Unset `STATIC_AUTH_HEADER_VALUE` → gate disabled, no change in behavior.
+- Set → every protected route returns `401 STATIC_AUTH_FAILED` unless the request carries a header whose value matches one of the comma-separated values.
+- `/healthz`, `/readyz`, `/.well-known/storage-nav-config`, `/openapi.yaml`, `/docs` are public — the gate sits after them.
+- Discovery exposes `staticAuthHeaderRequired:true` + `staticAuthHeaderName` (never the value), so clients can prompt for the secret at registration time.
+- Rotation: append the new value to the CSV, redeploy/restart, hand new clients the new value, then remove the old after rollover.
+
+### Wiring on Azure App Service
+
+```bash
+# 1. Store secret in Key Vault
+az keyvault secret set --vault-name <vault> --name storage-nav-static-auth --value "<random-40-char>"
+
+# 2. Grant App Service MI access to the vault
+az role assignment create \
+  --assignee-object-id <app-service-MI-principal-id> \
+  --assignee-principal-type ServicePrincipal \
+  --role "Key Vault Secrets User" \
+  --scope "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.KeyVault/vaults/<vault>"
+
+# 3. Wire env var as Key Vault reference
+az webapp config appsettings set --name <webapp> --resource-group <rg> --settings \
+  "STATIC_AUTH_HEADER_VALUE=@Microsoft.KeyVault(VaultName=<vault>;SecretName=storage-nav-static-auth)"
+
+# 4. Restart
+az webapp restart --name <webapp> --resource-group <rg>
+```
+
+Verify resolution:
+
+```bash
+az rest --method GET --uri "https://management.azure.com/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Web/sites/<webapp>/config/configreferences/appsettings/STATIC_AUTH_HEADER_VALUE?api-version=2022-03-01" \
+  --query "properties.{status:status, details:details}"
+# expect status: Resolved
+```
+
+Smoke-test:
+
+```bash
+curl -i https://<webapp>.azurewebsites.net/storages                                           # 401 STATIC_AUTH_FAILED
+curl -i -H "X-Storage-Nav-Auth: <secret>" https://<webapp>.azurewebsites.net/storages         # 200
+```
 
 ## Testing
 
