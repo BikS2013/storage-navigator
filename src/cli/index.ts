@@ -55,10 +55,11 @@ program
 // Re-run OIDC login for an api backend
 program
   .command("login")
-  .description("Re-run OIDC login for an existing api backend")
+  .description("Re-run OIDC login + reconcile static-header for an existing api backend")
   .requiredOption("--name <name>", "API backend name")
+  .option("--static-secret <value>", "New static-header value (e.g. after rotation)")
   .action(async (opts) => {
-    await login(opts.name);
+    await login(opts.name, { staticSecret: opts.staticSecret });
   });
 
 // Clear stored OIDC tokens for an api backend
