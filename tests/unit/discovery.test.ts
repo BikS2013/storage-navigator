@@ -36,4 +36,21 @@ describe('fetchDiscovery', () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response('', { status: 503 }))));
     await expect(fetchDiscovery('https://x.example.com')).rejects.toThrow(/503/);
   });
+
+  it('parses staticAuthHeaderRequired + staticAuthHeaderName when present', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => ok({
+      authEnabled: false,
+      staticAuthHeaderRequired: true,
+      staticAuthHeaderName: 'X-Storage-Nav-Auth',
+    })));
+    const d = await fetchDiscovery('https://x.example.com');
+    expect(d.staticAuthHeaderRequired).toBe(true);
+    expect(d.staticAuthHeaderName).toBe('X-Storage-Nav-Auth');
+  });
+
+  it('defaults staticAuthHeaderRequired to false when fields absent', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => ok({ authEnabled: false })));
+    const d = await fetchDiscovery('https://x.example.com');
+    expect(d.staticAuthHeaderRequired).toBe(false);
+  });
 });

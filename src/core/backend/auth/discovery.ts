@@ -1,6 +1,10 @@
-export type DiscoveryResult =
+export type DiscoveryResult = (
   | { authEnabled: false }
-  | { authEnabled: true; issuer: string; clientId: string; audience: string; scopes: string[] };
+  | { authEnabled: true; issuer: string; clientId: string; audience: string; scopes: string[] }
+) & {
+  staticAuthHeaderRequired: boolean;
+  staticAuthHeaderName?: string;
+};
 
 export async function fetchDiscovery(baseUrl: string): Promise<DiscoveryResult> {
   const url = `${baseUrl.replace(/\/$/, '')}/.well-known/storage-nav-config`;
@@ -12,7 +16,18 @@ export async function fetchDiscovery(baseUrl: string): Promise<DiscoveryResult> 
   }
   if (!res.ok) throw new Error(`Discovery HTTP ${res.status} for ${url}`);
   const body = await res.json() as Record<string, unknown>;
-  if (body.authEnabled === false) return { authEnabled: false };
+
+  const staticAuthHeaderRequired = body.staticAuthHeaderRequired === true;
+  const staticAuthHeaderName = typeof body.staticAuthHeaderName === 'string'
+    ? body.staticAuthHeaderName
+    : undefined;
+  if (staticAuthHeaderRequired && !staticAuthHeaderName) {
+    throw new Error(`Discovery says staticAuthHeaderRequired:true but missing staticAuthHeaderName at ${url}`);
+  }
+
+  if (body.authEnabled === false) {
+    return { authEnabled: false, staticAuthHeaderRequired, staticAuthHeaderName };
+  }
   if (body.authEnabled === true) {
     const required = ['issuer', 'clientId', 'audience', 'scopes'];
     const missing = required.filter((k) => body[k] === undefined);
@@ -23,6 +38,8 @@ export async function fetchDiscovery(baseUrl: string): Promise<DiscoveryResult> 
       clientId: String(body.clientId),
       audience: String(body.audience),
       scopes: Array.isArray(body.scopes) ? body.scopes.map(String) : [],
+      staticAuthHeaderRequired,
+      staticAuthHeaderName,
     };
   }
   throw new Error(`Discovery response missing authEnabled flag at ${url}`);
