@@ -1,0 +1,21 @@
+{
+  "_comment": "Non-secret runtime defaults for the storage-nav agent. Copy to ~/.tool-agents/storage-nav/config.json",
+  "schemaVersion": 1,
+
+  "provider": "azure-openai",
+  "model": "gpt-4o",
+  "maxSteps": 20,
+  "temperature": 0,
+  "perToolBudgetBytes": 16384,
+  "allowMutations": false,
+  "verbose": false,
+
+  "_providerNotes": {
+    "openai": "Set OPENAI_API_KEY in env",
+    "anthropic": "Set ANTHROPIC_API_KEY in env",
+    "gemini": "Set GOOGLE_API_KEY or GEMINI_API_KEY in env",
+    "azure-openai": "Set AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_DEPLOYMENT in env",
+    "azure-anthropic": "Set AZURE_AI_INFERENCE_KEY, AZURE_AI_INFERENCE_ENDPOINT in env",
+    "local-openai": "Set LOCAL_OPENAI_BASE_URL or OLLAMA_HOST in env; OPENAI_API_KEY=not-needed"
+  }
+}

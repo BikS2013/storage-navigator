@@ -4,6 +4,33 @@
 
 ### Medium Priority
 
+- **[TUI] Multi-line input redraw assumes lines fit the terminal width**: The reader's
+  `redrawAll` / `redrawCurrentLineOnly` move by logical row, not by physical row. If a
+  single logical line is wider than the terminal it will wrap, and arrow-up may land in
+  the wrong place. Acceptable for the typical chat input but worth a follow-up if users
+  start pasting long single-line prompts.
+
+- **[TUI] Shift+Enter detection only works on terminals that opt into CSI-u / kitty
+  keyboard protocol**: This is unavoidable per spec §18.3 — Apple Terminal, default
+  iTerm2, default Alacritty, and many others send plain `\r` for both Enter and
+  Shift+Enter. The `/help` text already documents Ctrl+J as the universal fallback;
+  keep an eye on user reports.
+
+- **[TUI] No PTY-driven smoke test in CI**: We rely on the §14 unit tests against
+  PassThrough streams. A proper end-to-end test would need `node-pty` and a real
+  terminal emulator — deferred per the plan-010 non-goals.
+
+- **[TUI] Resize handling is registered but does not redraw the transcript**: The
+  TUI does not maintain a redrawable transcript region, so SIGWINCH only matters for
+  the active input line, which already redraws on every keystroke. No action needed
+  unless we add a scroll-back UI.
+
+- **[Agent] diff_container tool returns link metadata only, not per-file diff**: The CLI `diff` command produces a formatted table via `diffContainer()` which writes directly to stdout and calls `process.exit`. The agent tool returns link registry metadata (tracked file counts, last sync date) instead. A richer adapter that calls `diffLink()` from the diff engine directly and returns structured `DiffReport` JSON is deferred. The current tool gives the agent enough context for most queries.
+
+- **[Agent] clone-ssh and link-ssh commands not exposed as agent tools**: SSH operations require interactive key selection and system SSH agent wiring that is not suitable for unattended agent use. Deferred to a future plan that could add an SSH-key-name parameter.
+
+- **[Agent] No agent-graph.test.ts or agent-run.test.ts**: These tests require either a live LLM or `FakeToolCallingModel`. The `langchain` package exports `FakeToolCallingModel` but its exact import path and API differ between patch releases. Deferred; add when a stable mock import path is confirmed for the installed version.
+
 - **Storage Navigator client adapter for the new `api` backend type (Plan 006 spec, Section 11)**: The API service in `API/` is implemented (Plan 006 impl), but the Storage Navigator client (CLI + Electron) does not yet support the `api` backend type. Follow-up plan needed: introduce `src/core/backend/` abstraction with `direct-backend.ts` and `api-backend.ts`, OIDC client (PKCE for Electron, device-code for CLI), token store (Electron `safeStorage` / CLI chmod-600), discovery client. Add `add-api`, `shares`, `files`, `file-view` CLI commands. Add "Connect to Storage Navigator API" option in Electron "Add Storage" dialog.
 
 - **API: 14 transitive npm vulns from `azurite` test dep**: `npm install --save-dev azurite` in `API/` pulls a vulnerable transitive tree (9 moderate, 4 high, 1 critical via `azurite → @azure/ms-rest-js → xml2js`). All confined to `devDependencies` — never bundled into `dist/` or the Docker image. Documented + accepted; revisit when Azurite ships a clean release. Baseline snapshot: `docs/reference/api-npm-audit-baseline-2026-04-23.json`.

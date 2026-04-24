@@ -506,4 +506,69 @@ program
     launchElectronApp(parseInt(opts.port, 10));
   });
 
+// LangGraph ReAct agent
+program
+  .command("agent [prompt]")
+  .description(
+    "Run the LangGraph ReAct agent over storage-nav. " +
+    "Prompt required unless --interactive.\n" +
+    "Config folder: ~/.tool-agents/storage-nav/"
+  )
+  .option("-i, --interactive", "Start an interactive REPL session", false)
+  .option("-p, --provider <name>", "LLM provider: openai|anthropic|gemini|azure-openai|azure-anthropic|local-openai")
+  .option("-m, --model <id>", "Model id or deployment name")
+  .option("--base-url <url>", "Override provider base URL (useful for local-openai)")
+  .option("--max-steps <n>", "ReAct iteration cap (default: 20)", (v: string) => parseInt(v, 10))
+  .option("--temperature <t>", "Sampling temperature (default: 0)", (v: string) => parseFloat(v))
+  .option("--system <text>", "Inline system prompt")
+  .option("--system-file <path>", "Path to a system prompt file")
+  .option("--tools <csv>", "Comma-separated allowlist of tool names to enable")
+  .option("--per-tool-budget <bytes>", "Per-tool result byte cap (default: 16384)", (v: string) => parseInt(v, 10))
+  .option("--allow-mutations", "Enable state-changing tools (off by default)", false)
+  .option("--config <path>", "Override ~/.tool-agents/storage-nav/config.json path")
+  .option("--env-file <path>", "Override ~/.tool-agents/storage-nav/.env path")
+  .option("--log-file <path>", "Write redacted agent log to this file (mode 0600)")
+  .option("--quiet", "Suppress stderr output (still writes log file if --log-file is set)", false)
+  .option("--verbose", "Emit per-step trace to stderr", false)
+  .action(async (prompt: string | undefined, opts: Record<string, unknown>) => {
+    const { run } = await import("./commands/agent.js");
+    const { ConfigurationError } = await import("../config/agent-config.js");
+    try {
+      const result = await run(prompt ?? null, {
+        interactive: (opts["interactive"] as boolean) ?? false,
+        provider: opts["provider"] as string | undefined,
+        model: opts["model"] as string | undefined,
+        baseUrl: opts["baseUrl"] as string | undefined,
+        maxSteps: opts["maxSteps"] as number | undefined,
+        temperature: opts["temperature"] as number | undefined,
+        systemPrompt: opts["system"] as string | undefined,
+        systemPromptFile: opts["systemFile"] as string | undefined,
+        tools: opts["tools"] as string | undefined,
+        perToolBudgetBytes: opts["perToolBudget"] as number | undefined,
+        allowMutations: (opts["allowMutations"] as boolean) ?? false,
+        configFile: opts["config"] as string | undefined,
+        envFile: opts["envFile"] as string | undefined,
+        logFile: opts["logFile"] as string | undefined,
+        quiet: (opts["quiet"] as boolean) ?? false,
+        verbose: (opts["verbose"] as boolean) ?? false,
+      });
+
+      if (result) {
+        console.log(JSON.stringify(result, null, 2));
+      }
+    } catch (err) {
+      if ((err as { name?: string }).name === "ConfigurationError") {
+        console.error(`[config error] ${(err as Error).message}`);
+        process.exit(3);
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.toLowerCase().includes("unknown provider") || msg.toLowerCase().includes("usage")) {
+        console.error(`[usage error] ${msg}`);
+        process.exit(2);
+      }
+      console.error(`[error] ${msg}`);
+      process.exit(1);
+    }
+  });
+
 program.parse(process.argv);

@@ -5698,3 +5698,101 @@ Storage Navigator client supports three backend kinds:
 
 All consumers route through `IStorageBackend` (`src/core/backend/backend.ts`). The factory `makeBackend(entry, account?)` dispatches by `kind`.
 
+
+## Agent Subcommand (Plan 009)
+
+A `storage-nav agent` subcommand runs a LangGraph ReAct agent that wraps all existing commands as LLM tools. See `docs/design/plan-009-agent-subcommand.md` for the full design.
+
+### Architecture
+
+```
+CLI argv → Commander → agent.ts → loadAgentConfig → getProvider → buildToolCatalog → createAgentGraph → runOneShot | runInteractive
+```
+
+### Module layout
+
+| Module | Purpose |
+|---|---|
+| `src/config/agent-config.ts` | Config loader (Policy B file-wins precedence, no-fallback, providerEnv snapshot) |
+| `src/util/redact.ts` | Redaction utility (all log writes pass through this) |
+| `src/agent/providers/` | Six LLM provider factories + registry |
+| `src/agent/tools/` | 35 tool adapters (11 read-only, 24 mutating) + catalog builder |
+| `src/agent/graph.ts` | `createAgentGraph()` wrapping LangChain v1 `createAgent` |
+| `src/agent/run.ts` | `runOneShot` and `runInteractive` with step extraction |
+| `src/agent/logging.ts` | Redacted logger (stderr + optional log file, mode 0600) |
+| `src/agent/system-prompt.ts` | Default system prompt + file/inline override loader |
+| `src/cli/commands/agent.ts` | Entry point: seeds config dir, loads dotenv, wires components |
+
+### Provider registry
+
+| Provider | SDK | Required env vars |
+|---|---|---|
+| `openai` | ChatOpenAI | OPENAI_API_KEY |
+| `anthropic` | ChatAnthropic | ANTHROPIC_API_KEY |
+| `gemini` | ChatGoogleGenerativeAI | GOOGLE_API_KEY or GEMINI_API_KEY |
+| `azure-openai` | AzureChatOpenAI | AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_DEPLOYMENT |
+| `azure-anthropic` | ChatAnthropic + Foundry URL | AZURE_AI_INFERENCE_KEY, AZURE_AI_INFERENCE_ENDPOINT |
+| `local-openai` | ChatOpenAI + custom baseURL | LOCAL_OPENAI_BASE_URL or OLLAMA_HOST |
+
+### Mutation safety
+
+- Read-only tools: always in catalog
+- Mutating tools: excluded unless `--allow-mutations` flag is passed
+- Destructive tools: additionally require runtime `y/yes` confirmation from the user
+- Tool descriptions use `[MUTATING]` and `[DESTRUCTIVE]` prefixes so the model can reason about safety
+
+## Agent TUI (Plan 010)
+
+When `storage-nav agent --interactive` is run from a TTY, the CLI mounts a raw-mode TUI on
+top of the same LangGraph ReAct agent. When stdin is not a TTY (CI / piped input), the
+existing line-based `runInteractive` REPL is preserved. See `docs/design/plan-010-tui.md`
+for the full design.
+
+### TUI architecture
+
+```
+src/cli/commands/agent.ts
+    └─ if cfg.interactive && stdin.isTTY:
+         src/tui/index.ts::runTui()
+            ├─ src/tui/reader.ts                 (raw-mode multiline input, all keybindings)
+            │     ├─ src/tui/utf8.ts             (StringDecoder for multi-byte input)
+            │     └─ src/tui/ansi.ts             (cursor / colour constants)
+            ├─ src/tui/spinner.ts                (animated braille spinner)
+            ├─ src/tui/clipboard.ts              (pbcopy/xclip/xsel/clip.exe dispatch)
+            ├─ src/tui/memory.ts                 (~/.tool-agents/storage-nav/memory/<name>.md)
+            ├─ src/tui/system-prompt-with-memory.ts  (appends "## Persistent memory" section)
+            ├─ src/tui/confirm-bridge.ts         (set/getTuiConfirm — replaces readline confirm)
+            ├─ src/tui/log-redirect.ts           (per-session ~/.tool-agents/.../logs/tui-<ts>.log)
+            ├─ src/tui/slash/*.ts                (12 slash commands, each isolated for testing)
+            └─ src/agent/stream.ts::streamAgentTurn  (wraps graph.streamEvents v2 → StreamEvent)
+                  └─ src/agent/graph.ts::createAgentGraph  (existing — unchanged)
+```
+
+### TUI module layout
+
+| Module | Purpose |
+|---|---|
+| `src/agent/stream.ts` | Streaming seam — wraps `graph.streamEvents()` v2 into a normalised `StreamEvent` async generator. ESC-to-abort plumbed via AbortSignal. |
+| `src/tui/index.ts` | TUI entry point. Owns the REPL loop, banner, signal handlers, unhandledRejection recovery, and the slash-command dispatcher. Exposes `mountTui()`. |
+| `src/tui/reader.ts` | Raw-mode multiline reader. Implements byte-level escape framing (spec §5.1) and UTF-8 decoding (spec §5.2) so arrow keys never echo as letters and Greek/emoji input round-trips intact. |
+| `src/tui/utf8.ts` | Stateful UTF-8 decoder wrapping `node:string_decoder`. |
+| `src/tui/ansi.ts` | ANSI colour and cursor escape constants. |
+| `src/tui/spinner.ts` | Braille spinner (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, 80 ms tick) with mutable label. |
+| `src/tui/clipboard.ts` | Cross-platform clipboard helper (pbcopy / xclip / xsel / clip.exe). Throws a user-visible error when no binary is available. |
+| `src/tui/memory.ts` | Folder-based persistent memory CRUD at `~/.tool-agents/storage-nav/memory/`. |
+| `src/tui/system-prompt-with-memory.ts` | Appends a `## Persistent memory` section listing all stored entries to the base system prompt on every turn. |
+| `src/tui/confirm-bridge.ts` | `setTuiConfirm` / `getTuiConfirm` callback used by `src/agent/tools/confirm.ts` to route destructive-tool prompts through the TUI's modal instead of opening a second readline interface. |
+| `src/tui/log-redirect.ts` | Default per-session TUI log path under `~/.tool-agents/storage-nav/logs/`. |
+| `src/tui/slash/context.ts` | `SlashContext` carrying the live mutable session state (cfg, model, tools, threadId, messages, …) plus mutator callbacks (resetSession, rebuildToolCatalog, …). Includes the `tokenize` helper. |
+| `src/tui/slash/{help,quit,new,history,last,copy,memory,model,provider,tools,allow-mutations}.ts` | One file per slash command. |
+
+### TUI invariants
+
+- No external TUI library — raw stdin + ANSI escapes only (spec §15).
+- Token-by-token streaming — chunks written to stdout the moment they arrive.
+- ESC during execution aborts via AbortController; does NOT exit.
+- `/model` and `/provider` switch the live session only; nothing is persisted to disk
+  (would conflict with Policy B file-wins in `~/.tool-agents/storage-nav/config.json`).
+- All TUI files are under `src/tui/`. Host agent code (`src/agent/`) is read-only except
+  for two minimal touches: `confirm.ts` (delegate to bridge if set) and `agent.ts` (TTY
+  branch that calls `mountTui`).

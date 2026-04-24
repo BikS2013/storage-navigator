@@ -168,3 +168,44 @@ Shared resolution logic is in `src/cli/commands/shared.ts` (`resolveStorageEntry
 - Client persists the value on `ApiBackendEntry.staticAuthHeader` (encrypted via the existing credential store) and sends it on every request.
 - CLI: `add-api --static-secret <v>` or hidden interactive prompt; `login --static-secret <v>` for rotation.
 - Electron UI: Add Storage tab reveals a password input when the API requires it.
+
+## Agent Subcommand (FR-AGT-*)
+
+| ID | Requirement |
+|---|---|
+| FR-AGT-1 | Agent is a subcommand (`storage-nav agent`) registered in the existing Commander pipeline. It does not change any existing command behavior. |
+| FR-AGT-2 | Agent supports one-shot mode (positional prompt argument) and interactive REPL mode (`--interactive`). |
+| FR-AGT-3 | Agent wraps all 35 existing storage-nav commands as LLM tools. |
+| FR-AGT-4 | Read-only tools are always available. Mutating tools are excluded from the catalog unless `--allow-mutations` is set. |
+| FR-AGT-5 | Destructive tools (delete, remove, unlink, logout) require explicit `y/yes` confirmation from the user before executing. On refusal, return `{declined: true}` for the agent to reason about. |
+| FR-AGT-6 | Six LLM providers are supported: openai, anthropic, gemini, azure-openai, azure-anthropic, local-openai. Default for first deploy: azure-openai. |
+| FR-AGT-7 | Config precedence (Policy B — file-wins): CLI flag > ~/.tool-agents/storage-nav/.env > shell env > ~/.tool-agents/storage-nav/config.json > ConfigurationError (exit 3). |
+| FR-AGT-8 | No fallback for required settings. Missing required value throws ConfigurationError with checkedSources. |
+| FR-AGT-9 | Config folder is created on first run with secure permissions (dir 0700, .env 0600). |
+| FR-AGT-10 | Every log write (stderr + log file) passes through redactString(). Log files created with mode 0600. |
+| FR-AGT-11 | Tool results are truncated to a configurable byte budget (default 16 KiB) before reaching the model. |
+| FR-AGT-12 | Interactive mode uses MemorySaver checkpointer with stable thread_id. Supports /exit and /reset slash-commands. |
+| FR-AGT-13 | Agent uses LangChain v1 createAgent (not deprecated createReactAgent from @langchain/langgraph/prebuilt). |
+| FR-AGT-14 | Token values are never returned by the list_tokens tool — metadata only. |
+| FR-AGT-15 | rename_blob and rename_file tools return both old and new paths so the agent chains the correct identifier. |
+
+## Agent TUI (FR-AGT-TUI-*)
+
+When `storage-nav agent --interactive` is run from a TTY, the CLI launches a raw-mode TUI
+on top of the LangGraph ReAct agent. When stdin is not a TTY, the existing line-based
+REPL is used.
+
+| ID | Requirement |
+|---|---|
+| FR-AGT-TUI-1 | TTY detection: when `--interactive` and `process.stdin.isTTY`, mount the raw-mode TUI; otherwise fall back to `runInteractive`. One-shot mode is unaffected. |
+| FR-AGT-TUI-2 | Raw-mode multiline reader with byte-level keybindings (arrows, Home/End, Ctrl+A/E/U/K/W, Option/Ctrl/Cmd+←/→, Alt+Backspace, Delete). No external readline / inquirer / ink / blessed. |
+| FR-AGT-TUI-3 | UTF-8 input via stateful StringDecoder so multi-byte characters (Greek, Cyrillic, CJK, emoji) round-trip even when split across stdin chunks. Regression test mandatory. |
+| FR-AGT-TUI-4 | Escape-sequence framing follows ANSI shape (CSI / SS3 / ESC<char>) so arrow keys never echo as letters. Regression test mandatory. |
+| FR-AGT-TUI-5 | Token-by-token streaming with animated braille spinner. Spinner stops on first token; "↳ calling <tool>(...)" indicator on tool start, "✓" on tool end. |
+| FR-AGT-TUI-6 | New streaming seam `streamAgentTurn()` in `src/agent/stream.ts` wraps `graph.streamEvents()` v2 and yields normalised StreamEvent records. ESC propagates via AbortSignal. |
+| FR-AGT-TUI-7 | ESC during execution aborts the in-flight model turn (does NOT exit). Ctrl+C twice in a row exits cleanly. Ctrl+D on empty input exits. |
+| FR-AGT-TUI-8 | Slash commands: /help, /quit (alias /exit), /new, /history, /last, /copy, /memory (list/show/add/remove/edit), /model, /provider, /tools, /allow-mutations. |
+| FR-AGT-TUI-9 | Persistent memory at `~/.tool-agents/storage-nav/memory/<name>.md` (folder 0700, files 0600). Each entry's content is appended to the system prompt as a `## Persistent memory` section on every turn. |
+| FR-AGT-TUI-10 | `/provider` re-loads `~/.tool-agents/storage-nav/.env` (Policy B file-wins, override:true) before re-running `loadAgentConfig`. Missing required env vars surface ConfigurationError to the TUI. |
+| FR-AGT-TUI-11 | Destructive tool calls are confirmed via an in-TUI modal that runs against the same raw-mode stdin (no second readline). The legacy readline confirm path is preserved for non-TUI callers. |
+| FR-AGT-TUI-12 | Structured logger writes are redirected to `~/.tool-agents/storage-nav/logs/tui-<ts>.log` (mode 0600); stderr is silenced in TUI mode. `--log-file` overrides the default location. Critical errors are surfaced as `[error]` lines in the TUI. |
