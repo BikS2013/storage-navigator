@@ -60,8 +60,7 @@ export function buildApp(opts: BuildAppOptions): Express {
   app.use(openapiRouter(opts.config));
   app.use(healthRouter(opts.readinessChecks));
 
-  const staticAuthCfg = opts.config.staticAuth ?? { values: [], headerName: 'X-Storage-Nav-Auth' };
-  app.use(staticAuthMiddleware(staticAuthCfg.values, staticAuthCfg.headerName));
+  app.use(staticAuthMiddleware(opts.config.staticAuth.values, opts.config.staticAuth.headerName));
 
   const auth = opts.authOverride ?? buildAuthMiddleware(opts.config);
   app.use(auth);

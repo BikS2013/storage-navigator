@@ -26,6 +26,7 @@ export function disabledModeConfig(anonRole: AppRole = 'Admin'): Config {
     uploads: { maxBytes: null, streamBlockSizeMb: 8 },
     swaggerUiEnabled: false,
     corsOrigins: [],
+    staticAuth: { values: [], headerName: 'X-Storage-Nav-Auth' },
   };
 }
 

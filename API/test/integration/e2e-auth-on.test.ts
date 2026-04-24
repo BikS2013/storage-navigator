@@ -40,6 +40,7 @@ describe('E2E — auth on', () => {
       uploads: { maxBytes: null, streamBlockSizeMb: 4 },
       swaggerUiEnabled: false,
       corsOrigins: [],
+      staticAuth: { values: [], headerName: 'X-Storage-Nav-Auth' },
     };
     const cred = new StorageSharedKeyCredential(az.accountName, az.accountKey);
     const blobService = new BlobService(cred as unknown as never, () => az.blobUrl);
