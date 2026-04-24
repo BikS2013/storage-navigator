@@ -1,6 +1,8 @@
 import * as readline from "readline";
 import { CredentialStore } from "../../core/credential-store.js";
-import type { StorageEntry } from "../../core/types.js";
+import type { DirectStorageEntry, StorageEntry } from "../../core/types.js";
+import type { IStorageBackend } from "../../core/backend/backend.js";
+import { makeBackend } from "../../core/backend/factory.js";
 
 /**
  * Prompt the user for a secret value (input is visible — terminal limitation).
@@ -52,8 +54,9 @@ export async function resolveStorageEntry(opts: StorageOpts): Promise<{ store: C
       console.error("--account (or --storage) is required when using inline --account-key or --sas-token.");
       process.exit(1);
     }
-    const entry: StorageEntry = {
-      name: accountName,
+    const entry: DirectStorageEntry = {
+      kind: 'direct',
+      name: 'inline',
       accountName,
       accountKey: opts.accountKey,
       sasToken: opts.sasToken,
@@ -120,4 +123,24 @@ export async function resolvePatToken(
   console.error(`  npx tsx src/cli/index.ts add-token --name <name> --provider ${provider} --token <token>`);
   console.error(`\nOr provide one inline with --pat <token>`);
   process.exit(1);
+}
+
+/**
+ * Resolve a storage backend for CLI commands. Looks up the named entry from
+ * the credential store (or falls back to inline --account-key/--sas-token
+ * for direct mode), then dispatches via the backend factory.
+ *
+ * For api-backend kinds, `accountName` is required (becomes the {account}
+ * path segment in API URLs).
+ */
+export async function resolveStorageBackend(
+  opts: StorageOpts,
+  accountName?: string,
+): Promise<{ entry: StorageEntry; backend: IStorageBackend }> {
+  const { entry } = await resolveStorageEntry(opts);
+  if (entry.kind === 'api') {
+    if (!accountName) throw new Error('--account is required when using an api backend');
+    return { entry, backend: makeBackend(entry, accountName) };
+  }
+  return { entry, backend: makeBackend(entry) };
 }

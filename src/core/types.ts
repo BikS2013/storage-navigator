@@ -1,11 +1,35 @@
-/** A configured storage account with encrypted credentials */
-export interface StorageEntry {
+export type DirectStorageEntry = {
+  kind: 'direct';
   name: string;
   accountName: string;
   sasToken?: string;       // SAS token (container or account level)
   accountKey?: string;     // Account key (full access)
   addedAt: string;
-}
+};
+
+export type OidcConfig = {
+  issuer: string;
+  clientId: string;
+  audience: string;
+  scopes: string[];
+};
+
+export type ApiBackendEntry = {
+  kind: 'api';
+  name: string;
+  baseUrl: string;
+  authEnabled: boolean;
+  oidc?: OidcConfig;
+  /**
+   * Operator-supplied perimeter API-key header. When the API has
+   * STATIC_AUTH_HEADER_VALUE set, every request must carry this header.
+   * Persisted encrypted via CredentialStore (AES-256-GCM).
+   */
+  staticAuthHeader?: { name: string; value: string };
+  addedAt: string;
+};
+
+export type StorageEntry = DirectStorageEntry | ApiBackendEntry;
 
 /** Personal access token for GitHub or Azure DevOps */
 export interface TokenEntry {

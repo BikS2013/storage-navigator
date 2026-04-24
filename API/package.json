@@ -1,0 +1,48 @@
+{
+  "name": "storage-navigator-api",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:unit": "vitest run test/unit",
+    "test:integration": "vitest run test/integration",
+    "lint:openapi": "redocly lint openapi.yaml",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@azure/arm-storage": "^19.1.0",
+    "@azure/arm-subscriptions": "^5.1.1",
+    "@azure/identity": "^4.5.0",
+    "@azure/storage-blob": "^12.31.0",
+    "@azure/storage-file-share": "^12.30.0",
+    "express": "^5.2.1",
+    "jose": "^6.2.0",
+    "pino": "^10.0.0",
+    "pino-http": "^11.0.0",
+    "prom-client": "^15.1.3",
+    "swagger-ui-express": "^5.0.1",
+    "uuid": "^11.1.0",
+    "yaml": "^2.7.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@redocly/cli": "^1.27.0",
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.19.0",
+    "@types/swagger-ui-express": "^4.1.7",
+    "azurite": "^3.35.0",
+    "supertest": "^7.1.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2",
+    "vitest": "^4.0.0"
+  }
+}

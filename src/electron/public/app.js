@@ -118,14 +118,46 @@
     modalKeyLabel.childNodes[0].textContent = label;
   });
 
+  // --- Tab switching inside the Add Storage modal ---
+  function activateTab(tabName) {
+    const buttons = modal.querySelectorAll(".tab-btn");
+    const bodies = modal.querySelectorAll(".tab-body");
+    buttons.forEach((b) => b.classList.toggle("active", b.dataset.tab === tabName));
+    bodies.forEach((body) => {
+      if (body.dataset.tab === tabName) body.removeAttribute("hidden");
+      else body.setAttribute("hidden", "");
+    });
+    if (tabName === "api") resetApiStaticRow();
+  }
+  modal.querySelectorAll(".tab-btn").forEach((btn) => {
+    btn.addEventListener("click", () => activateTab(btn.dataset.tab));
+  });
+
+  // --- Reset static-header row in the API tab (called when modal/tab opens) ---
+  function resetApiStaticRow() {
+    const row = document.getElementById('api-static-secret-row');
+    const valueEl = document.getElementById('api-static-secret');
+    if (row) row.hidden = true;
+    if (valueEl) valueEl.value = '';
+  }
+
+  // --- Storage kind icon helper ---
+  function storageIcon(kind) {
+    return kind === "api" ? "\u{1F517}" : "\u{1F511}"; // link vs key
+  }
+
   // --- API helpers ---
   async function api(url, opts) {
     const res = await fetch(url, opts);
     if (!res.ok) {
       let body = {};
       try { body = await res.json(); } catch {}
-      const err = new Error(body.error || `API error: ${res.status}`);
-      err.code = body.code;
+      const errField = body.error;
+      const msg = (errField && typeof errField === 'object')
+        ? (errField.message || JSON.stringify(errField))
+        : (errField || `API error: ${res.status}`);
+      const err = new Error(msg);
+      err.code = body.code || (errField && errField.code);
       err.provider = body.provider;
       throw err;
     }
@@ -134,13 +166,21 @@
   async function apiJson(url, opts) { return (await api(url, opts)).json(); }
 
   // --- Storages ---
+  // One dropdown entry per backend connection. For api backends with many
+  // Azure accounts, those appear as a top-level branch INSIDE the tree.
+  let storageInfo = {}; // entry name -> { kind, accountName? }
+
   async function loadStorages() {
     const storages = await apiJson("/api/storages");
     storageSelect.innerHTML = '<option value="">Select storage...</option>';
+    storageInfo = {};
     for (const s of storages) {
+      const kind = s.kind || "direct";
+      storageInfo[s.name] = { kind, accountName: s.accountName };
       const opt = document.createElement("option");
       opt.value = s.name;
-      let label = `${s.name} (${s.accountName})`;
+      let label = `${storageIcon(kind)} ${s.name}`;
+      if (kind === "direct" && s.accountName) label += ` (${s.accountName})`;
       if (s.expiresAt) {
         const days = Math.ceil((new Date(s.expiresAt) - Date.now()) / 86400000);
         if (s.isExpired) label += " [EXPIRED]";
@@ -160,8 +200,20 @@
     deleteStorageBtn.disabled = !storageSelect.value;
   }
 
+  // currentAccount = Azure account currently active for view/right-click ops.
+  // For direct kind: empty (server falls back to entry.accountName).
+  // For api kind: set when the user clicks an account node in the tree.
+  let currentAccount = "";
+
+  function withAccount(url) {
+    if (!currentAccount) return url;
+    const sep = url.includes("?") ? "&" : "?";
+    return `${url}${sep}account=${encodeURIComponent(currentAccount)}`;
+  }
+
   storageSelect.addEventListener("change", async () => {
     currentStorage = storageSelect.value;
+    currentAccount = "";
     currentContainer = "";
     updateDeleteStorageBtn();
     if (!currentStorage) {
@@ -175,24 +227,229 @@
   async function buildTree() {
     treeContent.innerHTML = '<p class="placeholder">Loading...</p>';
     try {
-      const containers = await apiJson(`/api/containers/${currentStorage}`);
+      const info = storageInfo[currentStorage] || { kind: "direct" };
       treeContent.innerHTML = "";
-
-      for (const c of containers) {
-        const node = createTreeNode(c.name, "\uD83D\uDCE6", 0, true);
-        node.dataset.container = c.name;
-        node.querySelector(".tree-item").addEventListener("click", () => toggleContainer(node, c.name));
-        node.querySelector(".tree-item").addEventListener("contextmenu", (e) => {
-          e.preventDefault();
-          containerContextTarget = { containerName: c.name, node };
-          containerCtxMenu.style.left = e.clientX + "px";
-          containerCtxMenu.style.top = e.clientY + "px";
-          containerCtxMenu.classList.remove("hidden");
-        });
-        treeContent.appendChild(node);
+      if (info.kind === "api") {
+        const r = await apiJson(`/api/accounts/${encodeURIComponent(currentStorage)}`);
+        const accounts = (r && r.items) || [];
+        if (accounts.length === 0) {
+          treeContent.innerHTML = '<p class="placeholder">No storage accounts visible to this API.</p>';
+          return;
+        }
+        for (const a of accounts) {
+          const node = createTreeNode(a.name, "🔑", 0, true);
+          node.dataset.account = a.name;
+          node.querySelector(".tree-item").addEventListener("click", () => toggleAccount(node, a.name));
+          treeContent.appendChild(node);
+        }
+        if (accounts.length === 1) {
+          const onlyNode = treeContent.firstElementChild;
+          if (onlyNode) onlyNode.querySelector(".tree-item").click();
+        }
+      } else {
+        await renderContainersAndShares(treeContent, 0);
       }
     } catch (e) {
       treeContent.innerHTML = `<p class="placeholder">Error: ${escapeHtml(e.message)}</p>`;
+    }
+  }
+
+  async function toggleAccount(node, accountName) {
+    const toggle = node.querySelector(".tree-toggle");
+    const children = node.querySelector(".tree-children");
+    if (children.classList.contains("expanded")) {
+      children.classList.remove("expanded");
+      toggle.textContent = "▶";
+      return;
+    }
+    if (children.children.length > 0) {
+      children.classList.add("expanded");
+      toggle.textContent = "▼";
+      currentAccount = accountName;
+      return;
+    }
+    children.innerHTML = '<div style="padding:4px 24px;color:var(--text-dim);font-size:12px">Loading...</div>';
+    children.classList.add("expanded");
+    toggle.textContent = "▼";
+    currentAccount = accountName;
+    try {
+      children.innerHTML = "";
+      await renderContainersAndShares(children, 1);
+    } catch (e) {
+      children.innerHTML = `<div style="padding:4px 24px;color:var(--expiry-expired);font-size:12px">Error: ${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  async function renderContainersAndShares(parentEl, depth) {
+    const containers = await apiJson(withAccount(`/api/containers/${currentStorage}`));
+    for (const c of containers) {
+      const node = createTreeNode(c.name, "📦", depth, true);
+      node.dataset.container = c.name;
+      node.querySelector(".tree-item").addEventListener("click", () => toggleContainer(node, c.name));
+      node.querySelector(".tree-item").addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        containerContextTarget = { containerName: c.name, node };
+        containerCtxMenu.style.left = e.clientX + "px";
+        containerCtxMenu.style.top = e.clientY + "px";
+        containerCtxMenu.classList.remove("hidden");
+      });
+      parentEl.appendChild(node);
+    }
+    const sharesRoot = createTreeNode("Shares", "📁", depth, true);
+    sharesRoot.classList.add("shares-tree");
+    sharesRoot.querySelector(".tree-item").addEventListener("click", () => toggleSharesRoot(sharesRoot));
+    parentEl.appendChild(sharesRoot);
+  }
+
+  async function toggleSharesRoot(node) {
+    const toggle = node.querySelector(".tree-toggle");
+    const children = node.querySelector(".tree-children");
+
+    if (children.classList.contains("expanded")) {
+      children.classList.remove("expanded");
+      toggle.textContent = "▶";
+      return;
+    }
+    if (children.children.length > 0) {
+      children.classList.add("expanded");
+      toggle.textContent = "▼";
+      return;
+    }
+
+    children.innerHTML = '<div style="padding:4px 24px;color:var(--text-dim);font-size:12px">Loading shares...</div>';
+    children.classList.add("expanded");
+    toggle.textContent = "▼";
+
+    try {
+      await loadSharesNode(currentStorage, currentAccount, children);
+    } catch (e) {
+      children.innerHTML = `<div style="padding:4px 24px;color:var(--expiry-expired);font-size:12px">Error: ${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  async function loadSharesNode(storage, account, parentEl) {
+    // For api-kind storages the server expects the Azure account name as a
+    // query param. For direct-kind it's optional (entry carries the account).
+    const qs = account ? `?account=${encodeURIComponent(account)}` : "";
+    const result = await apiJson(`/api/shares/${encodeURIComponent(storage)}${qs}`);
+    const shares = Array.isArray(result) ? result : (result && result.items) || [];
+
+    parentEl.innerHTML = "";
+    if (shares.length === 0) {
+      parentEl.innerHTML = '<div style="padding:4px 24px;color:var(--text-dim);font-size:12px;font-style:italic">No shares</div>';
+      return;
+    }
+
+    for (const s of shares) {
+      const shareName = typeof s === "string" ? s : (s && (s.name || s.shareName)) || String(s);
+      const node = createTreeNode(shareName, "📂", 1, true);
+      node.dataset.share = shareName;
+      node.querySelector(".tree-item").addEventListener("click", () => toggleShare(node, shareName));
+      parentEl.appendChild(node);
+    }
+  }
+
+  async function toggleShare(node, shareName) {
+    const toggle = node.querySelector(".tree-toggle");
+    const children = node.querySelector(".tree-children");
+    if (children.classList.contains("expanded")) {
+      children.classList.remove("expanded");
+      toggle.textContent = "▶";
+      return;
+    }
+    if (children.children.length > 0) {
+      children.classList.add("expanded");
+      toggle.textContent = "▼";
+      return;
+    }
+    children.innerHTML = '<div style="padding:4px 24px;color:var(--text-dim);font-size:12px">Loading...</div>';
+    children.classList.add("expanded");
+    toggle.textContent = "▼";
+    try {
+      await loadShareDir(children, shareName, "", 2);
+    } catch (e) {
+      children.innerHTML = `<div style="padding:4px 24px;color:var(--expiry-expired);font-size:12px">Error: ${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  async function loadShareDir(parentEl, shareName, path, depth) {
+    let url = `/api/files/${encodeURIComponent(currentStorage)}/${encodeURIComponent(shareName)}`;
+    if (path) url += `?path=${encodeURIComponent(path)}`;
+    const result = await apiJson(withAccount(url));
+    const items = (result && result.items) || [];
+    parentEl.innerHTML = "";
+    if (items.length === 0) {
+      parentEl.innerHTML = '<div style="padding:4px 24px;color:var(--text-dim);font-size:12px;font-style:italic">Empty</div>';
+      return;
+    }
+    for (const it of items) {
+      if (it.isDirectory) {
+        const node = createTreeNode(it.name, "📁", depth, true);
+        const childPath = path ? `${path}/${it.name}` : it.name;
+        node.querySelector(".tree-item").addEventListener("click", () => toggleShareDir(node, shareName, childPath, depth + 1));
+        parentEl.appendChild(node);
+      } else {
+        const node = createTreeNode(it.name, "📄", depth, false);
+        const filePath = path ? `${path}/${it.name}` : it.name;
+        const sizeStr = it.size !== undefined ? ` ${(it.size / 1024).toFixed(1)}K` : "";
+        const meta = node.querySelector(".tree-name");
+        if (meta && sizeStr) {
+          const m = document.createElement("span");
+          m.className = "blob-size";
+          m.textContent = sizeStr;
+          node.querySelector(".tree-item").appendChild(m);
+        }
+        node.querySelector(".tree-item").addEventListener("click", () => viewShareFile(shareName, filePath, it.size));
+        parentEl.appendChild(node);
+      }
+    }
+  }
+
+  async function toggleShareDir(node, shareName, path, depth) {
+    const toggle = node.querySelector(".tree-toggle");
+    const children = node.querySelector(".tree-children");
+    if (children.classList.contains("expanded")) {
+      children.classList.remove("expanded");
+      toggle.textContent = "▶";
+      return;
+    }
+    if (children.children.length > 0) {
+      children.classList.add("expanded");
+      toggle.textContent = "▼";
+      return;
+    }
+    children.innerHTML = '<div style="padding:4px 24px;color:var(--text-dim);font-size:12px">Loading...</div>';
+    children.classList.add("expanded");
+    toggle.textContent = "▼";
+    try {
+      await loadShareDir(children, shareName, path, depth);
+    } catch (e) {
+      children.innerHTML = `<div style="padding:4px 24px;color:var(--expiry-expired);font-size:12px">Error: ${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  async function viewShareFile(shareName, filePath, size) {
+    const shortName = filePath.split("/").pop();
+    contentTitle.textContent = shortName;
+    contentMeta.textContent = size ? `${(size / 1024).toFixed(1)} KB` : "";
+    contentBody.innerHTML = '<p class="placeholder">Loading...</p>';
+    const url = withAccount(`/api/file/${encodeURIComponent(currentStorage)}/${encodeURIComponent(shareName)}?path=${encodeURIComponent(filePath)}`);
+    try {
+      const res = await fetch(url);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error((err && err.error && err.error.message) || `HTTP ${res.status}`);
+      }
+      const text = await res.text();
+      const ext = (filePath.split(".").pop() || "").toLowerCase();
+      if (ext === "json") {
+        try { contentBody.innerHTML = `<pre><code>${escapeHtml(JSON.stringify(JSON.parse(text), null, 2))}</code></pre>`; }
+        catch { contentBody.innerHTML = `<pre>${escapeHtml(text)}</pre>`; }
+      } else {
+        contentBody.innerHTML = `<pre>${escapeHtml(text)}</pre>`;
+      }
+    } catch (err) {
+      contentBody.innerHTML = `<p class="placeholder">Error: ${escapeHtml(err.message)}</p>`;
     }
   }
 
@@ -287,7 +544,7 @@
   async function loadTreeLevel(parentEl, container, prefix, depth) {
     let url = `/api/blobs/${currentStorage}/${container}`;
     if (prefix) url += `?prefix=${encodeURIComponent(prefix)}`;
-    const items = await apiJson(url);
+    const items = await apiJson(withAccount(url));
 
     parentEl.innerHTML = "";
 
@@ -383,7 +640,7 @@
     contentBody.innerHTML = '<p class="placeholder">Loading...</p>';
 
     const ext = blobName.split(".").pop()?.toLowerCase();
-    const url = `/api/blob/${currentStorage}/${container}?blob=${encodeURIComponent(blobName)}`;
+    const url = withAccount(`/api/blob/${currentStorage}/${container}?blob=${encodeURIComponent(blobName)}`);
 
     try {
       if (ext === "pdf") {
@@ -472,7 +729,10 @@
   });
 
   // --- Add Storage Modal ---
-  addBtn.addEventListener("click", () => modal.classList.remove("hidden"));
+  addBtn.addEventListener("click", () => {
+    resetApiStaticRow();
+    modal.classList.remove("hidden");
+  });
   modalCancel.addEventListener("click", () => modal.classList.add("hidden"));
   modalSave.addEventListener("click", async () => {
     const name = document.getElementById("modal-name").value.trim();
@@ -500,6 +760,110 @@
       alert("Failed: " + e.message);
     }
   });
+
+  // --- Add Storage Modal: API tab ("Connect to Storage Navigator API") ---
+  const apiCancelBtn = document.getElementById("api-cancel");
+  const apiAddBtn = document.getElementById("api-add-btn");
+  const apiNameInput = document.getElementById("api-name");
+  const apiUrlInput = document.getElementById("api-url");
+  const apiStatus = document.getElementById("api-status");
+
+  if (apiCancelBtn) {
+    apiCancelBtn.addEventListener("click", () => {
+      modal.classList.add("hidden");
+      if (apiStatus) apiStatus.textContent = "";
+    });
+  }
+
+  if (apiAddBtn) {
+    apiAddBtn.addEventListener("click", async () => {
+      const name = apiNameInput.value.trim();
+      const baseUrl = apiUrlInput.value.trim().replace(/\/$/, "");
+      if (!name || !baseUrl) {
+        apiStatus.textContent = "Name and base URL are required";
+        return;
+      }
+
+      apiAddBtn.disabled = true;
+      try {
+        apiStatus.textContent = "Probing API...";
+        // Proxy through the embedded server — direct fetch from the renderer
+        // hits CORS on the deployed Azure URL.
+        const probeRes = await fetch(`/api/discovery?url=${encodeURIComponent(baseUrl)}`);
+        if (!probeRes.ok) {
+          const err = await probeRes.json().catch(() => ({}));
+          apiStatus.textContent = `Probe failed: ${(err && err.error && err.error.message) || `HTTP ${probeRes.status}`}`;
+          return;
+        }
+        const probe = await probeRes.json();
+
+        // Static-header gate
+        let staticAuthHeader;
+        if (probe.staticAuthHeaderRequired) {
+          const headerName = probe.staticAuthHeaderName || 'X-Storage-Nav-Auth';
+          const row = document.getElementById('api-static-secret-row');
+          document.getElementById('api-static-label').textContent = headerName;
+          row.hidden = false;
+          const valueEl = document.getElementById('api-static-secret');
+          const value = (valueEl.value || '').trim();
+          if (!value) {
+            apiStatus.textContent = `${headerName} is required — enter the value above and click Connect again.`;
+            valueEl.focus();
+            return;
+          }
+          staticAuthHeader = { name: headerName, value };
+        }
+
+        if (probe.authEnabled) {
+          apiStatus.textContent = "Opening browser for OIDC login...";
+          // Electron preload should expose window.electron.invoke. If not
+          // exposed, fall back to a register-only path: the CLI can finish
+          // the login afterwards via `storage-nav login --name <name>`.
+          if (window.electron && typeof window.electron.invoke === "function") {
+            const r = await window.electron.invoke("oidc:login", {
+              name,
+              issuer: probe.issuer,
+              clientId: probe.clientId,
+              audience: probe.audience,
+              scopes: probe.scopes,
+            });
+            if (!r || !r.ok) { apiStatus.textContent = "OIDC login failed"; return; }
+          } else {
+            apiStatus.textContent = `OIDC login required — run \`storage-nav login --name ${name}\` after registration.`;
+          }
+        }
+
+        const res = await fetch("/api/storage/api-backend", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            name,
+            baseUrl,
+            authEnabled: probe.authEnabled,
+            oidc: probe.authEnabled
+              ? { issuer: probe.issuer, clientId: probe.clientId, audience: probe.audience, scopes: probe.scopes }
+              : undefined,
+            staticAuthHeader,
+          }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          apiStatus.textContent = (err && err.error && err.error.message) || `HTTP ${res.status}`;
+          return;
+        }
+
+        apiStatus.textContent = `Added "${name}".`;
+        apiNameInput.value = "";
+        apiUrlInput.value = "";
+        modal.classList.add("hidden");
+        await loadStorages();
+      } catch (err) {
+        apiStatus.textContent = "Error: " + (err && err.message ? err.message : String(err));
+      } finally {
+        apiAddBtn.disabled = false;
+      }
+    });
+  }
 
   // --- Delete Storage ---
   deleteStorageBtn.addEventListener("click", () => {
@@ -588,7 +952,7 @@
     renameSave.textContent = "Renaming...";
 
     try {
-      await apiJson(`/api/rename/${currentStorage}/${contextTarget.container}`, {
+      await apiJson(withAccount(`/api/rename/${currentStorage}/${contextTarget.container}`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ oldName, newName }),
@@ -676,7 +1040,7 @@
     deleteConfirm.textContent = "Deleting...";
 
     try {
-      const url = `/api/blob/${currentStorage}/${contextTarget.container}?blob=${encodeURIComponent(contextTarget.blobName)}`;
+      const url = withAccount(`/api/blob/${currentStorage}/${contextTarget.container}?blob=${encodeURIComponent(contextTarget.blobName)}`);
       await apiJson(url, { method: "DELETE" });
 
       deleteModal.classList.add("hidden");
@@ -725,7 +1089,7 @@
     deleteFolderConfirm.textContent = "Deleting...";
 
     try {
-      const url = `/api/folder/${currentStorage}/${folderContextTarget.container}?prefix=${encodeURIComponent(folderContextTarget.folderPrefix)}`;
+      const url = withAccount(`/api/folder/${currentStorage}/${folderContextTarget.container}?prefix=${encodeURIComponent(folderContextTarget.folderPrefix)}`);
       await apiJson(url, { method: "DELETE" });
 
       deleteFolderModal.classList.add("hidden");
@@ -758,7 +1122,7 @@
 
     // Populate container dropdown
     try {
-      const containers = await apiJson(`/api/containers/${currentStorage}`);
+      const containers = await apiJson(withAccount(`/api/containers/${currentStorage}`));
       createContainer.innerHTML = '<option value="">Select container...</option>';
       for (const c of containers) {
         const opt = document.createElement("option");
@@ -799,7 +1163,7 @@
       else if (ext === "html") contentType = "text/html";
       else if (ext === "md") contentType = "text/plain";
 
-      const url = `/api/blob/${currentStorage}/${container}?blob=${encodeURIComponent(blobPath)}&contentType=${encodeURIComponent(contentType)}`;
+      const url = withAccount(`/api/blob/${currentStorage}/${container}?blob=${encodeURIComponent(blobPath)}&contentType=${encodeURIComponent(contentType)}`);
       await apiJson(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },

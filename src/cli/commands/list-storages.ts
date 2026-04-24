@@ -12,8 +12,14 @@ export function listStorages(): void {
 
   console.log(`Configured storage accounts (${storages.length}):\n`);
   for (const s of storages) {
-    console.log(`  ${s.name}`);
-    console.log(`    Account: ${s.accountName}`);
+    const full = store.getStorage(s.name);
+    const kind = full?.kind ?? 'direct';
+    console.log(`  [${kind}] ${s.name}`);
+    if (full && full.kind === 'api') {
+      console.log(`    Base URL: ${full.baseUrl}`);
+    } else {
+      console.log(`    Account: ${s.accountName}`);
+    }
     console.log(`    Added:   ${s.addedAt}`);
     console.log();
   }

@@ -1,0 +1,137 @@
+import { StorageManagementClient } from '@azure/arm-storage';
+import { SubscriptionClient } from '@azure/arm-subscriptions';
+import type { TokenCredential } from '@azure/identity';
+import { logger } from '../observability/logger.js';
+
+export type DiscoveredAccount = {
+  name: string;
+  subscriptionId: string;
+  resourceGroup: string;
+  blobEndpoint: string;
+  fileEndpoint: string;
+};
+
+export type ArmAdapter = {
+  list(): Promise<DiscoveredAccount[]>;
+};
+
+export type AccountDiscoveryOptions = {
+  adapter: ArmAdapter;
+  allowed: string[];
+  refreshMin: number;
+};
+
+export class AccountDiscovery {
+  private readonly adapter: ArmAdapter;
+  private readonly allowed: Set<string>;
+  private readonly refreshMs: number;
+  private cache: Map<string, DiscoveredAccount> = new Map();
+  private timer: NodeJS.Timeout | null = null;
+  private lastSuccessAt: number | null = null;
+
+  constructor(opts: AccountDiscoveryOptions) {
+    this.adapter = opts.adapter;
+    this.allowed = new Set(opts.allowed);
+    this.refreshMs = opts.refreshMin * 60 * 1000;
+  }
+
+  async refresh(): Promise<void> {
+    const accounts = await this.adapter.list();
+    const filtered = this.allowed.size === 0
+      ? accounts
+      : accounts.filter((a) => this.allowed.has(a.name));
+    const next = new Map<string, DiscoveredAccount>();
+    for (const a of filtered) next.set(a.name, a);
+    this.cache = next;
+    this.lastSuccessAt = Date.now();
+  }
+
+  /** True iff a refresh has succeeded within the last 2× refresh interval. */
+  isHealthy(): boolean {
+    if (this.lastSuccessAt === null) return false;
+    return Date.now() - this.lastSuccessAt < 2 * this.refreshMs;
+  }
+
+  list(): DiscoveredAccount[] {
+    return [...this.cache.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  lookup(name: string): DiscoveredAccount | null {
+    return this.cache.get(name) ?? null;
+  }
+
+  startBackgroundRefresh(): void {
+    if (this.timer) return;
+    this.timer = setInterval(() => {
+      // Surface ARM-side failures (permission revocation, throttling, network)
+      // so they don't silently freeze the cache against a stale snapshot.
+      void this.refresh().catch((err: unknown) => {
+        logger.warn({ err }, 'account discovery background refresh failed');
+      });
+    }, this.refreshMs);
+    // Don't keep the event loop alive solely for this timer.
+    if (this.timer && typeof this.timer.unref === 'function') this.timer.unref();
+  }
+
+  stopBackgroundRefresh(): void {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+}
+
+/** Concrete adapter that scans subscriptions via ARM. */
+export class ArmStorageAdapter implements ArmAdapter {
+  constructor(
+    private readonly credential: TokenCredential,
+    private readonly subscriptions: string[]
+  ) {}
+
+  async list(): Promise<DiscoveredAccount[]> {
+    const subs = this.subscriptions.length > 0
+      ? this.subscriptions
+      : await this.discoverSubscriptions();
+    const out: DiscoveredAccount[] = [];
+    for (const subscriptionId of subs) {
+      const client = new StorageManagementClient(this.credential, subscriptionId);
+      for await (const acct of client.storageAccounts.list()) {
+        if (!acct.name || !acct.id) {
+          logger.warn({ accountId: acct.id, name: acct.name }, 'skipping account: missing name or id');
+          continue;
+        }
+        const rg = parseResourceGroup(acct.id);
+        if (!rg) {
+          logger.warn({ accountId: acct.id }, 'skipping account: cannot parse resource group');
+          continue;
+        }
+        out.push({
+          name: acct.name,
+          subscriptionId,
+          resourceGroup: rg,
+          blobEndpoint: acct.primaryEndpoints?.blob ?? `https://${acct.name}.blob.core.windows.net`,
+          fileEndpoint: acct.primaryEndpoints?.file ?? `https://${acct.name}.file.core.windows.net`,
+        });
+      }
+    }
+    return out;
+  }
+
+  private async discoverSubscriptions(): Promise<string[]> {
+    const sc = new SubscriptionClient(this.credential);
+    const ids: string[] = [];
+    for await (const s of sc.subscriptions.list()) {
+      if (s.subscriptionId) ids.push(s.subscriptionId);
+    }
+    return ids;
+  }
+}
+
+function parseResourceGroup(id: string): string | null {
+  // /subscriptions/{sub}/resourceGroups/{rg}/...
+  // Case-sensitive: ARM canonically returns "resourceGroups" with a capital G.
+  // If Azure ever changes canonical casing, every account skips with a warn
+  // log (see callsite). Do not add /i — allowlists assume canonical casing.
+  const match = /\/resourceGroups\/([^/]+)\//.exec(id);
+  return match?.[1] ?? null;
+}

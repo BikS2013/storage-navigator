@@ -228,6 +228,57 @@ Azure Blob Storage Navigator — browse containers and view files through CLI or
 
           ui           Launch web/Electron UI (--port <port>, default 3100)
 
+          add-api      Register a Storage Navigator API as a backend
+            --name <name>         Display name
+            --base-url <url>      API base URL
+            --static-secret <value>  Value for the static auth header (when API requires it).
+                                      CLI prompts hidden if omitted and discovery says it's required.
+
+          login        Re-run OIDC login for an existing api backend
+            --name <name>         API backend name
+            --static-secret <value>  New static header value (e.g. after rotation).
+                                      CLI prompts hidden if omitted and discovery says it's required.
+
+          logout       Clear stored OIDC tokens for an api backend
+            --name <name>         API backend name
+
+          shares       List file shares (works with direct + api backends)
+          share-create Create a file share
+            --name <name>         Share name
+            --quota <gib>         Quota in GiB (optional)
+          share-delete Delete a file share
+            --name <name>         Share name
+
+          files        List directory contents in a file share
+            --share <name>        Share name
+            --path <dir>          Directory path (default: root)
+
+          file-view    View a file (UTF-8 text)
+            --share <name>        Share name
+            --file <path>         File path
+
+          file-upload  Upload a file
+            --share <name>        Share name
+            --file <path>         Destination path
+            --source <path>       Local file to upload (or use --content)
+            --content <text>      Inline text content
+
+          file-rename  Rename a file
+            --share <name>        Share name
+            --file <path>         Current path
+            --new-name <path>     New path
+
+          file-delete  Delete a file
+            --share <name>        Share name
+            --file <path>         File path
+
+          file-delete-folder  Delete a directory recursively
+            --share <name>        Share name
+            --path <dir>          Directory path
+
+          All blob commands (containers, ls, view, etc.) accept api backends
+          via `--storage <api-backend-name> --account <azure-account>`.
+
         Examples:
 
           # Add storage with account key
@@ -336,3 +387,39 @@ Azure Blob Storage Navigator — browse containers and view files through CLI or
           npx tsx src/cli/index.ts diff --container my-container --physical-check
     </info>
 </storage-nav>
+
+<storage-nav-api>
+    <objective>
+        HTTP API that brokers Azure Blob and Azure Files access behind toggleable OIDC and three global roles (StorageReader, StorageWriter, StorageAdmin). Designed to be a third backend type for the Storage Navigator client. Implemented in the `API/` folder as a separate deployable.
+    </objective>
+    <command>
+        cd API && npm run dev
+    </command>
+    <info>
+        Lives in the `API/` folder at repo root. Own package.json, own deploy artifact (Azure App Service, Linux, Node 22).
+
+        Auth: in-app OIDC via NBG IdentityServer (`https://my.nbg.gr/identity`). JWT validated locally via JWKS (`jose`). Toggleable with `AUTH_ENABLED=true|false`; when false `ANON_ROLE` env decides default role.
+
+        Static auth header (perimeter API key, Plan 008):
+        STATIC_AUTH_HEADER_VALUE   When set, every protected route requires this header
+                                   value. Comma-separated list = zero-downtime rotation.
+                                   Typically referenced from Key Vault:
+                                   @Microsoft.KeyVault(VaultName=...;SecretName=...)
+        STATIC_AUTH_HEADER_NAME    Header name (default: X-Storage-Nav-Auth)
+
+        Storage access: `DefaultAzureCredential` from `@azure/identity` resolves to System-Assigned MI on App Service and `az login` locally. Storage account discovery via `@azure/arm-storage` (MI needs Reader on subscription).
+
+        URL shape: `/storages/{account}/containers[/{c}/blobs[/{path}]]` and `/storages/{account}/shares[/{s}/files[/{path}]]`. Discovery: `/.well-known/storage-nav-config`. Health: `/healthz`, `/readyz`. OpenAPI: `/openapi.yaml`, swagger UI at `/docs`.
+
+        Commands (from `API/`):
+          npm run dev                # tsx watch
+          npm run build              # tsc -> dist/
+          npm start                  # node dist/index.js
+          npm run test               # vitest run
+          npm run test:unit
+          npm run test:integration   # Azurite + mock IdP
+          npm run lint:openapi
+
+        Design: `docs/design/plan-006-rbac-api.md`. Implementation plan: `docs/design/plan-006-rbac-api-impl.md`.
+    </info>
+</storage-nav-api>

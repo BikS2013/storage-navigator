@@ -77,7 +77,7 @@ export class CredentialStore {
       const raw = fs.readFileSync(STORE_FILE, "utf-8");
       const payload = JSON.parse(raw) as EncryptedPayload;
       const decrypted = decrypt(payload);
-      this.data = JSON.parse(decrypted) as CredentialData;
+      this.data = this.migrate(JSON.parse(decrypted) as CredentialData);
     } catch {
       // Try to migrate from the old hostname-based key derivation
       if (this.tryMigrateFromHostnameKey()) {
@@ -86,6 +86,22 @@ export class CredentialStore {
       console.error("Failed to decrypt credentials. File may be corrupted or from another machine.");
       this.data = { storages: [] };
     }
+  }
+
+  /**
+   * Migrate legacy CredentialData (StorageEntry without `kind`) to the
+   * tagged-union form by stamping `kind: 'direct'` on every entry that lacks
+   * it. Idempotent. Called from load() after decryption.
+   */
+  private migrate(data: CredentialData): CredentialData {
+    let changed = false;
+    const storages = (data.storages ?? []).map((entry: any) => {
+      if (entry.kind) return entry;
+      changed = true;
+      return { ...entry, kind: 'direct' };
+    });
+    if (!changed) return data;
+    return { ...data, storages };
   }
 
   /**
@@ -116,7 +132,7 @@ export class CredentialStore {
         decipher.setAuthTag(Buffer.from(payload.tag, "hex"));
         let decrypted = decipher.update(payload.data, "hex", "utf8");
         decrypted += decipher.final("utf8");
-        this.data = JSON.parse(decrypted) as CredentialData;
+        this.data = this.migrate(JSON.parse(decrypted) as CredentialData);
 
         // Re-encrypt with the new stable key
         console.log(`Migrated credentials from hostname-based key (${hostname}). Re-encrypting with stable key...`);
@@ -152,22 +168,35 @@ export class CredentialStore {
   /** List all configured storage accounts (names only, no tokens) */
   listStorages(): { name: string; accountName: string; addedAt: string; authType: string; expiresAt: string | null; isExpired: boolean }[] {
     return this.data.storages.map((s) => {
-      const authType = s.accountKey ? "account-key" : "sas-token";
-      let expiresAt: string | null = null;
-      let isExpired = false;
-      if (s.sasToken) {
-        expiresAt = CredentialStore.parseSasExpiry(s.sasToken);
-        if (expiresAt) {
-          isExpired = new Date(expiresAt) < new Date();
+      // Narrow on kind: direct entries have accountName/accountKey/sasToken;
+      // api entries expose baseUrl + auth settings.
+      if (s.kind === 'direct') {
+        const authType = s.accountKey ? "account-key" : "sas-token";
+        let expiresAt: string | null = null;
+        let isExpired = false;
+        if (s.sasToken) {
+          expiresAt = CredentialStore.parseSasExpiry(s.sasToken);
+          if (expiresAt) {
+            isExpired = new Date(expiresAt) < new Date();
+          }
         }
+        return {
+          name: s.name,
+          accountName: s.accountName,
+          addedAt: s.addedAt,
+          authType,
+          expiresAt,
+          isExpired,
+        };
       }
+      // api backend
       return {
         name: s.name,
-        accountName: s.accountName,
+        accountName: s.baseUrl,
         addedAt: s.addedAt,
-        authType,
-        expiresAt,
-        isExpired,
+        authType: s.authEnabled ? 'oidc' : 'none',
+        expiresAt: null,
+        isExpired: false,
       };
     });
   }
@@ -176,10 +205,18 @@ export class CredentialStore {
   exportStorage(name: string): { name: string; accountName: string; authType: string; addedAt: string } | undefined {
     const entry = this.data.storages.find((s) => s.name === name);
     if (!entry) return undefined;
+    if (entry.kind === 'direct') {
+      return {
+        name: entry.name,
+        accountName: entry.accountName,
+        authType: entry.accountKey ? "account-key" : "sas-token",
+        addedAt: entry.addedAt,
+      };
+    }
     return {
       name: entry.name,
-      accountName: entry.accountName,
-      authType: entry.accountKey ? "account-key" : "sas-token",
+      accountName: entry.baseUrl,
+      authType: entry.authEnabled ? 'oidc' : 'none',
       addedAt: entry.addedAt,
     };
   }
@@ -192,7 +229,9 @@ export class CredentialStore {
   /** Add or update a storage account */
   addStorage(entry: Omit<StorageEntry, "addedAt">): void {
     const existing = this.data.storages.findIndex((s) => s.name === entry.name);
-    const full: StorageEntry = { ...entry, addedAt: new Date().toISOString() };
+    // Spreading a discriminated union loses narrowing in TS; cast back via
+    // the kind discriminator.
+    const full = { ...entry, addedAt: new Date().toISOString() } as StorageEntry;
     if (existing >= 0) {
       this.data.storages[existing] = full;
     } else {

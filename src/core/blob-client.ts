@@ -7,11 +7,21 @@ import type { StorageEntry, BlobItem, ContainerInfo, BlobContent } from "./types
 /**
  * Azure Blob Storage client for navigation and content retrieval.
  * Supports both SAS token and account key authentication.
+ *
+ * BlobClient is purely direct-mode infrastructure — it talks straight to
+ * Azure Blob Storage. API-backed entries are rejected at construction;
+ * callers should route those through the IStorageBackend factory
+ * (see core/backend/factory.ts).
  */
 export class BlobClient {
   private serviceClient: BlobServiceClient;
 
   constructor(storage: StorageEntry) {
+    if (storage.kind !== 'direct') {
+      throw new Error(
+        `BlobClient only supports direct-mode storage entries; '${storage.name}' is kind='${storage.kind}'. Use makeBackend() instead.`
+      );
+    }
     if (storage.accountKey) {
       const credential = new StorageSharedKeyCredential(
         storage.accountName,
@@ -42,6 +52,12 @@ export class BlobClient {
   async createContainer(containerName: string): Promise<void> {
     const containerClient = this.serviceClient.getContainerClient(containerName);
     await containerClient.create();
+  }
+
+  /** Delete a container if it exists. Used by IStorageBackend.deleteContainer. */
+  async deleteContainer(containerName: string): Promise<void> {
+    const containerClient = this.serviceClient.getContainerClient(containerName);
+    await containerClient.deleteIfExists();
   }
 
   /** List blobs in a container with optional prefix (for folder navigation) */
@@ -155,6 +171,23 @@ export class BlobClient {
     }
 
     return blobsToDelete.length;
+  }
+
+  /**
+   * Alias of {@link createBlob} used by IStorageBackend.uploadBlob. Same
+   * semantics: uploads `content` as a block blob with the given content type
+   * (defaults to `application/octet-stream`).
+   */
+  async uploadBlob(containerName: string, blobName: string, content: Buffer | string, contentType?: string): Promise<void> {
+    await this.createBlob(containerName, blobName, content, contentType);
+  }
+
+  /**
+   * Alias of {@link getBlobContent} used by IStorageBackend.readBlob /
+   * headBlob. Returns the blob bytes plus content-type and size.
+   */
+  async viewBlob(containerName: string, blobName: string): Promise<BlobContent> {
+    return this.getBlobContent(containerName, blobName);
   }
 
   /** Download blob content */

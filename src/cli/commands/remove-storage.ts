@@ -21,8 +21,10 @@ export async function deleteStorage(name: string, force: boolean = false): Promi
   }
 
   if (!force) {
+    const target =
+      entry.kind === 'direct' ? `Azure account: ${entry.accountName}` : `API backend: ${entry.baseUrl}`;
     const confirmed = await promptYesNo(
-      `Delete storage account '${name}' (Azure account: ${entry.accountName})? This only removes the local credential — blobs in Azure are not touched.`
+      `Delete storage account '${name}' (${target})? This only removes the local credential — remote data is not touched.`
     );
     if (!confirmed) {
       console.log("Cancelled.");

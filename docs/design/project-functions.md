@@ -128,3 +128,43 @@ Shared resolution logic is in `src/cli/commands/shared.ts` (`resolveStorageEntry
 - Custom app icon and "Storage Navigator" branding in macOS dock
 - Sync badge on containers that mirror a repository
 - Sync confirmation modal showing repo URL, branch, last sync time, and file count
+
+## RBAC API (`API/`)
+
+- HTTP API exposing Azure Blob + Azure Files behind OIDC + three roles (`StorageReader`, `StorageWriter`, `StorageAdmin`).
+- Auth provider: NBG IdentityServer at `https://my.nbg.gr/identity`. JWT validated locally via JWKS.
+- Toggleable auth: `AUTH_ENABLED=true|false`. When false, `ANON_ROLE` decides the default role.
+- Discovery endpoint: `GET /.well-known/storage-nav-config` returns `{authEnabled, issuer, clientId, audience, scopes}`.
+- URL shape:
+  - `/storages` — list visible accounts
+  - `/storages/{account}/containers[/{c}]` — container CRUD
+  - `/storages/{account}/containers/{c}/blobs[/{path}]` — blob CRUD + rename + delete-folder
+  - `/storages/{account}/shares[/{s}]` — share CRUD
+  - `/storages/{account}/shares/{s}/files[/{path}]` — file CRUD + rename + delete-folder
+- Storage access: `DefaultAzureCredential` (Managed Identity in App Service).
+- Storage account discovery: ARM scan via `@azure/arm-storage`.
+- Reads proxy-streamed through the API; writes streamed; client disconnects cancel via `AbortSignal`.
+- Pagination: `?pageSize=` (default 200, max 1000), `?continuationToken=`.
+- Errors: `{error: {code, message, correlationId}}`.
+- Tests: vitest unit + integration (Azurite + mock IdP).
+- Deployment: Azure App Service Linux Node 22 with System-Assigned MI; container via multi-stage Dockerfile.
+
+## API backend client (Plan 007)
+
+- New CLI commands: `add-api`, `login`, `logout`, `shares`, `share-create`, `share-delete`, `files`, `file-view`, `file-upload`, `file-rename`, `file-delete`, `file-delete-folder`.
+- All existing blob commands gain `--account` to disambiguate Azure storage account when targeting an api backend.
+- Electron "Add Storage" dialog has a third tab for connecting to a Storage Navigator API. Storage tree shows a Shares sibling node under each backend.
+- OIDC login flows: PKCE via system browser + loopback redirect (Electron); device-code (CLI). Tokens persisted via Electron `safeStorage` or chmod-600 file (CLI), keyed by api backend name.
+- File-share support added to the existing `direct` backends as well, via the new `FileShareClient` wrapping `@azure/storage-file-share` with the same account-key / SAS the user already provides.
+
+## Static auth header (Plan 008)
+
+- API has an opt-in perimeter API-key gate via `STATIC_AUTH_HEADER_VALUE`.
+- Independent of OIDC: when both are configured, every request needs the header AND a valid Bearer JWT.
+- Header NAME is operator-configurable (`STATIC_AUTH_HEADER_NAME`, default `X-Storage-Nav-Auth`).
+- Comma-separated values for zero-downtime rotation.
+- Discovery exposes `staticAuthHeaderRequired` + `staticAuthHeaderName` (never the value).
+- `/.well-known/*`, `/healthz`, `/readyz`, `/openapi.yaml`, `/docs` remain public.
+- Client persists the value on `ApiBackendEntry.staticAuthHeader` (encrypted via the existing credential store) and sends it on every request.
+- CLI: `add-api --static-secret <v>` or hidden interactive prompt; `login --static-secret <v>` for rotation.
+- Electron UI: Add Storage tab reveals a password input when the API requires it.

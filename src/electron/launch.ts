@@ -28,7 +28,7 @@ export function launchElectronApp(port: number): void {
   console.log(`Bundling Electron main process...`);
   try {
     execSync(
-      `npx esbuild "${electronMainTs}" --bundle --platform=node --format=esm --outfile="${outFile}" --external:electron --external:@azure/storage-blob --external:express --external:marked --external:highlight.js --external:mammoth`,
+      `npx esbuild "${electronMainTs}" --bundle --platform=node --format=esm --outfile="${outFile}" --packages=external`,
       { cwd: projectRoot, stdio: "pipe" }
     );
   } catch (err: unknown) {
@@ -36,7 +36,7 @@ export function launchElectronApp(port: number): void {
     console.log("Installing esbuild...");
     execSync("npm install --save-dev esbuild", { cwd: projectRoot, stdio: "inherit" });
     execSync(
-      `npx esbuild "${electronMainTs}" --bundle --platform=node --format=esm --outfile="${outFile}" --external:electron --external:@azure/storage-blob --external:express --external:marked --external:highlight.js --external:mammoth`,
+      `npx esbuild "${electronMainTs}" --bundle --platform=node --format=esm --outfile="${outFile}" --packages=external`,
       { cwd: projectRoot, stdio: "pipe" }
     );
   }

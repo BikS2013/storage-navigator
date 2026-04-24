@@ -1,28 +1,35 @@
-import { BlobClient } from "../../core/blob-client.js";
 import mammoth from "mammoth";
-import { resolveStorageEntry, type StorageOpts } from "./shared.js";
+import { resolveStorageBackend, type StorageOpts } from "./shared.js";
+import type { BlobReadHandle } from "../../core/backend/backend.js";
+
+async function streamToBuffer(stream: NodeJS.ReadableStream): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) {
+    chunks.push(chunk instanceof Buffer ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}
 
 export async function viewBlob(
   storageOpts: StorageOpts,
   container: string,
   blobName: string
 ): Promise<void> {
-  const { entry } = await resolveStorageEntry(storageOpts);
-  const client = new BlobClient(entry);
+  const { backend } = await resolveStorageBackend(storageOpts, storageOpts.account);
 
-  console.log(`Fetching ${entry.accountName}/${container}/${blobName}...\n`);
+  console.log(`Fetching ${container}/${blobName}...\n`);
 
-  const blob = await client.getBlobContent(container, blobName);
+  const handle: BlobReadHandle = await backend.readBlob(container, blobName);
+  const buffer = await streamToBuffer(handle.stream);
   const ext = blobName.split(".").pop()?.toLowerCase() ?? "";
 
   if (ext === "docx" || ext === "doc") {
-    const buffer = Buffer.isBuffer(blob.content) ? blob.content : Buffer.from(blob.content);
     const result = await mammoth.extractRawText({ buffer });
     console.log(result.value);
     return;
   }
 
-  const text = blob.content.toString("utf-8");
+  const text = buffer.toString("utf-8");
 
   if (ext === "json") {
     try {
@@ -35,17 +42,17 @@ export async function viewBlob(
     // Render markdown as plain text with structure hints
     console.log(text);
   } else if (ext === "pdf") {
-    console.log(`[PDF file, ${blob.size} bytes — use "storage-nav download" to save locally]`);
+    console.log(`[PDF file, ${buffer.length} bytes — use "storage-nav download" to save locally]`);
   } else {
     console.log(text);
   }
 }
 
 export async function listContainers(storageOpts: StorageOpts): Promise<void> {
-  const { entry } = await resolveStorageEntry(storageOpts);
-  const client = new BlobClient(entry);
+  const { entry, backend } = await resolveStorageBackend(storageOpts, storageOpts.account);
 
-  const containers = await client.listContainers();
+  const page = await backend.listContainers();
+  const containers = page.items;
   console.log(`Containers in '${entry.name}' (${containers.length}):\n`);
   for (const c of containers) {
     console.log(`  ${c.name}`);
@@ -57,10 +64,10 @@ export async function listBlobs(
   container: string,
   prefix?: string
 ): Promise<void> {
-  const { entry } = await resolveStorageEntry(storageOpts);
-  const client = new BlobClient(entry);
+  const { entry, backend } = await resolveStorageBackend(storageOpts, storageOpts.account);
 
-  const items = await client.listBlobs(container, prefix);
+  const page = await backend.listBlobs(container, { prefix, pageSize: undefined });
+  const items = page.items;
   const location = prefix ? `${container}/${prefix}` : container;
   console.log(`Contents of '${entry.name}/${location}' (${items.length} items):\n`);
 
@@ -80,13 +87,20 @@ export async function downloadBlob(
   blobName: string,
   outputPath: string
 ): Promise<void> {
-  const { entry } = await resolveStorageEntry(storageOpts);
-  const client = new BlobClient(entry);
+  const { backend } = await resolveStorageBackend(storageOpts, storageOpts.account);
 
-  console.log(`Downloading ${entry.accountName}/${container}/${blobName}...`);
-  const blob = await client.getBlobContent(container, blobName);
+  console.log(`Downloading ${container}/${blobName}...`);
+  const handle = await backend.readBlob(container, blobName);
 
   const fs = await import("fs");
-  fs.writeFileSync(outputPath, blob.content);
-  console.log(`Saved to: ${outputPath} (${blob.size} bytes)`);
+  await new Promise<void>((resolve, reject) => {
+    const out = fs.createWriteStream(outputPath);
+    handle.stream.pipe(out);
+    out.on("finish", () => resolve());
+    out.on("error", (err) => reject(err));
+    handle.stream.on("error", (err) => reject(err));
+  });
+
+  const stats = fs.statSync(outputPath);
+  console.log(`Saved to: ${outputPath} (${stats.size} bytes)`);
 }
