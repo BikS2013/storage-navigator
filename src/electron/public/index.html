@@ -74,6 +74,12 @@
       <div class="tab-body" data-tab="api" hidden>
         <label>Friendly name<input type="text" id="api-name" placeholder="e.g. corp-api" required></label>
         <label>Base URL<input type="text" id="api-url" placeholder="https://your-api.azurewebsites.net" required></label>
+        <div id="api-static-secret-row" hidden>
+          <label>
+            <span id="api-static-label">X-Storage-Nav-Auth</span>
+            <input id="api-static-secret" type="password" autocomplete="off" />
+          </label>
+        </div>
         <div class="modal-actions">
           <button id="api-cancel">Cancel</button>
           <button id="api-add-btn" class="primary">Connect</button>

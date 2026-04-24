@@ -127,10 +127,19 @@
       if (body.dataset.tab === tabName) body.removeAttribute("hidden");
       else body.setAttribute("hidden", "");
     });
+    if (tabName === "api") resetApiStaticRow();
   }
   modal.querySelectorAll(".tab-btn").forEach((btn) => {
     btn.addEventListener("click", () => activateTab(btn.dataset.tab));
   });
+
+  // --- Reset static-header row in the API tab (called when modal/tab opens) ---
+  function resetApiStaticRow() {
+    const row = document.getElementById('api-static-secret-row');
+    const valueEl = document.getElementById('api-static-secret');
+    if (row) row.hidden = true;
+    if (valueEl) valueEl.value = '';
+  }
 
   // --- Storage kind icon helper ---
   function storageIcon(kind) {
@@ -716,7 +725,10 @@
   });
 
   // --- Add Storage Modal ---
-  addBtn.addEventListener("click", () => modal.classList.remove("hidden"));
+  addBtn.addEventListener("click", () => {
+    resetApiStaticRow();
+    modal.classList.remove("hidden");
+  });
   modalCancel.addEventListener("click", () => modal.classList.add("hidden"));
   modalSave.addEventListener("click", async () => {
     const name = document.getElementById("modal-name").value.trim();
@@ -781,6 +793,23 @@
         }
         const probe = await probeRes.json();
 
+        // Static-header gate
+        let staticAuthHeader;
+        if (probe.staticAuthHeaderRequired) {
+          const headerName = probe.staticAuthHeaderName || 'X-Storage-Nav-Auth';
+          const row = document.getElementById('api-static-secret-row');
+          document.getElementById('api-static-label').textContent = headerName;
+          row.hidden = false;
+          const valueEl = document.getElementById('api-static-secret');
+          const value = (valueEl.value || '').trim();
+          if (!value) {
+            apiStatus.textContent = `${headerName} is required — enter the value above and click Connect again.`;
+            valueEl.focus();
+            return;
+          }
+          staticAuthHeader = { name: headerName, value };
+        }
+
         if (probe.authEnabled) {
           apiStatus.textContent = "Opening browser for OIDC login...";
           // Electron preload should expose window.electron.invoke. If not
@@ -810,6 +839,7 @@
             oidc: probe.authEnabled
               ? { issuer: probe.issuer, clientId: probe.clientId, audience: probe.audience, scopes: probe.scopes }
               : undefined,
+            staticAuthHeader,
           }),
         });
         if (!res.ok) {
