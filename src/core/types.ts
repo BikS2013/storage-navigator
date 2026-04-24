@@ -20,6 +20,12 @@ export type ApiBackendEntry = {
   baseUrl: string;
   authEnabled: boolean;
   oidc?: OidcConfig;
+  /**
+   * Operator-supplied perimeter API-key header. When the API has
+   * STATIC_AUTH_HEADER_VALUE set, every request must carry this header.
+   * Persisted encrypted via CredentialStore (AES-256-GCM).
+   */
+  staticAuthHeader?: { name: string; value: string };
   addedAt: string;
 };
 
