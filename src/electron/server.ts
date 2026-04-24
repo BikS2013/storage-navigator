@@ -128,9 +128,10 @@ export function createServer(port: number, publicDirOverride?: string): express.
 
   app.post("/api/storage/api-backend", express.json(), (req, res, next) => {
     try {
-      const { name, baseUrl, authEnabled, oidc } = req.body as {
+      const { name, baseUrl, authEnabled, oidc, staticAuthHeader } = req.body as {
         name: string; baseUrl: string; authEnabled: boolean;
         oidc?: { issuer: string; clientId: string; audience: string; scopes: string[] };
+        staticAuthHeader?: { name: string; value: string };
       };
       if (!name || !baseUrl || authEnabled === undefined) {
         res.status(400).json({ error: { message: "name, baseUrl, and authEnabled are required" } });
@@ -141,7 +142,9 @@ export function createServer(port: number, publicDirOverride?: string): express.
         res.status(409).json({ error: { message: `Storage "${name}" already exists` } });
         return;
       }
-      const entry: Omit<ApiBackendEntry, 'addedAt'> = { kind: 'api', name, baseUrl, authEnabled, oidc };
+      const entry: Omit<ApiBackendEntry, 'addedAt'> = {
+        kind: 'api', name, baseUrl, authEnabled, oidc, staticAuthHeader,
+      };
       store.addStorage(entry);
       res.status(201).json({ name });
     } catch (err) { next(err); }
