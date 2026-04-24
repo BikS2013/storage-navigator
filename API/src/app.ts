@@ -10,6 +10,7 @@ import { openapiRouter } from './routes/openapi.js';
 import { buildJwksGetter } from './auth/jwks-cache.js';
 import { oidcMiddleware } from './auth/oidc-middleware.js';
 import { anonymousPrincipalMiddleware } from './auth/auth-toggle.js';
+import { staticAuthMiddleware } from './auth/static-auth.js';
 import type { AppRole } from './auth/role-mapper.js';
 import type { AccountDiscovery } from './azure/account-discovery.js';
 import type { BlobService } from './azure/blob-service.js';
@@ -58,6 +59,9 @@ export function buildApp(opts: BuildAppOptions): Express {
   app.use(wellKnownRouter(opts.config));
   app.use(openapiRouter(opts.config));
   app.use(healthRouter(opts.readinessChecks));
+
+  const staticAuthCfg = opts.config.staticAuth ?? { values: [], headerName: 'X-Storage-Nav-Auth' };
+  app.use(staticAuthMiddleware(staticAuthCfg.values, staticAuthCfg.headerName));
 
   const auth = opts.authOverride ?? buildAuthMiddleware(opts.config);
   app.use(auth);
