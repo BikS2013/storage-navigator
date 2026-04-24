@@ -9,6 +9,7 @@ import {
   UpstreamError,
   ApiInternalError,
   NetworkError,
+  StaticAuthFailedError,
   fromResponseBody,
 } from '../../src/core/backend/http-error.js';
 
@@ -35,5 +36,14 @@ describe('http-error', () => {
       .toBeInstanceOf(UpstreamError);
     expect(fromResponseBody(500, { error: { code: 'INTERNAL', message: 'i', correlationId: 'c' } }, 'a'))
       .toBeInstanceOf(ApiInternalError);
+  });
+
+  it('fromResponseBody routes STATIC_AUTH_FAILED to StaticAuthFailedError', () => {
+    const e = fromResponseBody(401,
+      { error: { code: 'STATIC_AUTH_FAILED', message: 'bad header', correlationId: 'c' } },
+      'nbg-dev');
+    expect(e).toBeInstanceOf(StaticAuthFailedError);
+    expect(e.message).toMatch(/nbg-dev/);
+    expect(e.status).toBe(401);
   });
 });

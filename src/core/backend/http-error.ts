@@ -61,11 +61,20 @@ export class NetworkError extends HttpError {
   }
 }
 
+export class StaticAuthFailedError extends HttpError {
+  constructor(apiBackendName: string) {
+    super(401, `Static auth header invalid for "${apiBackendName}". Re-register: storage-nav remove --name ${apiBackendName} && storage-nav add-api ...`);
+  }
+}
+
 export function fromResponseBody(status: number, body: unknown, apiBackendName: string): HttpError {
   const err = (body as ApiErrorBody | undefined)?.error;
   const code = err?.code;
   const message = err?.message ?? `HTTP ${status}`;
   const cid = err?.correlationId;
+  if (code === 'STATIC_AUTH_FAILED') {
+    return new StaticAuthFailedError(apiBackendName);
+  }
   switch (status) {
     case 401: return new NeedsLoginError(apiBackendName);
     case 403: return new AccessDeniedError(message, cid);
