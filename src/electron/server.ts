@@ -249,6 +249,147 @@ export function createServer(port: number, publicDirOverride?: string): express.
     }
   });
 
+  // API: Download a single blob with Content-Disposition (browser save).
+  app.get("/api/download/:storage/:container", async (req, res) => {
+    try {
+      const store = new CredentialStore();
+      const backend = backendFor(req, store);
+      const blobPath = req.query.blob as string;
+      if (!blobPath) { res.status(400).json({ error: "?blob= query parameter required" }); return; }
+      const handle = await backend.readBlob(req.params.container as string, blobPath);
+      const filename = (blobPath.split("/").pop() || "download").replace(/[\r\n"\\/]+/g, "_");
+      res.setHeader("Content-Type", handle.contentType ?? "application/octet-stream");
+      res.setHeader("Content-Disposition",
+        `attachment; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
+      if (handle.contentLength !== undefined) res.setHeader("Content-Length", String(handle.contentLength));
+      const { pipeline } = await import("node:stream/promises");
+      await pipeline(handle.stream, res);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const status = msg.includes("not found") ? 404 : 500;
+      if (!res.headersSent) res.status(status).json({ error: msg });
+    }
+  });
+
+  // API: Stream a ZIP archive of multiple blobs.
+  // Body: { paths: string[], basePath?: string, archiveName?: string }
+  app.post("/api/download-zip/:storage/:container", express.json(), async (req, res) => {
+    try {
+      const store = new CredentialStore();
+      const backend = backendFor(req, store);
+      const paths: string[] = Array.isArray(req.body?.paths) ? req.body.paths : [];
+      if (paths.length === 0) { res.status(400).json({ error: "paths required" }); return; }
+      const basePath = typeof req.body?.basePath === "string" ? req.body.basePath : undefined;
+      const archive = String(req.body?.archiveName ?? `${req.params.container}.zip`).replace(/[\r\n"\\/]+/g, "_");
+      const container = req.params.container as string;
+
+      const { streamZip, archiveName } = await import("../util/zip-stream.js");
+
+      const seen = new Set<string>();
+      type Entry = { name: string; body: AsyncIterable<Uint8Array> };
+      const items: Entry[] = [];
+      for (const p of paths) {
+        let arc: string;
+        try { arc = archiveName(p, basePath); } catch { continue; }
+        if (seen.has(arc)) continue;
+        seen.add(arc);
+        items.push({
+          name: arc,
+          body: {
+            async *[Symbol.asyncIterator]() {
+              const h = await backend.readBlob(container, p);
+              for await (const chunk of h.stream) {
+                yield chunk instanceof Buffer ? chunk : Buffer.from(chunk as Uint8Array);
+              }
+            },
+          },
+        });
+      }
+
+      res.setHeader("Content-Type", "application/zip");
+      res.setHeader("Content-Disposition",
+        `attachment; filename="${archive}"; filename*=UTF-8''${encodeURIComponent(archive)}`);
+      res.setHeader("Cache-Control", "no-store");
+
+      async function* iter() { for (const e of items) yield e; }
+      const zip = streamZip({ entries: iter() });
+      const { pipeline } = await import("node:stream/promises");
+      await pipeline(zip, res);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!res.headersSent) res.status(500).json({ error: msg });
+      else try { res.destroy(); } catch { /* already closed */ }
+    }
+  });
+
+  // API: Download a single file from a share.
+  app.get("/api/download-file/:storage/:share", async (req, res, next) => {
+    try {
+      const store = new CredentialStore();
+      const backend = backendFor(req, store);
+      const filePath = req.query.path as string;
+      if (!filePath) { res.status(400).json({ error: "?path= query parameter required" }); return; }
+      const handle = await backend.readFile(req.params.share as string, filePath);
+      const filename = (filePath.split("/").pop() || "download").replace(/[\r\n"\\/]+/g, "_");
+      res.setHeader("Content-Type", handle.contentType ?? "application/octet-stream");
+      res.setHeader("Content-Disposition",
+        `attachment; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
+      if (handle.contentLength !== undefined) res.setHeader("Content-Length", String(handle.contentLength));
+      const { pipeline } = await import("node:stream/promises");
+      await pipeline(handle.stream, res);
+    } catch (err) { next(err); }
+  });
+
+  // API: Stream a ZIP of multiple files from a share.
+  app.post("/api/download-file-zip/:storage/:share", express.json(), async (req, res) => {
+    try {
+      const store = new CredentialStore();
+      const backend = backendFor(req, store);
+      const paths: string[] = Array.isArray(req.body?.paths) ? req.body.paths : [];
+      if (paths.length === 0) { res.status(400).json({ error: "paths required" }); return; }
+      const basePath = typeof req.body?.basePath === "string" ? req.body.basePath : undefined;
+      const archive = String(req.body?.archiveName ?? `${req.params.share}.zip`).replace(/[\r\n"\\/]+/g, "_");
+      const share = req.params.share as string;
+
+      const { streamZip, archiveName } = await import("../util/zip-stream.js");
+
+      const seen = new Set<string>();
+      type Entry = { name: string; body: AsyncIterable<Uint8Array> };
+      const items: Entry[] = [];
+      for (const p of paths) {
+        let arc: string;
+        try { arc = archiveName(p, basePath); } catch { continue; }
+        if (seen.has(arc)) continue;
+        seen.add(arc);
+        items.push({
+          name: arc,
+          body: {
+            async *[Symbol.asyncIterator]() {
+              const h = await backend.readFile(share, p);
+              for await (const chunk of h.stream) {
+                yield chunk instanceof Buffer ? chunk : Buffer.from(chunk as Uint8Array);
+              }
+            },
+          },
+        });
+      }
+
+      res.setHeader("Content-Type", "application/zip");
+      res.setHeader("Content-Disposition",
+        `attachment; filename="${archive}"; filename*=UTF-8''${encodeURIComponent(archive)}`);
+      res.setHeader("Cache-Control", "no-store");
+
+      async function* iter() { for (const e of items) yield e; }
+      const zip = streamZip({ entries: iter() });
+      const { pipeline } = await import("node:stream/promises");
+      await pipeline(zip, res);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!res.headersSent) res.status(500).json({ error: msg });
+      else try { res.destroy(); } catch { /* already closed */ }
+    }
+  });
+
   // API: Rename a blob
   app.post("/api/rename/:storage/:container", async (req, res) => {
     try {

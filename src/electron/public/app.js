@@ -55,6 +55,9 @@
   const deleteFolderConfirm = document.getElementById("delete-folder-confirm");
   const containerCtxMenu = document.getElementById("container-context-menu");
   const ctxRefreshContainer = document.getElementById("ctx-refresh-container");
+  const ctxDownload = document.getElementById("ctx-download");
+  const ctxDownloadFolder = document.getElementById("ctx-download-folder");
+  const ctxDownloadContainer = document.getElementById("ctx-download-container");
   const ctxLinkContainer = document.getElementById("ctx-link-container");
   const ctxViewLinks = document.getElementById("ctx-view-links");
   const ctxLinkFolder = document.getElementById("ctx-link-folder");
@@ -1018,6 +1021,107 @@
     }
     containerContextTarget = null;
   });
+
+  // --- Download (single file) ---
+  // Uses the embedded /api/download endpoint which sets Content-Disposition,
+  // so the browser triggers Save As natively. Same code path is used by the
+  // "Download as ZIP" actions below — they POST a path list to the
+  // /api/download-zip endpoint and let the browser save the streamed archive.
+  ctxDownload.addEventListener("click", () => {
+    ctxMenu.classList.add("hidden");
+    if (!contextTarget) return;
+    const url = withAccount(`/api/download/${encodeURIComponent(currentStorage)}/${encodeURIComponent(contextTarget.container)}?blob=${encodeURIComponent(contextTarget.blobName)}`);
+    triggerBrowserDownload(url);
+    contextTarget = null;
+  });
+
+  // --- Download folder as ZIP ---
+  ctxDownloadFolder.addEventListener("click", async () => {
+    folderCtxMenu.classList.add("hidden");
+    if (!folderContextTarget) return;
+    const t = folderContextTarget;
+    folderContextTarget = null;
+    try {
+      const paths = await collectBlobPaths(t.container, t.folderPrefix);
+      if (paths.length === 0) { alert("Folder is empty."); return; }
+      await downloadZip(t.container, paths, t.folderPrefix.replace(/\/$/, ""), `${t.folderName}.zip`);
+    } catch (e) {
+      alert("Download failed: " + e.message);
+    }
+  });
+
+  // --- Download entire container as ZIP ---
+  ctxDownloadContainer.addEventListener("click", async () => {
+    containerCtxMenu.classList.add("hidden");
+    if (!containerContextTarget) return;
+    const t = containerContextTarget;
+    containerContextTarget = null;
+    try {
+      const paths = await collectBlobPaths(t.containerName, "");
+      if (paths.length === 0) { alert("Container is empty."); return; }
+      await downloadZip(t.containerName, paths, "", `${t.containerName}.zip`);
+    } catch (e) {
+      alert("Download failed: " + e.message);
+    }
+  });
+
+  // Walk the listing endpoint paginating through all blobs under `prefix`.
+  // No delimiter — flat listing so we recursively cover the entire subtree.
+  async function collectBlobPaths(container, prefix) {
+    const out = [];
+    let cont = undefined;
+    while (true) {
+      let url = `/api/blobs/${encodeURIComponent(currentStorage)}/${encodeURIComponent(container)}`;
+      const qs = new URLSearchParams();
+      if (prefix) qs.set("prefix", prefix);
+      if (cont) qs.set("continuationToken", cont);
+      if ([...qs].length) url += `?${qs}`;
+      const page = await apiJson(withAccount(url));
+      // apiJson normalises to either an array (legacy) or {items, continuationToken}.
+      // The embedded server returns the raw backend payload; handle both shapes.
+      const items = Array.isArray(page) ? page : page.items || [];
+      for (const it of items) {
+        if (it.isPrefix) continue;
+        if (!it.name || it.name.endsWith("/")) continue;
+        if (it.name.split("/").pop() === ".keep") continue;
+        out.push(it.name);
+      }
+      cont = Array.isArray(page) ? null : (page.continuationToken || null);
+      if (!cont) break;
+    }
+    return out;
+  }
+
+  // POST the path list and stream the response as a Blob for Save As.
+  // The browser holds the bytes in memory while it builds the Blob — for
+  // truly huge archives a service worker or File System Access API would
+  // be needed, but for the typical "download a folder" case this is fine
+  // and crucially the *server* streams (doesn't buffer).
+  async function downloadZip(container, paths, basePath, archiveName) {
+    const url = withAccount(`/api/download-zip/${encodeURIComponent(currentStorage)}/${encodeURIComponent(container)}`);
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paths, basePath: basePath || undefined, archiveName }),
+    });
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      throw new Error(`HTTP ${res.status}: ${txt}`);
+    }
+    const blob = await res.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    triggerBrowserDownload(objectUrl, archiveName);
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+  }
+
+  function triggerBrowserDownload(url, filename) {
+    const a = document.createElement("a");
+    a.href = url;
+    if (filename) a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
 
   // --- Delete ---
   ctxDelete.addEventListener("click", () => {

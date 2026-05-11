@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { pipeline } from 'node:stream/promises';
 import { z } from 'zod';
 import { requireRole } from '../rbac/enforce.js';
 import { ApiError } from '../errors/api-error.js';
@@ -8,8 +9,14 @@ import type { Config } from '../config.js';
 import { parsePage } from '../util/pagination.js';
 import { abortSignalForRequest } from '../util/abort.js';
 import { proxyDownload } from '../streaming/proxy.js';
+import { streamZip, archiveName, type ZipEntry } from '../streaming/zip-stream.js';
 
 const RenameBody = z.object({ newPath: z.string().min(1) });
+const DownloadBody = z.object({
+  paths: z.array(z.string().min(1)).min(1).max(10_000),
+  archiveName: z.string().min(1).max(200).optional(),
+  basePath: z.string().optional(),
+});
 const FILE_PREFIX = '/storages/:account/shares/:share/files';
 
 const paramStr = (req: import('express').Request, key: string): string => String(req.params[key] ?? '');
@@ -31,6 +38,38 @@ export function filesRouter(svc: FileService, discovery: AccountDiscovery, confi
       const path = typeof req.query.path === 'string' ? req.query.path : '';
       const out = await svc.listDir(paramStr(req, 'account'), paramStr(req, 'share'), path, page);
       res.json(out);
+    } catch (err) { next(err); }
+  });
+
+  // Bulk download as ZIP — same shape as the blobs endpoint.
+  r.post(`/storages/:account/shares/:share/files\\:download-zip`, requireRole('Reader'), async (req, res, next) => {
+    try {
+      requireAccount(req);
+      const body = DownloadBody.parse(req.body);
+      const account = paramStr(req, 'account');
+      const share = paramStr(req, 'share');
+      const archive = sanitizeAttachmentName(body.archiveName ?? `${share}.zip`);
+      const signal = abortSignalForRequest(req);
+
+      const seen = new Set<string>();
+      const entries: ZipEntry[] = [];
+      for (const p of body.paths) {
+        const arcName = archiveName(p, body.basePath);
+        if (seen.has(arcName)) continue;
+        seen.add(arcName);
+        entries.push({
+          name: arcName,
+          body: lazyFileStream(() => svc.readFile(account, share, p, signal)),
+        });
+      }
+
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader('Content-Disposition', `attachment; filename="${archive}"; filename*=UTF-8''${encodeURIComponent(archive)}`);
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+
+      const zip = streamZip({ entries: iterEntries(entries) });
+      await pipeline(zip, res);
     } catch (err) { next(err); }
   });
 
@@ -58,12 +97,16 @@ export function filesRouter(svc: FileService, discovery: AccountDiscovery, confi
     } catch (err) { next(err); }
   });
 
-  // Read
+  // Read. `?download=1` forces a Save As dialog (Content-Disposition).
   r.get(`${FILE_PREFIX}/*path`, requireRole('Reader'), async (req, res, next) => {
     try {
       requireAccount(req);
       const path = decodePath(req.params.path);
       const handle = await svc.readFile(paramStr(req, 'account'), paramStr(req, 'share'), path, abortSignalForRequest(req));
+      if (req.query.download === '1' || req.query.download === 'true') {
+        const fname = sanitizeAttachmentName(path.split('/').pop() || 'download');
+        res.setHeader('Content-Disposition', `attachment; filename="${fname}"; filename*=UTF-8''${encodeURIComponent(fname)}`);
+      }
       await proxyDownload(res, handle as never);
     } catch (err) { next(err); }
   });
@@ -111,4 +154,24 @@ export function filesRouter(svc: FileService, discovery: AccountDiscovery, confi
 function decodePath(raw: unknown): string {
   if (Array.isArray(raw)) return raw.map((s) => decodeURIComponent(String(s))).join('/');
   return decodeURIComponent(String(raw ?? ''));
+}
+
+async function* iterEntries(entries: ZipEntry[]): AsyncGenerator<ZipEntry> {
+  for (const e of entries) yield e;
+}
+
+function lazyFileStream(open: () => Promise<{ stream: NodeJS.ReadableStream }>): AsyncIterable<Uint8Array> {
+  return {
+    async *[Symbol.asyncIterator]() {
+      const handle = await open();
+      for await (const chunk of handle.stream) {
+        yield chunk instanceof Buffer ? chunk : Buffer.from(chunk as Uint8Array);
+      }
+    },
+  };
+}
+
+function sanitizeAttachmentName(name: string): string {
+  const cleaned = name.replace(/[\r\n"\\/]+/g, '_').trim();
+  return cleaned.length > 0 ? cleaned : 'download';
 }
