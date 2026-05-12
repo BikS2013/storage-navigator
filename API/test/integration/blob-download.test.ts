@@ -69,6 +69,17 @@ function parseZipEntries(zip: Buffer): { name: string; size: number; crc: number
   return out;
 }
 
+// Given an entry from parseZipEntries, return the actual file bytes by jumping
+// to its local file header and reading `size` bytes after the LFH. Works
+// because the writer uses STORE mode (no compression).
+function readZipEntryBytes(zip: Buffer, entry: { size: number; offset: number }): Buffer {
+  if (zip.readUInt32LE(entry.offset) !== 0x04034b50) throw new Error('bad LFH sig');
+  const nameLen = zip.readUInt16LE(entry.offset + 26);
+  const extraLen = zip.readUInt16LE(entry.offset + 28);
+  const start = entry.offset + 30 + nameLen + extraLen;
+  return zip.subarray(start, start + entry.size);
+}
+
 describe('Blob download — single file (Content-Disposition) + zip stream', () => {
   it('?download=1 sets Content-Disposition: attachment', async () => {
     const app = await appFor('Writer');
@@ -126,7 +137,56 @@ describe('Blob download — single file (Content-Disposition) + zip stream', () 
     expect(b.size).toBe(4);
   });
 
-  it('Writer cannot bypass — but Reader is allowed (RBAC respected)', async () => {
+  it('POST blobs:download-zip with `prefix` recursively includes every descendant blob', async () => {
+    const app = await appFor('Writer');
+    const acc = az.accountName;
+    await request(app).post(`/storages/${acc}/containers`).send({ name: 'dl-nested' });
+    const filesIn: Record<string, string> = {
+      'parent/a.txt': 'AAA',
+      'parent/sub1/b.txt': 'BBBB',
+      'parent/sub1/sub2/c.txt': 'CCCCC',
+      // Sibling tree — must NOT appear in the archive.
+      'other/d.txt': 'DDD',
+    };
+    for (const [path, body] of Object.entries(filesIn)) {
+      await request(app).put(`/storages/${acc}/containers/dl-nested/blobs/${path}`)
+        .set('Content-Type', 'text/plain').send(body);
+    }
+
+    const r = await request(app)
+      .post(`/storages/${acc}/containers/dl-nested/blobs:download-zip`)
+      .send({ prefix: 'parent/', archiveName: 'parent.zip' })
+      .buffer(true)
+      .parse((res, cb) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => cb(null, Buffer.concat(chunks)));
+      });
+
+    expect(r.status).toBe(200);
+    expect(r.headers['content-type']).toMatch(/^application\/zip/);
+    expect(r.headers['content-disposition']).toMatch(/filename="parent.zip"/);
+    // Streaming proof: no Content-Length, response is chunked. Combined with
+    // the iterEntriesFromPrefix generator (which yields one entry at a time
+    // rather than materialising an array) this confirms the enumeration is
+    // not eagerly buffered before zip bytes start flowing.
+    expect(r.headers['content-length']).toBeUndefined();
+    expect(r.headers['transfer-encoding']).toBe('chunked');
+
+    const zip = r.body as Buffer;
+    const entries = parseZipEntries(zip);
+    const names = entries.map((e) => e.name).sort();
+    expect(names).toEqual(['a.txt', 'sub1/b.txt', 'sub1/sub2/c.txt']);
+
+    for (const arcName of names) {
+      const blobPath = `parent/${arcName}`;
+      const entry = entries.find((e) => e.name === arcName)!;
+      expect(entry.size).toBe(filesIn[blobPath].length);
+      expect(readZipEntryBytes(zip, entry).toString('utf8')).toBe(filesIn[blobPath]);
+    }
+  });
+
+it('Writer cannot bypass — but Reader is allowed (RBAC respected)', async () => {
     // Reader has the role required by the route (Reader). The auth toggle
     // middleware permits it. Confirms requireRole('Reader') is wired.
     const app = await appFor('Reader');

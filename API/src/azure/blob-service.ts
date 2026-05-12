@@ -156,6 +156,24 @@ export class BlobService {
     await src.deleteIfExists();
   }
 
+  /**
+   * Yield every descendant blob name under `prefix` in one server-side flat
+   * listing. The Azure SDK pages internally; consumers can pull lazily so the
+   * caller can begin streaming the first zip entry before the enumeration
+   * finishes.
+   */
+  async *iterateBlobsFlat(
+    account: string,
+    container: string,
+    prefix: string,
+    signal?: AbortSignal,
+  ): AsyncGenerator<{ name: string }> {
+    const c = this.container(account, container);
+    for await (const b of c.listBlobsFlat({ prefix, abortSignal: signal })) {
+      yield { name: b.name };
+    }
+  }
+
   /** Delete every blob whose name starts with prefix. Returns count deleted. */
   async deleteFolder(account: string, container: string, prefix: string): Promise<number> {
     if (!prefix || prefix === '/') throw ApiError.badRequest('prefix must be non-empty and not "/"');

@@ -76,6 +76,9 @@ export class DirectBackend implements IStorageBackend {
     const n = await this.blob.deleteFolder(container, prefix);
     return n;
   }
+  async *iterateBlobsFlat(container: string, prefix: string): AsyncGenerator<{ name: string }> {
+    for await (const b of this.blob.iterateBlobsFlat(container, prefix)) yield b;
+  }
 
   // Shares -------------------------------------------------------------
   async listShares(opts: PageOpts = {}) {

@@ -12,11 +12,19 @@ import { proxyDownload } from '../streaming/proxy.js';
 import { streamZip, archiveName, type ZipEntry } from '../streaming/zip-stream.js';
 
 const RenameBody = z.object({ newPath: z.string().min(1) });
-const DownloadBody = z.object({
-  paths: z.array(z.string().min(1)).min(1).max(10_000),
-  archiveName: z.string().min(1).max(200).optional(),
-  basePath: z.string().optional(),
-});
+// Either an explicit `paths` array (caller knows the exact blob names) or a
+// `prefix` (server enumerates every descendant blob lazily) is required. At
+// least one of the two must be set; if both are given, paths wins.
+const DownloadBody = z
+  .object({
+    paths: z.array(z.string().min(1)).max(10_000).optional(),
+    prefix: z.string().min(1).optional(),
+    archiveName: z.string().min(1).max(200).optional(),
+    basePath: z.string().optional(),
+  })
+  .refine((v) => (v.paths && v.paths.length > 0) || (typeof v.prefix === 'string' && v.prefix.length > 0), {
+    message: 'either `paths` (non-empty) or `prefix` must be provided',
+  });
 
 const BLOB_PREFIX = '/storages/:account/containers/:container/blobs';
 
@@ -64,26 +72,17 @@ export function blobsRouter(svc: BlobService, discovery: AccountDiscovery, confi
       const archive = sanitizeAttachmentName(body.archiveName ?? `${container}.zip`);
       const signal = abortSignalForRequest(req);
 
-      const seen = new Set<string>();
-      const entries: ZipEntry[] = [];
-      for (const p of body.paths) {
-        const arcName = archiveName(p, body.basePath);
-        if (seen.has(arcName)) continue;
-        seen.add(arcName);
-        entries.push({
-          name: arcName,
-          // Lazy stream — only opens the blob when this entry is reached.
-          body: lazyBlobStream(() => svc.readBlob(account, container, p, undefined, signal)),
-        });
-      }
-
       res.setHeader('Content-Type', 'application/zip');
       res.setHeader('Content-Disposition', `attachment; filename="${archive}"; filename*=UTF-8''${encodeURIComponent(archive)}`);
       // Streaming — no Content-Length, must disable buffering.
       res.setHeader('Cache-Control', 'no-store');
       res.setHeader('X-Content-Type-Options', 'nosniff');
 
-      const zip = streamZip({ entries: iterEntries(entries) });
+      const entries = body.paths && body.paths.length > 0
+        ? iterEntriesFromPaths(svc, account, container, body.paths, body.basePath, signal)
+        : iterEntriesFromPrefix(svc, account, container, body.prefix as string, body.basePath, signal);
+
+      const zip = streamZip({ entries });
       await pipeline(zip, res);
     } catch (err) { next(err); }
   });
@@ -177,8 +176,55 @@ function decodePath(raw: unknown): string {
   return decodeURIComponent(String(raw ?? ''));
 }
 
-async function* iterEntries(entries: ZipEntry[]): AsyncGenerator<ZipEntry> {
-  for (const e of entries) yield e;
+async function* iterEntriesFromPaths(
+  svc: BlobService,
+  account: string,
+  container: string,
+  paths: string[],
+  basePath: string | undefined,
+  signal: AbortSignal | undefined,
+): AsyncGenerator<ZipEntry> {
+  const seen = new Set<string>();
+  for (const p of paths) {
+    let arcName: string;
+    try { arcName = archiveName(p, basePath); } catch { continue; }
+    if (!arcName || seen.has(arcName)) continue;
+    seen.add(arcName);
+    yield {
+      name: arcName,
+      body: lazyBlobStream(() => svc.readBlob(account, container, p, undefined, signal)),
+    };
+  }
+}
+
+// Walks every descendant under `prefix` and yields one ZipEntry at a time —
+// no array materialised — so the first zip bytes can be emitted before the
+// enumeration finishes. Each entry's body is also lazy: the blob isn't opened
+// until streamZip pulls that entry.
+async function* iterEntriesFromPrefix(
+  svc: BlobService,
+  account: string,
+  container: string,
+  prefix: string,
+  basePath: string | undefined,
+  signal: AbortSignal | undefined,
+): AsyncGenerator<ZipEntry> {
+  const normalizedPrefix = prefix.endsWith('/') ? prefix : prefix + '/';
+  // Default to stripping the selected folder itself so paths inside the zip
+  // become relative to it (parent/sub/leaf.txt -> sub/leaf.txt when downloading
+  // parent/). Caller can override with an explicit basePath.
+  const baseToStrip = basePath ?? normalizedPrefix;
+  const seen = new Set<string>();
+  for await (const item of svc.iterateBlobsFlat(account, container, normalizedPrefix, signal)) {
+    let arcName: string;
+    try { arcName = archiveName(item.name, baseToStrip); } catch { continue; }
+    if (!arcName || seen.has(arcName)) continue;
+    seen.add(arcName);
+    yield {
+      name: arcName,
+      body: lazyBlobStream(() => svc.readBlob(account, container, item.name, undefined, signal)),
+    };
+  }
 }
 
 function lazyBlobStream(open: () => Promise<{ stream: NodeJS.ReadableStream }>): AsyncIterable<Uint8Array> {

@@ -12,11 +12,19 @@ import { proxyDownload } from '../streaming/proxy.js';
 import { streamZip, archiveName, type ZipEntry } from '../streaming/zip-stream.js';
 
 const RenameBody = z.object({ newPath: z.string().min(1) });
-const DownloadBody = z.object({
-  paths: z.array(z.string().min(1)).min(1).max(10_000),
-  archiveName: z.string().min(1).max(200).optional(),
-  basePath: z.string().optional(),
-});
+// Either `paths` (explicit caller list) or `prefix` (server-side recursive
+// enumeration of a directory subtree). At least one must be set; paths wins
+// when both are provided.
+const DownloadBody = z
+  .object({
+    paths: z.array(z.string().min(1)).max(10_000).optional(),
+    prefix: z.string().min(1).optional(),
+    archiveName: z.string().min(1).max(200).optional(),
+    basePath: z.string().optional(),
+  })
+  .refine((v) => (v.paths && v.paths.length > 0) || (typeof v.prefix === 'string' && v.prefix.length > 0), {
+    message: 'either `paths` (non-empty) or `prefix` must be provided',
+  });
 const FILE_PREFIX = '/storages/:account/shares/:share/files';
 
 const paramStr = (req: import('express').Request, key: string): string => String(req.params[key] ?? '');
@@ -51,24 +59,16 @@ export function filesRouter(svc: FileService, discovery: AccountDiscovery, confi
       const archive = sanitizeAttachmentName(body.archiveName ?? `${share}.zip`);
       const signal = abortSignalForRequest(req);
 
-      const seen = new Set<string>();
-      const entries: ZipEntry[] = [];
-      for (const p of body.paths) {
-        const arcName = archiveName(p, body.basePath);
-        if (seen.has(arcName)) continue;
-        seen.add(arcName);
-        entries.push({
-          name: arcName,
-          body: lazyFileStream(() => svc.readFile(account, share, p, signal)),
-        });
-      }
-
       res.setHeader('Content-Type', 'application/zip');
       res.setHeader('Content-Disposition', `attachment; filename="${archive}"; filename*=UTF-8''${encodeURIComponent(archive)}`);
       res.setHeader('Cache-Control', 'no-store');
       res.setHeader('X-Content-Type-Options', 'nosniff');
 
-      const zip = streamZip({ entries: iterEntries(entries) });
+      const entries = body.paths && body.paths.length > 0
+        ? iterEntriesFromPaths(svc, account, share, body.paths, body.basePath, signal)
+        : iterEntriesFromPrefix(svc, account, share, body.prefix as string, body.basePath, signal);
+
+      const zip = streamZip({ entries });
       await pipeline(zip, res);
     } catch (err) { next(err); }
   });
@@ -156,8 +156,51 @@ function decodePath(raw: unknown): string {
   return decodeURIComponent(String(raw ?? ''));
 }
 
-async function* iterEntries(entries: ZipEntry[]): AsyncGenerator<ZipEntry> {
-  for (const e of entries) yield e;
+async function* iterEntriesFromPaths(
+  svc: FileService,
+  account: string,
+  share: string,
+  paths: string[],
+  basePath: string | undefined,
+  signal: AbortSignal | undefined,
+): AsyncGenerator<ZipEntry> {
+  const seen = new Set<string>();
+  for (const p of paths) {
+    let arcName: string;
+    try { arcName = archiveName(p, basePath); } catch { continue; }
+    if (!arcName || seen.has(arcName)) continue;
+    seen.add(arcName);
+    yield {
+      name: arcName,
+      body: lazyFileStream(() => svc.readFile(account, share, p, signal)),
+    };
+  }
+}
+
+// Lazily walk every file under `prefix` (which is a directory path inside the
+// share) and yield one ZipEntry at a time. Paths inside the zip default to
+// being relative to the selected directory.
+async function* iterEntriesFromPrefix(
+  svc: FileService,
+  account: string,
+  share: string,
+  prefix: string,
+  basePath: string | undefined,
+  signal: AbortSignal | undefined,
+): AsyncGenerator<ZipEntry> {
+  const normalizedPrefix = prefix.replace(/\/+$/, '');
+  const baseToStrip = basePath ?? (normalizedPrefix ? normalizedPrefix + '/' : '');
+  const seen = new Set<string>();
+  for await (const item of svc.iterateFilesFlat(account, share, normalizedPrefix, signal)) {
+    let arcName: string;
+    try { arcName = archiveName(item.name, baseToStrip); } catch { continue; }
+    if (!arcName || seen.has(arcName)) continue;
+    seen.add(arcName);
+    yield {
+      name: arcName,
+      body: lazyFileStream(() => svc.readFile(account, share, item.name, signal)),
+    };
+  }
 }
 
 function lazyFileStream(open: () => Promise<{ stream: NodeJS.ReadableStream }>): AsyncIterable<Uint8Array> {

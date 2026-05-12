@@ -1042,9 +1042,11 @@
     const t = folderContextTarget;
     folderContextTarget = null;
     try {
-      const paths = await collectBlobPaths(t.container, t.folderPrefix);
-      if (paths.length === 0) { alert("Folder is empty."); return; }
-      await downloadZip(t.container, paths, t.folderPrefix.replace(/\/$/, ""), `${t.folderName}.zip`);
+      // Hand the prefix to the server — it walks every descendant blob in one
+      // flat listing and streams them into the zip. The previous approach
+      // listed hierarchically on the client and dropped subfolder contents
+      // entirely because the listing came back with `isPrefix` placeholders.
+      await downloadZipByPrefix(t.container, t.folderPrefix, `${t.folderName}.zip`);
     } catch (e) {
       alert("Download failed: " + e.message);
     }
@@ -1057,46 +1059,36 @@
     const t = containerContextTarget;
     containerContextTarget = null;
     try {
-      const paths = await collectBlobPaths(t.containerName, "");
-      if (paths.length === 0) { alert("Container is empty."); return; }
-      await downloadZip(t.containerName, paths, "", `${t.containerName}.zip`);
+      // Empty prefix = whole container. Server walks every blob.
+      await downloadZipByPrefix(t.containerName, "", `${t.containerName}.zip`);
     } catch (e) {
       alert("Download failed: " + e.message);
     }
   });
 
-  // Walk the listing endpoint paginating through all blobs under `prefix`.
-  // No delimiter — flat listing so we recursively cover the entire subtree.
-  async function collectBlobPaths(container, prefix) {
-    const out = [];
-    let cont = undefined;
-    while (true) {
-      let url = `/api/blobs/${encodeURIComponent(currentStorage)}/${encodeURIComponent(container)}`;
-      const qs = new URLSearchParams();
-      if (prefix) qs.set("prefix", prefix);
-      if (cont) qs.set("continuationToken", cont);
-      if ([...qs].length) url += `?${qs}`;
-      const page = await apiJson(withAccount(url));
-      // apiJson normalises to either an array (legacy) or {items, continuationToken}.
-      // The embedded server returns the raw backend payload; handle both shapes.
-      const items = Array.isArray(page) ? page : page.items || [];
-      for (const it of items) {
-        if (it.isPrefix) continue;
-        if (!it.name || it.name.endsWith("/")) continue;
-        if (it.name.split("/").pop() === ".keep") continue;
-        out.push(it.name);
-      }
-      cont = Array.isArray(page) ? null : (page.continuationToken || null);
-      if (!cont) break;
+  // Server-side recursive enumeration. Strictly preferred over the legacy
+  // client-side path collection — see the comment in ctxDownloadFolder.
+  async function downloadZipByPrefix(container, prefix, archiveName) {
+    const url = withAccount(`/api/download-zip/${encodeURIComponent(currentStorage)}/${encodeURIComponent(container)}`);
+    const normalized = prefix && !prefix.endsWith("/") ? prefix + "/" : prefix;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prefix: normalized || undefined, archiveName }),
+    });
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      throw new Error(`HTTP ${res.status}: ${txt}`);
     }
-    return out;
+    const blob = await res.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    triggerBrowserDownload(objectUrl, archiveName);
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
   }
 
-  // POST the path list and stream the response as a Blob for Save As.
-  // The browser holds the bytes in memory while it builds the Blob — for
-  // truly huge archives a service worker or File System Access API would
-  // be needed, but for the typical "download a folder" case this is fine
-  // and crucially the *server* streams (doesn't buffer).
+  // Retained for any future callers that already have a known path list (eg
+  // multi-select of explicit files). Not used by folder/container downloads
+  // anymore — those go through downloadZipByPrefix so the server can recurse.
   async function downloadZip(container, paths, basePath, archiveName) {
     const url = withAccount(`/api/download-zip/${encodeURIComponent(currentStorage)}/${encodeURIComponent(container)}`);
     const res = await fetch(url, {
