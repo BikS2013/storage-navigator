@@ -164,6 +164,21 @@ export class ApiBackend implements IStorageBackend {
     });
   }
 
+  async *iterateBlobsFlat(container: string, prefix: string): AsyncGenerator<{ name: string }> {
+    // Page through the API's flat listing (delimiter omitted) one continuation
+    // token at a time so the consumer can start streaming the first entry
+    // without waiting for the entire walk to complete.
+    let cont: string | undefined = undefined;
+    do {
+      const page: Page<BlobItem> = await this.listBlobs(container, { prefix, continuationToken: cont });
+      for (const it of page.items) {
+        if (it.isPrefix) continue;
+        yield { name: it.name };
+      }
+      cont = page.continuationToken ?? undefined;
+    } while (cont);
+  }
+
   async deleteFolder(container: string, prefix: string): Promise<number> {
     const r = await this.json<{ deleted: number }>(
       `/storages/${this.account}/containers/${encodeURIComponent(container)}/blobs?prefix=${encodeURIComponent(prefix)}&confirm=true`,

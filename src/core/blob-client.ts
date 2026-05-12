@@ -89,6 +89,20 @@ export class BlobClient {
     return items;
   }
 
+  /**
+   * Lazily yield every blob whose name starts with `prefix` (flat listing,
+   * no hierarchy). Equivalent to `listBlobsFlat` but streams one name at a
+   * time so callers feeding a zip writer don't have to buffer the entire
+   * descendant list before emitting bytes.
+   */
+  async *iterateBlobsFlat(containerName: string, prefix?: string): AsyncGenerator<{ name: string }> {
+    const containerClient = this.serviceClient.getContainerClient(containerName);
+    const opts = prefix ? { prefix } : undefined;
+    for await (const b of containerClient.listBlobsFlat(opts)) {
+      yield { name: b.name };
+    }
+  }
+
   /** List ALL blobs in a container recursively (flat list, no hierarchy) */
   async listBlobsFlat(containerName: string): Promise<BlobItem[]> {
     const containerClient = this.serviceClient.getContainerClient(containerName);

@@ -278,32 +278,53 @@ export function createServer(port: number, publicDirOverride?: string): express.
       const store = new CredentialStore();
       const backend = backendFor(req, store);
       const paths: string[] = Array.isArray(req.body?.paths) ? req.body.paths : [];
-      if (paths.length === 0) { res.status(400).json({ error: "paths required" }); return; }
+      const prefix: string | undefined = typeof req.body?.prefix === "string" && req.body.prefix.length > 0
+        ? req.body.prefix
+        : undefined;
+      if (paths.length === 0 && !prefix) { res.status(400).json({ error: "paths or prefix required" }); return; }
       const basePath = typeof req.body?.basePath === "string" ? req.body.basePath : undefined;
       const archive = String(req.body?.archiveName ?? `${req.params.container}.zip`).replace(/[\r\n"\\/]+/g, "_");
       const container = req.params.container as string;
 
       const { streamZip, archiveName } = await import("../util/zip-stream.js");
 
-      const seen = new Set<string>();
       type Entry = { name: string; body: AsyncIterable<Uint8Array> };
-      const items: Entry[] = [];
-      for (const p of paths) {
-        let arc: string;
-        try { arc = archiveName(p, basePath); } catch { continue; }
-        if (seen.has(arc)) continue;
-        seen.add(arc);
-        items.push({
-          name: arc,
-          body: {
-            async *[Symbol.asyncIterator]() {
-              const h = await backend.readBlob(container, p);
-              for await (const chunk of h.stream) {
-                yield chunk instanceof Buffer ? chunk : Buffer.from(chunk as Uint8Array);
-              }
-            },
-          },
-        });
+
+      const bodyFor = (blobPath: string): AsyncIterable<Uint8Array> => ({
+        async *[Symbol.asyncIterator]() {
+          const h = await backend.readBlob(container, blobPath);
+          for await (const chunk of h.stream) {
+            yield chunk instanceof Buffer ? chunk : Buffer.from(chunk as Uint8Array);
+          }
+        },
+      });
+
+      async function* iterFromPaths(): AsyncGenerator<Entry> {
+        const seen = new Set<string>();
+        for (const p of paths) {
+          let arc: string;
+          try { arc = archiveName(p, basePath); } catch { continue; }
+          if (!arc || seen.has(arc)) continue;
+          seen.add(arc);
+          yield { name: arc, body: bodyFor(p) };
+        }
+      }
+
+      // Lazy descendant walk: each blob name is pulled one at a time from the
+      // backend (Azure SDK / API pagination) and immediately fed into the zip
+      // writer so the response starts streaming without buffering the full
+      // tree.
+      async function* iterFromPrefix(): AsyncGenerator<Entry> {
+        const normalized = prefix!.endsWith("/") ? prefix! : prefix! + "/";
+        const baseToStrip = basePath ?? normalized;
+        const seen = new Set<string>();
+        for await (const item of backend.iterateBlobsFlat(container, normalized)) {
+          let arc: string;
+          try { arc = archiveName(item.name, baseToStrip); } catch { continue; }
+          if (!arc || seen.has(arc)) continue;
+          seen.add(arc);
+          yield { name: arc, body: bodyFor(item.name) };
+        }
       }
 
       res.setHeader("Content-Type", "application/zip");
@@ -311,8 +332,8 @@ export function createServer(port: number, publicDirOverride?: string): express.
         `attachment; filename="${archive}"; filename*=UTF-8''${encodeURIComponent(archive)}`);
       res.setHeader("Cache-Control", "no-store");
 
-      async function* iter() { for (const e of items) yield e; }
-      const zip = streamZip({ entries: iter() });
+      const entries = paths.length > 0 ? iterFromPaths() : iterFromPrefix();
+      const zip = streamZip({ entries });
       const { pipeline } = await import("node:stream/promises");
       await pipeline(zip, res);
     } catch (err: unknown) {

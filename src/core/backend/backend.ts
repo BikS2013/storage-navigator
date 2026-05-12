@@ -35,6 +35,13 @@ export interface IStorageBackend {
   deleteBlob(container: string, path: string): Promise<void>;
   renameBlob(container: string, fromPath: string, toPath: string): Promise<void>;
   deleteFolder(container: string, prefix: string): Promise<number>;
+  /**
+   * Recursively walk every descendant blob under `prefix` (flat listing — no
+   * delimiter). Implementations must yield lazily so the caller can begin
+   * streaming the first result without materialising the entire tree in
+   * memory. Used by the bulk-download / ZIP folder pipeline.
+   */
+  iterateBlobsFlat(container: string, prefix: string): AsyncIterable<{ name: string }>;
 
   // file shares
   listShares(opts?: PageOpts): Promise<Page<ShareInfo>>;

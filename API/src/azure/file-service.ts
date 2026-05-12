@@ -142,6 +142,32 @@ export class FileService {
     await src.rename(toPath);
   }
 
+  /**
+   * Walk every file under `path` (recursively across nested directories) and
+   * yield each one lazily. Unlike blob storage, Azure Files has real
+   * directories so a recursive traversal is required.
+   */
+  async *iterateFilesFlat(
+    account: string,
+    share: string,
+    path: string,
+    signal?: AbortSignal,
+  ): AsyncGenerator<{ name: string }> {
+    const stack: string[] = [path.replace(/\/+$/, '')];
+    while (stack.length > 0) {
+      const cur = stack.pop() as string;
+      const dir = this.dir(account, share, cur);
+      for await (const item of dir.listFilesAndDirectories({ abortSignal: signal })) {
+        const child = cur ? `${cur}/${item.name}` : item.name;
+        if (item.kind === 'directory') {
+          stack.push(child);
+        } else {
+          yield { name: child };
+        }
+      }
+    }
+  }
+
   async deleteFolder(account: string, share: string, path: string): Promise<number> {
     if (!path || path === '/') throw ApiError.badRequest('path must be non-empty and not "/"');
     let count = 0;
