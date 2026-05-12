@@ -4,12 +4,13 @@
  * This file is invoked as: electron <this-file> [--port <port>]
  * It starts an Express server and opens a BrowserWindow pointing at it.
  */
-import { app, BrowserWindow, ipcMain, shell, safeStorage } from "electron";
+import { app, BrowserWindow, ipcMain, shell, safeStorage, dialog, type IpcMainInvokeEvent } from "electron";
 import * as path from "path";
 import { createServer } from "./server.js";
 import { generatePkce, buildAuthorizeUrl, exchangeCode } from "../core/backend/auth/oidc-client.js";
 import { startLoopback } from "./oidc-loopback.js";
 import { TokenStore } from "../core/backend/auth/token-store.js";
+import { runZipDownload } from "./zip-download.js";
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -52,6 +53,88 @@ ipcMain.handle('oidc:login', async (_event, args: { name: string; issuer: string
   return { ok: true };
 });
 
+// ----------------------------------------------------------------------------
+// download-zip IPC — renderer asks main to stream the archive straight to
+// disk via a native save dialog. Streaming through main keeps the renderer
+// out of the heap-bloat path for big archives and lets us use the OS save-as
+// picker instead of the browser's blob-save fallback.
+// ----------------------------------------------------------------------------
+
+type DownloadZipPayload = {
+  /** Either a fully-qualified URL or a path that we resolve against the
+   *  embedded server's origin. */
+  url?: string;
+  urlPath?: string;
+  body: unknown;
+  headers?: Record<string, string>;
+  /** Default filename for the save dialog. */
+  archiveName: string;
+  /** Caller-supplied id so renderer can correlate progress events and cancel. */
+  requestId: string;
+};
+
+const pendingDownloads = new Map<string, AbortController>();
+
+function resolveDownloadUrl(payload: DownloadZipPayload): string {
+  if (payload.url) return payload.url;
+  const p = payload.urlPath ?? "";
+  if (!p.startsWith("/")) throw new Error("download-zip: url or urlPath required");
+  return `http://localhost:${port}${p}`;
+}
+
+ipcMain.handle('download-zip:start', async (event: IpcMainInvokeEvent, payload: DownloadZipPayload) => {
+  if (!payload || typeof payload !== "object") throw new Error("invalid payload");
+  if (!payload.requestId) throw new Error("requestId required");
+  if (pendingDownloads.has(payload.requestId)) {
+    throw new Error(`download already in flight for requestId=${payload.requestId}`);
+  }
+
+  const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+  const safeName = payload.archiveName.replace(/[\r\n"\\/]+/g, "_") || "download.zip";
+  const pick = await dialog.showSaveDialog(win as BrowserWindow, {
+    title: "Save archive as",
+    defaultPath: safeName,
+    filters: [{ name: "ZIP archive", extensions: ["zip"] }],
+  });
+  if (pick.canceled || !pick.filePath) return { cancelled: true } as const;
+
+  const controller = new AbortController();
+  pendingDownloads.set(payload.requestId, controller);
+  try {
+    const result = await runZipDownload({
+      url: resolveDownloadUrl(payload),
+      body: payload.body,
+      headers: payload.headers,
+      savePath: pick.filePath,
+      signal: controller.signal,
+      onProgress: (bytesWritten) => {
+        // Best-effort — silently drop if the webContents is already gone
+        // (window closed mid-download), since the awaited pipeline will
+        // settle and clean up regardless.
+        if (event.sender.isDestroyed()) return;
+        event.sender.send('download-zip:progress', {
+          requestId: payload.requestId,
+          bytesWritten,
+        });
+      },
+    });
+    return { ok: true, path: pick.filePath, bytesWritten: result.bytesWritten } as const;
+  } catch (err) {
+    if (controller.signal.aborted) return { cancelled: true } as const;
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: message } as const;
+  } finally {
+    pendingDownloads.delete(payload.requestId);
+  }
+});
+
+ipcMain.handle('download-zip:cancel', async (_event, payload: { requestId: string }) => {
+  const c = pendingDownloads.get(payload?.requestId);
+  if (!c) return { cancelled: false } as const;
+  c.abort();
+  return { cancelled: true } as const;
+});
+
 // Set app name so macOS shows "Storage Navigator" in the app switcher/menu bar
 app.name = "Storage Navigator";
 
@@ -77,6 +160,12 @@ app.whenReady().then(() => {
     app.dock.setIcon(iconPath);
   }
 
+  // Preload script — exposes the allowlisted IPC surface on
+  // `window.electron`. Resolved from the project root the same way as
+  // publicDir, since the bundled main process runs from the project root
+  // (.electron-main.mjs in launch.ts).
+  const preloadPath = path.join(process.cwd(), "src", "electron", "preload.cjs");
+
   const win = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -86,6 +175,7 @@ app.whenReady().then(() => {
       nodeIntegration: false,
       contextIsolation: true,
       plugins: true,
+      preload: preloadPath,
     },
   });
 
