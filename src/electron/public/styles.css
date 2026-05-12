@@ -482,3 +482,58 @@ header h1 { font-size: 14px; font-weight: 600; color: var(--text-accent); }
 .shares-tree {
   margin-top: 8px;
 }
+
+/* Download-zip progress indicator — small modal-like overlay anchored at
+   the bottom-right corner. Stays out of the way of the file tree but is
+   clearly visible while the archive streams. */
+.zip-dl-indicator {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 9999;
+}
+.zip-dl-indicator.hidden { display: none; }
+.zip-dl-box {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--panel-bg, #1e1e1e);
+  color: var(--text-color, #e0e0e0);
+  border: 1px solid var(--border, #444);
+  border-radius: 8px;
+  padding: 12px 16px;
+  min-width: 280px;
+  max-width: 480px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+}
+.zip-dl-spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--text-dim, #888);
+  border-top-color: var(--btn-primary, #4a9eff);
+  border-radius: 50%;
+  animation: zip-dl-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes zip-dl-spin { to { transform: rotate(360deg); } }
+.zip-dl-text { flex: 1; min-width: 0; }
+.zip-dl-label { font-size: 13px; font-weight: 600; }
+.zip-dl-detail {
+  font-size: 12px;
+  color: var(--text-dim, #888);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zip-dl-cancel {
+  background: transparent;
+  color: var(--text-color, #e0e0e0);
+  border: 1px solid var(--border, #444);
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.zip-dl-cancel:hover { background: var(--btn-bg, #2a2a2a); }

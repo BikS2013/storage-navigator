@@ -1066,24 +1066,19 @@
     }
   });
 
-  // Server-side recursive enumeration. Strictly preferred over the legacy
-  // client-side path collection — see the comment in ctxDownloadFolder.
+  // Server-side recursive enumeration, routed through zip-download-ui.js so
+  // the UX includes a progress indicator and (under Electron) a native
+  // save-as dialog with the archive streamed straight to disk. The
+  // controller picks the right transport based on window.electron.
   async function downloadZipByPrefix(container, prefix, archiveName) {
-    const url = withAccount(`/api/download-zip/${encodeURIComponent(currentStorage)}/${encodeURIComponent(container)}`);
-    const normalized = prefix && !prefix.endsWith("/") ? prefix + "/" : prefix;
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prefix: normalized || undefined, archiveName }),
-    });
-    if (!res.ok) {
-      const txt = await res.text().catch(() => "");
-      throw new Error(`HTTP ${res.status}: ${txt}`);
+    const urlPath = withAccount(`/api/download-zip/${encodeURIComponent(currentStorage)}/${encodeURIComponent(container)}`);
+    if (!window.zipDownload || typeof window.zipDownload.downloadZipByPrefix !== "function") {
+      throw new Error("zip-download-ui not loaded");
     }
-    const blob = await res.blob();
-    const objectUrl = URL.createObjectURL(blob);
-    triggerBrowserDownload(objectUrl, archiveName);
-    setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+    const r = await window.zipDownload.downloadZipByPrefix({ urlPath, prefix, archiveName });
+    if (r && r.cancelled) return; // user backed out — silent
+    if (r && r.ok) return;
+    throw new Error((r && r.error) || "Download failed");
   }
 
   // Retained for any future callers that already have a known path list (eg
