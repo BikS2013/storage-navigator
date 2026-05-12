@@ -1,4 +1,5 @@
 import { Router, type Request } from 'express';
+import { pipeline } from 'node:stream/promises';
 import { z } from 'zod';
 import { requireRole } from '../rbac/enforce.js';
 import { ApiError } from '../errors/api-error.js';
@@ -8,8 +9,14 @@ import type { Config } from '../config.js';
 import { parsePage } from '../util/pagination.js';
 import { abortSignalForRequest } from '../util/abort.js';
 import { proxyDownload } from '../streaming/proxy.js';
+import { streamZip, archiveName, type ZipEntry } from '../streaming/zip-stream.js';
 
 const RenameBody = z.object({ newPath: z.string().min(1) });
+const DownloadBody = z.object({
+  paths: z.array(z.string().min(1)).min(1).max(10_000),
+  archiveName: z.string().min(1).max(200).optional(),
+  basePath: z.string().optional(),
+});
 
 const BLOB_PREFIX = '/storages/:account/containers/:container/blobs';
 
@@ -46,6 +53,41 @@ export function blobsRouter(svc: BlobService, discovery: AccountDiscovery, confi
     } catch (err) { next(err); }
   });
 
+  // Bulk download as ZIP. POST avoids 8KB URL limits on the path list.
+  // Streams a STORE-mode archive — no full-archive buffering on the server.
+  r.post(`/storages/:account/containers/:container/blobs\\:download-zip`, requireRole('Reader'), async (req, res, next) => {
+    try {
+      requireAccount(req);
+      const body = DownloadBody.parse(req.body);
+      const account = paramStr(req, 'account');
+      const container = paramStr(req, 'container');
+      const archive = sanitizeAttachmentName(body.archiveName ?? `${container}.zip`);
+      const signal = abortSignalForRequest(req);
+
+      const seen = new Set<string>();
+      const entries: ZipEntry[] = [];
+      for (const p of body.paths) {
+        const arcName = archiveName(p, body.basePath);
+        if (seen.has(arcName)) continue;
+        seen.add(arcName);
+        entries.push({
+          name: arcName,
+          // Lazy stream — only opens the blob when this entry is reached.
+          body: lazyBlobStream(() => svc.readBlob(account, container, p, undefined, signal)),
+        });
+      }
+
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader('Content-Disposition', `attachment; filename="${archive}"; filename*=UTF-8''${encodeURIComponent(archive)}`);
+      // Streaming — no Content-Length, must disable buffering.
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+
+      const zip = streamZip({ entries: iterEntries(entries) });
+      await pipeline(zip, res);
+    } catch (err) { next(err); }
+  });
+
   // Delete-folder (must come before /*path to avoid eating the route)
   r.delete(`${BLOB_PREFIX}`, requireRole('Admin'), async (req, res, next) => {
     try {
@@ -72,13 +114,18 @@ export function blobsRouter(svc: BlobService, discovery: AccountDiscovery, confi
     } catch (err) { next(err); }
   });
 
-  // Read (GET path) — wildcard
+  // Read (GET path) — wildcard. `?download=1` forces Content-Disposition so the
+  // browser saves the file instead of trying to render it inline.
   r.get(`${BLOB_PREFIX}/*path`, requireRole('Reader'), async (req, res, next) => {
     try {
       requireAccount(req);
       const path = decodePath(req.params.path);
       const range = parseRangeHeader(req.header('range'));
       const handle = await svc.readBlob(paramStr(req, 'account'), paramStr(req, 'container'), path, range, abortSignalForRequest(req));
+      if (req.query.download === '1' || req.query.download === 'true') {
+        const fname = sanitizeAttachmentName(path.split('/').pop() || 'download');
+        res.setHeader('Content-Disposition', `attachment; filename="${fname}"; filename*=UTF-8''${encodeURIComponent(fname)}`);
+      }
       await proxyDownload(res, handle);
     } catch (err) { next(err); }
   });
@@ -128,6 +175,29 @@ export function blobsRouter(svc: BlobService, discovery: AccountDiscovery, confi
 function decodePath(raw: unknown): string {
   if (Array.isArray(raw)) return raw.map((s) => decodeURIComponent(String(s))).join('/');
   return decodeURIComponent(String(raw ?? ''));
+}
+
+async function* iterEntries(entries: ZipEntry[]): AsyncGenerator<ZipEntry> {
+  for (const e of entries) yield e;
+}
+
+function lazyBlobStream(open: () => Promise<{ stream: NodeJS.ReadableStream }>): AsyncIterable<Uint8Array> {
+  return {
+    async *[Symbol.asyncIterator]() {
+      const handle = await open();
+      for await (const chunk of handle.stream) {
+        yield chunk instanceof Buffer ? chunk : Buffer.from(chunk as Uint8Array);
+      }
+    },
+  };
+}
+
+// Strip CR/LF/quote/path-sep characters so the filename is safe to drop into
+// a `Content-Disposition: attachment; filename="..."` header without
+// escaping or smuggling.
+function sanitizeAttachmentName(name: string): string {
+  const cleaned = name.replace(/[\r\n"\\/]+/g, '_').trim();
+  return cleaned.length > 0 ? cleaned : 'download';
 }
 
 function parseRangeHeader(h?: string): { offset: number; count?: number } | undefined {
