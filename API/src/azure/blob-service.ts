@@ -129,7 +129,7 @@ export class BlobService {
 
   async uploadBlob(
     account: string, container: string, path: string,
-    body: Readable, contentType: string | undefined, opts: { blockSizeMb: number },
+    body: Readable, contentType: string | undefined, opts: { blockSizeMb: number; ifMatch?: string },
     signal?: AbortSignal,
   ): Promise<{ etag?: string; lastModified?: string }> {
     const blob = this.container(account, container).getBlockBlobClient(path);
@@ -137,9 +137,14 @@ export class BlobService {
     const uploadOpts: BlockBlobUploadStreamOptions = {
       blobHTTPHeaders: contentType ? { blobContentType: contentType } : undefined,
       abortSignal: signal,
+      conditions: opts.ifMatch ? { ifMatch: opts.ifMatch } : undefined,
     };
-    const r = await blob.uploadStream(body, blockSize, 4, uploadOpts);
-    return { etag: r.etag ?? undefined, lastModified: r.lastModified?.toISOString() };
+    try {
+      const r = await blob.uploadStream(body, blockSize, 4, uploadOpts);
+      return { etag: r.etag ?? undefined, lastModified: r.lastModified?.toISOString() };
+    } catch (err) {
+      throw mapStorageError(err, () => `Blob '${path}' not found in container '${container}'`);
+    }
   }
 
   async deleteBlob(account: string, container: string, path: string): Promise<void> {
@@ -191,7 +196,7 @@ function mapStorageError(err: unknown, notFoundMessage: () => string): ApiError 
   const status = (err as { statusCode?: number }).statusCode;
   if (status === 404) return ApiError.notFound(notFoundMessage());
   if (status === 409) return ApiError.conflict('Storage conflict');
-  if (status === 412) return ApiError.conflict('Precondition failed');
+  if (status === 412) return ApiError.preconditionFailed('Blob ETag does not match (concurrent modification)');
   if (status === 403) return ApiError.upstream('Storage refused access (check role assignments)');
   return ApiError.upstream(`Storage error${status ? ` (${status})` : ''}: ${(err as Error).message}`);
 }

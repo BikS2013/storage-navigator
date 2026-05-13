@@ -125,15 +125,21 @@ export function filesRouter(svc: FileService, discovery: AccountDiscovery, confi
     } catch (err) { next(err); }
   });
 
-  // Upload
+  // Upload. Honors `If-Match` (concurrency check via getProperties → etag
+  // compare). Refuses bodies larger than config.uploads.maxBytes (413).
   r.put(`${FILE_PREFIX}/*path`, requireRole('Writer'), async (req, res, next) => {
     try {
       requireAccount(req);
       const path = decodePath(req.params.path);
       const len = Number(req.header('content-length'));
       if (!Number.isFinite(len) || len < 0) throw ApiError.badRequest('Content-Length required');
+      const max = config.uploads.maxBytes;
+      if (max !== null && len > max) {
+        throw ApiError.payloadTooLarge(`Body exceeds upload size cap of ${max} bytes`);
+      }
       const ct = req.header('content-type');
-      const r2 = await svc.uploadFile(paramStr(req, 'account'), paramStr(req, 'share'), path, req, len, ct, abortSignalForRequest(req));
+      const ifMatch = req.header('if-match');
+      const r2 = await svc.uploadFile(paramStr(req, 'account'), paramStr(req, 'share'), path, req, len, ct, abortSignalForRequest(req), ifMatch);
       res.status(201).json(r2);
     } catch (err) { next(err); }
   });

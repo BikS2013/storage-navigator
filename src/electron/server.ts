@@ -12,6 +12,10 @@ import type { RepoProvider } from "../core/sync-engine.js";
 import type { ApiBackendEntry, DirectStorageEntry, RepoLink, StorageEntry, SyncResult, DiffReport } from "../core/types.js";
 import { buildProviderForLink } from "../core/repo-utils.js";
 import { diffLink } from "../core/diff-engine.js";
+import {
+  detectEditability,
+  DEFAULT_MAX_EDIT_BYTES,
+} from "../util/text-detect.js";
 
 /**
  * Build the appropriate IStorageBackend for a request.
@@ -238,12 +242,69 @@ export function createServer(port: number, publicDirOverride?: string): express.
         }
       }
 
+      // T26: expose ETag + text-editability metadata so the renderer can
+      // surface an Edit button only for safely-editable files and submit
+      // If-Match on save. Detection is layered (allowlist → sniff → size cap)
+      // — see src/util/text-detect.ts.
+      const totalSize = handle.contentLength ?? content.length;
+      const editability = detectEditability(blobPath, totalSize, content);
+      if (handle.etag) res.setHeader("ETag", handle.etag);
+      res.setHeader("X-Editable", String(editability.editable));
+      res.setHeader("X-Editable-Reason", editability.reason);
+      res.setHeader("X-Editable-Max-Bytes", String(editability.maxBytes));
+
       res.setHeader("Content-Type", contentType);
       res.setHeader("X-Blob-Name", encodeURIComponent(blobPath));
-      res.setHeader("X-Blob-Size", String(handle.contentLength ?? content.length));
+      res.setHeader("X-Blob-Size", String(totalSize));
       res.send(content);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
+      const status = msg.includes("not found") ? 404 : 500;
+      res.status(status).json({ error: msg });
+    }
+  });
+
+  // API: Edit (overwrite) a blob in-place. Companion to GET /api/blob — the
+  // renderer captures the ETag from the read response, edits, and submits
+  // PUT with If-Match so a concurrent writer doesn't get clobbered.
+  //
+  // Body: JSON { content: string, ifMatch?: string, contentType?: string }.
+  // Returns 412 when ifMatch is supplied and the current ETag differs.
+  // Returns 413 when content is larger than the configured edit size cap.
+  app.put("/api/blob/:storage/:container", async (req, res) => {
+    try {
+      const store = new CredentialStore();
+      const backend = backendFor(req, store);
+      const blobPath = req.query.blob as string;
+      if (!blobPath) { res.status(400).json({ error: "?blob= query parameter required" }); return; }
+      const body = req.body as { content?: unknown; ifMatch?: unknown; contentType?: unknown };
+      if (typeof body?.content !== "string") {
+        res.status(400).json({ error: "JSON body field 'content' (string) required" });
+        return;
+      }
+      const contentType = typeof body.contentType === "string" ? body.contentType : "text/plain; charset=utf-8";
+      const buf = Buffer.from(body.content, "utf-8");
+      if (buf.byteLength > DEFAULT_MAX_EDIT_BYTES) {
+        res.status(413).json({ error: `Body exceeds edit size cap of ${DEFAULT_MAX_EDIT_BYTES} bytes` });
+        return;
+      }
+      if (typeof body.ifMatch === "string" && body.ifMatch.length > 0) {
+        const meta = await backend.headBlob(req.params.container as string, blobPath);
+        if (normalizeEtag(meta.etag) !== normalizeEtag(body.ifMatch)) {
+          res.status(412).json({ error: "Blob ETag does not match (concurrent modification)" });
+          return;
+        }
+      }
+      const r = await backend.uploadBlob(req.params.container as string, blobPath, buf, buf.byteLength, contentType);
+      res.json({ success: true, etag: r.etag, lastModified: r.lastModified });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Surface backend precondition failures as 412 when uploadBlob couldn't
+      // tunnel If-Match (e.g. backends that only support app-level checks).
+      if (/precondition|If-Match|412/i.test(msg)) {
+        res.status(412).json({ error: msg });
+        return;
+      }
       const status = msg.includes("not found") ? 404 : 500;
       res.status(status).json({ error: msg });
     }
@@ -539,7 +600,8 @@ export function createServer(port: number, publicDirOverride?: string): express.
 
   // API: Read a file from a share — file path passed as ?path= query param
   // (matches the existing /api/blob convention; avoids Express 5 wildcard
-  // ambiguity around encoded slashes).
+  // ambiguity around encoded slashes). Buffers the body so we can sniff
+  // editability and return X-Editable headers in lockstep with /api/blob.
   app.get("/api/file/:storage/:share", async (req, res, next) => {
     try {
       const store = new CredentialStore();
@@ -547,25 +609,73 @@ export function createServer(port: number, publicDirOverride?: string): express.
       const filePath = req.query.path as string;
       if (!filePath) { res.status(400).json({ error: "?path= query parameter required" }); return; }
       const handle = await backend.readFile(req.params.share as string, filePath);
+      const chunks: Buffer[] = [];
+      for await (const chunk of handle.stream) {
+        chunks.push(chunk instanceof Buffer ? chunk : Buffer.from(chunk));
+      }
+      const content = Buffer.concat(chunks);
+      const totalSize = handle.contentLength ?? content.length;
+      const editability = detectEditability(filePath, totalSize, content);
       if (handle.contentType) res.setHeader("Content-Type", handle.contentType);
-      if (handle.contentLength !== undefined) res.setHeader("Content-Length", String(handle.contentLength));
+      res.setHeader("Content-Length", String(totalSize));
       if (handle.etag) res.setHeader("ETag", handle.etag);
       if (handle.lastModified) res.setHeader("Last-Modified", handle.lastModified);
-      const { pipeline } = await import("node:stream/promises");
-      await pipeline(handle.stream, res);
+      res.setHeader("X-Editable", String(editability.editable));
+      res.setHeader("X-Editable-Reason", editability.reason);
+      res.setHeader("X-Editable-Max-Bytes", String(editability.maxBytes));
+      res.send(content);
     } catch (err) { next(err); }
   });
 
-  // API: Upload a file to a share — file path passed as ?path= query param.
-  // Body is streamed directly from the request into the backend.
+  // API: Upload / edit a file in a share. Two modes, switched by Content-Type:
+  //   - application/json → edit-in-place flow. Body is JSON
+  //     { content: string, ifMatch?: string, contentType?: string }.
+  //     Applies an edit size cap (DEFAULT_MAX_EDIT_BYTES) and honors If-Match
+  //     via headFile → etag compare. Returns 412 / 413 as appropriate.
+  //   - anything else → original raw upload path (PR #3): the request body
+  //     is streamed directly into the backend as a generic file upload.
   app.put("/api/file/:storage/:share", async (req, res, next) => {
     try {
       const store = new CredentialStore();
       const backend = backendFor(req, store);
       const filePath = req.query.path as string;
       if (!filePath) { res.status(400).json({ error: "?path= query parameter required" }); return; }
+      const ct = req.header("content-type") ?? "";
+
+      if (ct.toLowerCase().startsWith("application/json")) {
+        const body = req.body as { content?: unknown; ifMatch?: unknown; contentType?: unknown };
+        if (typeof body?.content !== "string") {
+          res.status(400).json({ error: "JSON body field 'content' (string) required" });
+          return;
+        }
+        const outCt = typeof body.contentType === "string" ? body.contentType : "text/plain; charset=utf-8";
+        const buf = Buffer.from(body.content, "utf-8");
+        if (buf.byteLength > DEFAULT_MAX_EDIT_BYTES) {
+          res.status(413).json({ error: `Body exceeds edit size cap of ${DEFAULT_MAX_EDIT_BYTES} bytes` });
+          return;
+        }
+        if (typeof body.ifMatch === "string" && body.ifMatch.length > 0) {
+          try {
+            const meta = await backend.headFile(req.params.share as string, filePath);
+            if (normalizeEtag(meta.etag) !== normalizeEtag(body.ifMatch)) {
+              res.status(412).json({ error: "File ETag does not match (concurrent modification)" });
+              return;
+            }
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            if (msg.includes("not found")) {
+              res.status(412).json({ error: "File no longer exists (concurrent modification)" });
+              return;
+            }
+            throw err;
+          }
+        }
+        const r = await backend.uploadFile(req.params.share as string, filePath, buf, buf.byteLength, outCt);
+        res.json({ success: true, etag: r.etag, lastModified: r.lastModified });
+        return;
+      }
+
       const len = Number(req.header("content-length") ?? 0);
-      const ct = req.header("content-type");
       const r = await backend.uploadFile(req.params.share as string, filePath, req, len, ct);
       res.status(201).json(r);
     } catch (err) { next(err); }
@@ -983,4 +1093,12 @@ export function createServer(port: number, publicDirOverride?: string): express.
   });
 
   return app;
+}
+
+// Strip optional W/ prefix and surrounding double quotes so we can compare
+// ETags from different transports — Azure returns `"0xABC..."` while many
+// HTTP layers wrap responses with `W/"..."`.
+function normalizeEtag(e: string | undefined): string {
+  if (!e) return "";
+  return e.replace(/^W\//, "").replace(/^"|"$/g, "");
 }

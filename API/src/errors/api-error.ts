@@ -3,6 +3,8 @@ export type ApiErrorCode =
   | 'FORBIDDEN'
   | 'NOT_FOUND'
   | 'CONFLICT'
+  | 'PRECONDITION_FAILED'
+  | 'PAYLOAD_TOO_LARGE'
   | 'BAD_REQUEST'
   | 'UPSTREAM_ERROR'
   | 'INTERNAL'
@@ -32,6 +34,12 @@ export class ApiError extends Error {
   }
   static conflict(message: string): ApiError {
     return new ApiError(409, 'CONFLICT', message);
+  }
+  static preconditionFailed(message = 'Precondition failed'): ApiError {
+    return new ApiError(412, 'PRECONDITION_FAILED', message);
+  }
+  static payloadTooLarge(message: string): ApiError {
+    return new ApiError(413, 'PAYLOAD_TOO_LARGE', message);
   }
   static badRequest(message: string, details?: unknown): ApiError {
     return new ApiError(400, 'BAD_REQUEST', message, details);

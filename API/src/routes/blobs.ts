@@ -143,15 +143,25 @@ export function blobsRouter(svc: BlobService, discovery: AccountDiscovery, confi
     } catch (err) { next(err); }
   });
 
-  // Upload
+  // Upload. Honors `If-Match` for concurrency control (used by the edit-in-place
+  // flow — caller reads ETag from GET, sends it back with PUT, mismatch → 412).
+  // Refuses payloads larger than config.uploads.maxBytes (413) when configured.
   r.put(`${BLOB_PREFIX}/*path`, requireRole('Writer'), async (req, res, next) => {
     try {
       requireAccount(req);
       const path = decodePath(req.params.path);
       const ct = req.header('content-type');
+      const ifMatch = req.header('if-match');
+      const max = config.uploads.maxBytes;
+      if (max !== null) {
+        const len = Number(req.header('content-length'));
+        if (Number.isFinite(len) && len > max) {
+          throw ApiError.payloadTooLarge(`Body exceeds upload size cap of ${max} bytes`);
+        }
+      }
       const r2 = await svc.uploadBlob(
         paramStr(req, 'account'), paramStr(req, 'container'), path,
-        req, ct, { blockSizeMb: config.uploads.streamBlockSizeMb },
+        req, ct, { blockSizeMb: config.uploads.streamBlockSizeMb, ifMatch },
         abortSignalForRequest(req),
       );
       res.status(201).json({ etag: r2.etag, lastModified: r2.lastModified });
