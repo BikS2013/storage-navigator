@@ -38,8 +38,16 @@
 
       <div id="content-panel">
         <div id="content-header">
-          <span id="content-title">No file selected</span>
-          <span id="content-meta"></span>
+          <div class="content-header-left">
+            <span id="content-title">No file selected</span>
+            <span id="content-meta"></span>
+          </div>
+          <div id="content-edit-controls" class="content-edit-controls" hidden>
+            <span id="edit-status" class="edit-status"></span>
+            <button id="edit-btn" class="edit-btn" title="Edit this file" hidden>Edit</button>
+            <button id="edit-save" class="edit-btn primary" title="Save changes" hidden disabled>Save</button>
+            <button id="edit-cancel" class="edit-btn" title="Discard changes" hidden>Cancel</button>
+          </div>
         </div>
         <div id="content-body">
           <p class="placeholder">Click a file to view its contents</p>

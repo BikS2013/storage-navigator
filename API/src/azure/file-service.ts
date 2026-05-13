@@ -116,10 +116,35 @@ export class FileService {
     }
   }
 
-  async uploadFile(account: string, share: string, path: string, body: Readable, sizeBytes: number, contentType: string | undefined, signal?: AbortSignal): Promise<{ etag?: string; lastModified?: string }> {
+  async uploadFile(
+    account: string, share: string, path: string, body: Readable, sizeBytes: number,
+    contentType: string | undefined, signal?: AbortSignal, ifMatch?: string,
+  ): Promise<{ etag?: string; lastModified?: string }> {
     const { dir, file } = this.splitPath(path);
     await this.ensureDirChain(account, share, dir);
     const f = this.dir(account, share, dir).getFileClient(file);
+    if (ifMatch) {
+      // The file-share SDK doesn't accept conditions on uploadStream, so the
+      // concurrency check is done app-level: read current etag and compare
+      // before creating / overwriting. TOCTOU window is small but real —
+      // good enough for the desktop UI's edit flow.
+      try {
+        const props = await f.getProperties();
+        if (normalizeEtag(props.etag) !== normalizeEtag(ifMatch)) {
+          throw ApiError.preconditionFailed('File ETag does not match (concurrent modification)');
+        }
+      } catch (err) {
+        if (err instanceof ApiError) throw err;
+        const status = (err as { statusCode?: number }).statusCode;
+        if (status === 404) {
+          // If-Match was supplied but file doesn't exist — treat as a
+          // precondition failure rather than "not found" so the UI can
+          // distinguish concurrent-delete from a missing parent dir.
+          throw ApiError.preconditionFailed(`File '${path}' has been deleted (concurrent modification)`);
+        }
+        throw mapStorageError(err, () => `File '${path}' not found in share '${share}'`);
+      }
+    }
     const opts: FileUploadStreamOptions = {
       fileHttpHeaders: contentType ? { fileContentType: contentType } : undefined,
       abortSignal: signal,
@@ -211,5 +236,12 @@ function mapStorageError(err: unknown, notFoundMessage: () => string): ApiError 
   if (status === 404) return ApiError.notFound(notFoundMessage());
   if (status === 403) return ApiError.upstream('Storage refused access (check role assignments)');
   if (status === 409) return ApiError.conflict('Storage conflict');
+  if (status === 412) return ApiError.preconditionFailed('File ETag does not match (concurrent modification)');
   return ApiError.upstream(`Storage error${status ? ` (${status})` : ''}: ${(err as Error).message}`);
+}
+
+function normalizeEtag(e: string | undefined): string {
+  if (!e) return '';
+  // Storage SDKs sometimes wrap ETags in double quotes, sometimes not.
+  return e.replace(/^W\//, '').replace(/^"|"$/g, '');
 }

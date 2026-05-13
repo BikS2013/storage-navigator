@@ -14,6 +14,12 @@
   const contentTitle = document.getElementById("content-title");
   const contentMeta = document.getElementById("content-meta");
   const contentBody = document.getElementById("content-body");
+  // Edit controls (PR #5 — in-place text editing)
+  const editControls = document.getElementById("content-edit-controls");
+  const editBtn = document.getElementById("edit-btn");
+  const editSaveBtn = document.getElementById("edit-save");
+  const editCancelBtn = document.getElementById("edit-cancel");
+  const editStatusEl = document.getElementById("edit-status");
   const modal = document.getElementById("add-modal");
   const modalCancel = document.getElementById("modal-cancel");
   const modalSave = document.getElementById("modal-save");
@@ -436,6 +442,7 @@
     contentTitle.textContent = shortName;
     contentMeta.textContent = size ? `${(size / 1024).toFixed(1)} KB` : "";
     contentBody.innerHTML = '<p class="placeholder">Loading...</p>';
+    resetEditor();
     const url = withAccount(`/api/file/${encodeURIComponent(currentStorage)}/${encodeURIComponent(shareName)}?path=${encodeURIComponent(filePath)}`);
     try {
       const res = await fetch(url);
@@ -445,11 +452,26 @@
       }
       const text = await res.text();
       const ext = (filePath.split(".").pop() || "").toLowerCase();
-      if (ext === "json") {
-        try { contentBody.innerHTML = `<pre><code>${escapeHtml(JSON.stringify(JSON.parse(text), null, 2))}</code></pre>`; }
-        catch { contentBody.innerHTML = `<pre>${escapeHtml(text)}</pre>`; }
-      } else {
-        contentBody.innerHTML = `<pre>${escapeHtml(text)}</pre>`;
+      const renderView = (t) => {
+        if (ext === "json") {
+          try { contentBody.innerHTML = `<pre><code>${escapeHtml(JSON.stringify(JSON.parse(t), null, 2))}</code></pre>`; }
+          catch { contentBody.innerHTML = `<pre>${escapeHtml(t)}</pre>`; }
+        } else {
+          contentBody.innerHTML = `<pre>${escapeHtml(t)}</pre>`;
+        }
+      };
+      renderView(text);
+      const meta = readEditability(res);
+      if (meta.editable) {
+        arm("file", {
+          storage: currentStorage,
+          share: shareName,
+          path: filePath,
+          contentType: res.headers.get("content-type") || "text/plain; charset=utf-8",
+          originalText: text,
+          etag: meta.etag,
+          restoreView: renderView,
+        });
       }
     } catch (err) {
       contentBody.innerHTML = `<p class="placeholder">Error: ${escapeHtml(err.message)}</p>`;
@@ -641,6 +663,7 @@
     contentTitle.textContent = shortName;
     contentMeta.textContent = size ? `${(size / 1024).toFixed(1)} KB` : "";
     contentBody.innerHTML = '<p class="placeholder">Loading...</p>';
+    resetEditor();
 
     const ext = blobName.split(".").pop()?.toLowerCase();
     const url = withAccount(`/api/blob/${currentStorage}/${container}?blob=${encodeURIComponent(blobName)}`);
@@ -677,23 +700,39 @@
       const res = await api(url);
       const text = await res.text();
 
-      if (ext === "json") {
-        try {
-          const parsed = JSON.parse(text);
-          contentBody.innerHTML = `<pre><code class="language-json">${escapeHtml(JSON.stringify(parsed, null, 2))}</code></pre>`;
-          if (window.hljs) hljs.highlightAll();
-        } catch {
-          contentBody.innerHTML = `<pre class="text-view">${escapeHtml(text)}</pre>`;
-        }
-      } else if (ext === "md") {
-        if (window.marked) {
-          contentBody.innerHTML = `<div class="markdown-view">${marked.parse(text)}</div>`;
-          if (window.hljs) contentBody.querySelectorAll("pre code").forEach(el => hljs.highlightElement(el));
+      const renderView = (t) => {
+        if (ext === "json") {
+          try {
+            const parsed = JSON.parse(t);
+            contentBody.innerHTML = `<pre><code class="language-json">${escapeHtml(JSON.stringify(parsed, null, 2))}</code></pre>`;
+            if (window.hljs) hljs.highlightAll();
+          } catch {
+            contentBody.innerHTML = `<pre class="text-view">${escapeHtml(t)}</pre>`;
+          }
+        } else if (ext === "md") {
+          if (window.marked) {
+            contentBody.innerHTML = `<div class="markdown-view">${marked.parse(t)}</div>`;
+            if (window.hljs) contentBody.querySelectorAll("pre code").forEach(el => hljs.highlightElement(el));
+          } else {
+            contentBody.innerHTML = `<pre class="text-view">${escapeHtml(t)}</pre>`;
+          }
         } else {
-          contentBody.innerHTML = `<pre class="text-view">${escapeHtml(text)}</pre>`;
+          contentBody.innerHTML = `<pre class="text-view">${escapeHtml(t)}</pre>`;
         }
-      } else {
-        contentBody.innerHTML = `<pre class="text-view">${escapeHtml(text)}</pre>`;
+      };
+      renderView(text);
+
+      const meta = readEditability(res);
+      if (meta.editable) {
+        arm("blob", {
+          storage: currentStorage,
+          container,
+          path: blobName,
+          contentType: res.headers.get("content-type") || "text/plain; charset=utf-8",
+          originalText: text,
+          etag: meta.etag,
+          restoreView: renderView,
+        });
       }
     } catch (e) {
       contentBody.innerHTML = `<p class="placeholder">Error: ${escapeHtml(e.message)}</p>`;
@@ -703,6 +742,147 @@
   function escapeHtml(str) {
     return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
+
+  // --- Inline Text Editor (PR #5) ---
+  // Single editor context per content panel. resetEditor() is called every
+  // time the panel loads a new file or clears, so stale Save handlers from
+  // a previous file can't fire against the new path.
+  let currentEditor = null;
+
+  function clearEditControls() {
+    editControls.hidden = true;
+    editBtn.hidden = true;
+    editSaveBtn.hidden = true;
+    editCancelBtn.hidden = true;
+    editStatusEl.textContent = "";
+    editStatusEl.classList.remove("error");
+  }
+
+  function resetEditor() {
+    currentEditor = null;
+    clearEditControls();
+  }
+
+  // Determine whether the file is editable from the response headers the
+  // server emits. The renderer mirrors the server's decision rather than
+  // re-implementing it — keeps the detection rules in one place.
+  function readEditability(res) {
+    return {
+      editable: res.headers.get("x-editable") === "true",
+      reason: res.headers.get("x-editable-reason") || "unknown",
+      etag: res.headers.get("etag") || "",
+    };
+  }
+
+  function arm(kind, ctx) {
+    // ctx fields: { storage, container?, share?, path, contentType, originalText, etag, restoreView }
+    currentEditor = { kind, ...ctx, modified: false };
+    editControls.hidden = false;
+    editBtn.hidden = false;
+    editSaveBtn.hidden = true;
+    editCancelBtn.hidden = true;
+    editStatusEl.textContent = "";
+    editStatusEl.classList.remove("error");
+  }
+
+  function enterEditMode() {
+    if (!currentEditor) return;
+    const ta = document.createElement("textarea");
+    ta.className = "text-editor";
+    ta.spellcheck = false;
+    ta.value = currentEditor.originalText;
+    contentBody.innerHTML = "";
+    contentBody.appendChild(ta);
+    currentEditor.textarea = ta;
+    currentEditor.modified = false;
+    editBtn.hidden = true;
+    editSaveBtn.hidden = false;
+    editSaveBtn.disabled = true;
+    editCancelBtn.hidden = false;
+    editStatusEl.textContent = "Editing…";
+    editStatusEl.classList.remove("error");
+    ta.addEventListener("input", () => {
+      const changed = ta.value !== currentEditor.originalText;
+      currentEditor.modified = changed;
+      editSaveBtn.disabled = !changed;
+      editStatusEl.textContent = changed ? "Unsaved changes" : "Editing…";
+    });
+    ta.focus();
+  }
+
+  function exitEditMode() {
+    if (!currentEditor) return;
+    editBtn.hidden = false;
+    editSaveBtn.hidden = true;
+    editCancelBtn.hidden = true;
+    editStatusEl.textContent = "";
+    editStatusEl.classList.remove("error");
+    // Re-render the viewer with whatever original text is now current. The
+    // caller updates currentEditor.originalText after a successful save so
+    // the viewer reflects the new content without a server round-trip.
+    if (typeof currentEditor.restoreView === "function") {
+      currentEditor.restoreView(currentEditor.originalText);
+    }
+  }
+
+  async function saveEdit() {
+    if (!currentEditor) return;
+    const newText = currentEditor.textarea.value;
+    editSaveBtn.disabled = true;
+    editCancelBtn.disabled = true;
+    editStatusEl.textContent = "Saving…";
+    editStatusEl.classList.remove("error");
+
+    const url = currentEditor.kind === "blob"
+      ? withAccount(`/api/blob/${encodeURIComponent(currentEditor.storage)}/${encodeURIComponent(currentEditor.container)}?blob=${encodeURIComponent(currentEditor.path)}`)
+      : withAccount(`/api/file/${encodeURIComponent(currentEditor.storage)}/${encodeURIComponent(currentEditor.share)}?path=${encodeURIComponent(currentEditor.path)}`);
+
+    try {
+      const res = await fetch(url, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          content: newText,
+          ifMatch: currentEditor.etag || undefined,
+          contentType: currentEditor.contentType,
+        }),
+      });
+      if (res.status === 412) {
+        editStatusEl.textContent = "File changed in storage. Reload to see the latest version.";
+        editStatusEl.classList.add("error");
+        editSaveBtn.disabled = false;
+        editCancelBtn.disabled = false;
+        return;
+      }
+      if (res.status === 413) {
+        editStatusEl.textContent = "File too large to save through the editor.";
+        editStatusEl.classList.add("error");
+        editSaveBtn.disabled = false;
+        editCancelBtn.disabled = false;
+        return;
+      }
+      if (!res.ok) {
+        let detail = `HTTP ${res.status}`;
+        try { const j = await res.json(); detail = (j.error && j.error.message) || j.error || detail; } catch {}
+        throw new Error(detail);
+      }
+      const result = await res.json().catch(() => ({}));
+      currentEditor.originalText = newText;
+      if (result.etag) currentEditor.etag = result.etag;
+      editStatusEl.textContent = "Saved";
+      editStatusEl.classList.remove("error");
+      exitEditMode();
+    } catch (err) {
+      editStatusEl.textContent = "Save failed: " + err.message;
+      editStatusEl.classList.add("error");
+      editSaveBtn.disabled = false;
+      editCancelBtn.disabled = false;
+    }
+  }
+
+  editBtn.addEventListener("click", enterEditMode);
+  editCancelBtn.addEventListener("click", () => { exitEditMode(); });
+  editSaveBtn.addEventListener("click", () => { saveEdit(); });
 
   // --- Export ---
   exportBtn.addEventListener("click", async () => {
@@ -726,7 +906,7 @@
     if (!currentStorage) { return; }
     contentTitle.textContent = "No file selected";
     contentMeta.textContent = "";
-    contentBody.innerHTML = '<p class="placeholder">Click a file to view its contents</p>';
+    contentBody.innerHTML = '<p class="placeholder">Click a file to view its contents</p>'; resetEditor();
     activeTreeItem = null;
     await buildTree();
   });
@@ -899,7 +1079,7 @@
       treeContent.innerHTML = '<p class="placeholder">Select a storage account to browse</p>';
       contentTitle.textContent = "No file selected";
       contentMeta.textContent = "";
-      contentBody.innerHTML = '<p class="placeholder">Click a file to view its contents</p>';
+      contentBody.innerHTML = '<p class="placeholder">Click a file to view its contents</p>'; resetEditor();
 
       await loadStorages();
     } catch (e) {
@@ -1140,7 +1320,7 @@
       if (contentTitle.textContent === contextTarget.blobName.split("/").pop()) {
         contentTitle.textContent = "No file selected";
         contentMeta.textContent = "";
-        contentBody.innerHTML = '<p class="placeholder">Click a file to view its contents</p>';
+        contentBody.innerHTML = '<p class="placeholder">Click a file to view its contents</p>'; resetEditor();
         activeTreeItem = null;
       }
 
@@ -1188,7 +1368,7 @@
       // Clear content panel if a file from the deleted folder was being viewed
       contentTitle.textContent = "No file selected";
       contentMeta.textContent = "";
-      contentBody.innerHTML = '<p class="placeholder">Click a file to view its contents</p>';
+      contentBody.innerHTML = '<p class="placeholder">Click a file to view its contents</p>'; resetEditor();
       activeTreeItem = null;
 
       // Refresh the parent folder level
