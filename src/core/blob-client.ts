@@ -153,14 +153,15 @@ export class BlobClient {
   }
 
   /** Create (upload) a blob from content */
-  async createBlob(containerName: string, blobName: string, content: Buffer | string, contentType?: string): Promise<void> {
+  async createBlob(containerName: string, blobName: string, content: Buffer | string, contentType?: string): Promise<{ etag?: string; lastModified?: string }> {
     const containerClient = this.serviceClient.getContainerClient(containerName);
     const blobClient = containerClient.getBlockBlobClient(blobName);
 
     const data = typeof content === "string" ? Buffer.from(content, "utf-8") : content;
-    await blobClient.upload(data, data.length, {
+    const resp = await blobClient.upload(data, data.length, {
       blobHTTPHeaders: { blobContentType: contentType ?? "application/octet-stream" },
     });
+    return { etag: resp.etag, lastModified: resp.lastModified?.toISOString() };
   }
 
   /** Delete all blobs under a prefix (folder). Returns the count of deleted blobs. */
@@ -192,8 +193,8 @@ export class BlobClient {
    * semantics: uploads `content` as a block blob with the given content type
    * (defaults to `application/octet-stream`).
    */
-  async uploadBlob(containerName: string, blobName: string, content: Buffer | string, contentType?: string): Promise<void> {
-    await this.createBlob(containerName, blobName, content, contentType);
+  async uploadBlob(containerName: string, blobName: string, content: Buffer | string, contentType?: string): Promise<{ etag?: string; lastModified?: string }> {
+    return this.createBlob(containerName, blobName, content, contentType);
   }
 
   /**
@@ -226,6 +227,21 @@ export class BlobClient {
       contentType: downloadResponse.contentType ?? "application/octet-stream",
       size: content.length,
       name: blobName,
+      etag: downloadResponse.etag,
+      lastModified: downloadResponse.lastModified?.toISOString(),
+    };
+  }
+
+  /** Cheap HEAD that pulls properties (incl. ETag) without downloading bytes. */
+  async getBlobProperties(containerName: string, blobName: string): Promise<{ etag?: string; lastModified?: string; contentType?: string; size?: number }> {
+    const containerClient = this.serviceClient.getContainerClient(containerName);
+    const blobClient = containerClient.getBlockBlobClient(blobName);
+    const p = await blobClient.getProperties();
+    return {
+      etag: p.etag,
+      lastModified: p.lastModified?.toISOString(),
+      contentType: p.contentType,
+      size: p.contentLength,
     };
   }
 }

@@ -43,11 +43,18 @@ export class DirectBackend implements IStorageBackend {
       stream: Readable.from(body),
       contentType: r.contentType,
       contentLength: r.size,
+      etag: r.etag,
+      lastModified: r.lastModified,
     };
   }
   async headBlob(container: string, path: string): Promise<Omit<BlobReadHandle, 'stream'>> {
-    const r = await this.blob.viewBlob(container, path);
-    return { contentType: r.contentType, contentLength: r.size };
+    const p = await this.blob.getBlobProperties(container, path);
+    return {
+      contentType: p.contentType ?? 'application/octet-stream',
+      contentLength: p.size,
+      etag: p.etag,
+      lastModified: p.lastModified,
+    };
   }
   async uploadBlob(
     container: string,
@@ -63,8 +70,7 @@ export class DirectBackend implements IStorageBackend {
     const buf: Buffer = body instanceof Buffer
       ? body
       : await readStreamToBuffer(body as NodeJS.ReadableStream, sizeBytes);
-    await this.blob.uploadBlob(container, path, buf, contentType);
-    return {};
+    return this.blob.uploadBlob(container, path, buf, contentType);
   }
   async deleteBlob(container: string, path: string): Promise<void> {
     await this.blob.deleteBlob(container, path);

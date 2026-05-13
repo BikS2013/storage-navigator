@@ -130,6 +130,8 @@ export interface BlobContent {
   contentType: string;
   size: number;
   name: string;
+  etag?: string;
+  lastModified?: string;
 }
 
 /** A single file entry in a diff report, representing one file across both sides */

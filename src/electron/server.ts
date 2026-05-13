@@ -56,6 +56,12 @@ const __dirname = path.dirname(__filename);
 
 export function createServer(port: number, publicDirOverride?: string): express.Express {
   const app = express();
+  // Express auto-generates a weak content-hash ETag for res.send() responses.
+  // For the editor we rely on the backend's strong ETag (Azure) to detect
+  // concurrent writes; an Express content-hash ETag would be returned to the
+  // client and re-submitted as If-Match, never matching the backend's real
+  // ETag and causing every save to fail with 412.
+  app.set("etag", false);
   app.use(express.json());
 
   // Serve static files from public directory
