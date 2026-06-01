@@ -573,3 +573,23 @@ header h1 { font-size: 14px; font-weight: 600; color: var(--text-accent); }
   flex-shrink: 0;
 }
 .zip-dl-cancel:hover { background: var(--btn-bg, #2a2a2a); }
+
+/* ===== HTML view toolbar + iframe ===== */
+.html-view-toolbar {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.25rem 0;
+  border-bottom: 1px solid var(--border, #ddd);
+  margin-bottom: 0.25rem;
+}
+.html-view-toolbar button {
+  font: inherit;
+  padding: 0.25rem 0.6rem;
+  cursor: pointer;
+}
+iframe.html-view {
+  width: 100%;
+  height: calc(100% - 2.25rem);
+  border: 0;
+  background: #fff;
+}

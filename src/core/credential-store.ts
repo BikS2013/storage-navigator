@@ -4,9 +4,18 @@ import * as os from "os";
 import * as path from "path";
 import type { CredentialData, EncryptedPayload, StorageEntry, TokenEntry } from "./types.js";
 
-const STORE_DIR = path.join(os.homedir(), ".storage-navigator");
-const STORE_FILE = path.join(STORE_DIR, "credentials.json");
-const KEY_FILE = path.join(STORE_DIR, "machine.key");
+function getStoreDir(): string {
+  return process.env.STORAGE_NAVIGATOR_DIR ?? path.join(os.homedir(), ".storage-navigator");
+}
+
+function getStorePaths() {
+  const dir = getStoreDir();
+  return {
+    dir,
+    file: path.join(dir, "credentials.json"),
+    key: path.join(dir, "machine.key"),
+  };
+}
 const ALGORITHM = "aes-256-gcm";
 
 /**
@@ -18,17 +27,18 @@ const ALGORITHM = "aes-256-gcm";
  * credentials. The key file itself is only readable by the owner.
  */
 function deriveKey(): Buffer {
-  if (!fs.existsSync(STORE_DIR)) {
-    fs.mkdirSync(STORE_DIR, { recursive: true, mode: 0o700 });
+  const { dir, key: keyFile } = getStorePaths();
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
 
-  if (fs.existsSync(KEY_FILE)) {
-    return Buffer.from(fs.readFileSync(KEY_FILE, "utf-8").trim(), "hex");
+  if (fs.existsSync(keyFile)) {
+    return Buffer.from(fs.readFileSync(keyFile, "utf-8").trim(), "hex");
   }
 
   // First run: generate a random key and persist it
   const key = crypto.randomBytes(32);
-  fs.writeFileSync(KEY_FILE, key.toString("hex"), { mode: 0o600 });
+  fs.writeFileSync(keyFile, key.toString("hex"), { mode: 0o600 });
   return key;
 }
 
@@ -69,12 +79,13 @@ export class CredentialStore {
   }
 
   private load(): void {
-    if (!fs.existsSync(STORE_FILE)) {
+    const { file: storeFile } = getStorePaths();
+    if (!fs.existsSync(storeFile)) {
       this.data = { storages: [] };
       return;
     }
     try {
-      const raw = fs.readFileSync(STORE_FILE, "utf-8");
+      const raw = fs.readFileSync(storeFile, "utf-8");
       const payload = JSON.parse(raw) as EncryptedPayload;
       const decrypted = decrypt(payload);
       this.data = this.migrate(JSON.parse(decrypted) as CredentialData);
@@ -110,7 +121,8 @@ export class CredentialStore {
    * If successful, re-encrypts with the new stable key and returns true.
    */
   private tryMigrateFromHostnameKey(): boolean {
-    const raw = fs.readFileSync(STORE_FILE, "utf-8");
+    const { file: storeFile } = getStorePaths();
+    const raw = fs.readFileSync(storeFile, "utf-8");
     const payload = JSON.parse(raw) as EncryptedPayload;
     const username = os.userInfo().username;
     const baseHostname = os.hostname().replace(/\.(home|local|lan)$/i, "");
@@ -147,12 +159,13 @@ export class CredentialStore {
   }
 
   private save(): void {
-    if (!fs.existsSync(STORE_DIR)) {
-      fs.mkdirSync(STORE_DIR, { recursive: true, mode: 0o700 });
+    const { dir, file: storeFile } = getStorePaths();
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     }
     const plaintext = JSON.stringify(this.data, null, 2);
     const payload = encrypt(plaintext);
-    fs.writeFileSync(STORE_FILE, JSON.stringify(payload, null, 2), { encoding: "utf-8", mode: 0o600 });
+    fs.writeFileSync(storeFile, JSON.stringify(payload, null, 2), { encoding: "utf-8", mode: 0o600 });
   }
 
   /** Parse SAS token expiry date from the 'se' parameter */
@@ -249,6 +262,31 @@ export class CredentialStore {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Is this container / share's HTML trusted to run with a relaxed
+   * iframe sandbox and CSP? Default false.
+   */
+  isHtmlTrusted(storageName: string, scope: 'container' | 'share', name: string): boolean {
+    const entry = this.data.storages.find((s) => s.name === storageName);
+    if (!entry) return false;
+    const list = scope === 'container' ? entry.trustedHtmlContainers : entry.trustedHtmlShares;
+    return Array.isArray(list) && list.includes(name);
+  }
+
+  /**
+   * Set the trust flag for a container / share. Idempotent. Persists immediately.
+   * Throws when the storage name is unknown — callers should pre-validate.
+   */
+  setHtmlTrust(storageName: string, scope: 'container' | 'share', name: string, trusted: boolean): void {
+    const entry = this.data.storages.find((s) => s.name === storageName);
+    if (!entry) throw new Error(`Storage '${storageName}' not found`);
+    const key = scope === 'container' ? 'trustedHtmlContainers' : 'trustedHtmlShares';
+    const current = new Set<string>(entry[key] ?? []);
+    if (trusted) current.add(name); else current.delete(name);
+    (entry as Record<string, unknown>)[key] = Array.from(current);
+    this.save();
   }
 
   /** Check if any storages are configured */

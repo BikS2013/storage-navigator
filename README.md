@@ -112,6 +112,23 @@ Click **➕ → Add Storage Account** and choose a tab:
 
 The dropdown shows one entry per `(backend, Azure account)` combo. The tree expands into **Containers** and **Shares**. Selecting a text file enables the **Edit** button — modifications save with an `If-Match` precondition; if the blob changed in storage since you opened it, the editor surfaces *"File changed in storage. Reload to see the latest version."* instead of overwriting.
 
+### HTML rendering
+
+When you open an `.html` or `.htm` file from a container or file share, the viewer renders it inside a sandboxed iframe instead of showing escaped source. The same content is reachable from any browser at:
+
+```
+http://localhost:<port>/api/site/<storage>/<container>/<path>
+http://localhost:<port>/api/site-file/<storage>/<share>/<path>
+```
+
+Relative references (`./styles.css`, `images/foo.png`, sibling pages) resolve to sibling blobs / files in the same container or share — no rewriting is performed, the browser does it natively.
+
+**Security model.** By default the iframe runs with `sandbox="allow-scripts"` only — scripts execute but cannot reach the host page, navigate the window, submit forms, or call back into the API. The server adds a matching `Content-Security-Policy` with `connect-src 'none'`.
+
+If you need a stored page to behave like a real site (XHR, forms, same-origin storage), click **Trust container** in the viewer's HTML toolbar. The trust flag is per-container (or per-share), persisted in your encrypted credential store, and can be cleared at any time. Trusted mode adds `allow-same-origin allow-forms allow-popups` to the sandbox and relaxes CSP to `connect-src 'self'` + `form-action 'self'` — third-party access remains forbidden.
+
+The **Open in browser** button opens the same URL in your OS default browser. **View source** falls back to the escaped-source viewer with the existing in-place **Edit** button.
+
 ---
 
 ## Quickstart — API (RBAC broker)

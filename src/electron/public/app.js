@@ -443,6 +443,24 @@
     contentMeta.textContent = size ? `${(size / 1024).toFixed(1)} KB` : "";
     contentBody.innerHTML = '<p class="placeholder">Loading...</p>';
     resetEditor();
+    const _shareExt = (filePath.split(".").pop() || "").toLowerCase();
+    if ((_shareExt === "html" || _shareExt === "htm") && !location.hash.includes("view=source")) {
+      if (window.htmlView) {
+        contentBody.addEventListener('html-view:view-source', () => {
+          location.hash = 'view=source';
+          viewShareFile(shareName, filePath, size);
+        }, { once: true });
+        await window.htmlView.render({
+          storage: currentStorage,
+          container: shareName,
+          share: shareName,
+          path: filePath,
+          scope: 'share',
+          contentBody,
+        });
+        return;
+      }
+    }
     const url = withAccount(`/api/file/${encodeURIComponent(currentStorage)}/${encodeURIComponent(shareName)}?path=${encodeURIComponent(filePath)}`);
     try {
       const res = await fetch(url);
@@ -654,6 +672,7 @@
     if (ext === "pdf") return "\uD83D\uDCC4";
     if (ext === "txt") return "\uD83D\uDCC3";
     if (ext === "docx" || ext === "doc") return "\uD83D\uDCD6";
+    if (ext === "html" || ext === "htm") return "\uD83C\uDF10";
     return "\uD83D\uDCCE";
   }
 
@@ -680,6 +699,24 @@
           contentBody.innerHTML = `<p class="placeholder">Error loading PDF: ${escapeHtml(e.message)}</p>`;
         }
         return;
+      }
+
+      if ((ext === "html" || ext === "htm") && !location.hash.includes("view=source")) {
+        if (window.htmlView) {
+          contentBody.addEventListener('html-view:view-source', () => {
+            location.hash = 'view=source';
+            viewFile(container, blobName, size);
+          }, { once: true });
+          await window.htmlView.render({
+            storage: currentStorage,
+            container,
+            path: blobName,
+            scope: 'container',
+            contentBody,
+          });
+          return;
+        }
+        // Fall through if html-view.js failed to load — render as escaped text.
       }
 
       if (ext === "docx" || ext === "doc") {

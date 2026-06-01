@@ -54,6 +54,11 @@
 - **Folder-level "Sync from Repository" context menu not implemented**: The spec calls for right-click on linked folders showing "Sync from Repository" and "Unlink Repository" options. Currently only "Link to Repo" appears in the folder context menu. Sync/unlink for linked folders must go through the Links Panel.
 - **Multi-link sync badge count**: The spec says the container badge should show count (e.g., "2 links") for multi-link containers. Current implementation shows a generic sync arrow icon. The tooltip shows count but the visual badge does not.
 
+## Dependency vetting log
+
+- 2026-06-01 — supertest@7.2.2 — npm audit clean at install time (no HIGH or CRITICAL advisories attributed to supertest).
+- 2026-06-01 — @types/supertest@7.2.0 — types-only dev dependency, no runtime surface, npm audit clean at install time.
+
 ## Completed
 
 - **`renderDiffAllResults` used wrong response key (data.reports vs data.results)**: Fixed. The `/api/diff-all` endpoint returns `{ results: [...] }` but `renderDiffAllResults()` was checking `data.reports`, so "Diff All" always showed "No diff results returned." Fixed by correcting the field name and iterating `item.report` from each result entry.

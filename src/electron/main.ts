@@ -135,6 +135,19 @@ ipcMain.handle('download-zip:cancel', async (_event, payload: { requestId: strin
   return { cancelled: true } as const;
 });
 
+// Open an http(s) URL in the user's OS default browser. The renderer uses
+// this for the "Open in browser" button on the HTML viewer toolbar — so that
+// a stored static site can be navigated outside the sandboxed iframe.
+// Protocol is restricted to http/https to prevent file:/javascript:/etc.
+ipcMain.handle('shell:open-external', async (_event, rawUrl: string) => {
+  let parsed: URL;
+  try { parsed = new URL(rawUrl); } catch { throw new Error('invalid URL'); }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`refused protocol: ${parsed.protocol}`);
+  }
+  await shell.openExternal(parsed.toString());
+});
+
 // Set app name so macOS shows "Storage Navigator" in the app switcher/menu bar
 app.name = "Storage Navigator";
 

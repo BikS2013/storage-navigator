@@ -16,6 +16,7 @@ import {
   detectEditability,
   DEFAULT_MAX_EDIT_BYTES,
 } from "../util/text-detect.js";
+import { registerSiteRoutes } from "./site-routes.js";
 
 /**
  * Build the appropriate IStorageBackend for a request.
@@ -67,6 +68,7 @@ export function createServer(port: number, publicDirOverride?: string): express.
   // Serve static files from public directory
   const publicDir = publicDirOverride || path.join(__dirname, "public");
   app.use(express.static(publicDir));
+  registerSiteRoutes(app);
 
   // API: List configured storages — includes `kind` so the UI can render
   // the appropriate icon/badge for direct vs api-backed entries.

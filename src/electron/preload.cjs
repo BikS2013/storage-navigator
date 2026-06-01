@@ -13,6 +13,7 @@ const INVOKE_CHANNELS = new Set([
   "oidc:login",
   "download-zip:start",
   "download-zip:cancel",
+  "shell:open-external",
 ]);
 
 const EVENT_CHANNELS = new Set([

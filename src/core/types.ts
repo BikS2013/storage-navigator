@@ -5,6 +5,10 @@ export type DirectStorageEntry = {
   sasToken?: string;       // SAS token (container or account level)
   accountKey?: string;     // Account key (full access)
   addedAt: string;
+  /** Container names within this storage whose HTML may run with relaxed sandbox/CSP. */
+  trustedHtmlContainers?: string[];
+  /** Share names within this storage whose HTML may run with relaxed sandbox/CSP. */
+  trustedHtmlShares?: string[];
 };
 
 export type OidcConfig = {
@@ -27,6 +31,10 @@ export type ApiBackendEntry = {
    */
   staticAuthHeader?: { name: string; value: string };
   addedAt: string;
+  /** Container names whose HTML may run with relaxed sandbox/CSP. */
+  trustedHtmlContainers?: string[];
+  /** Share names whose HTML may run with relaxed sandbox/CSP. */
+  trustedHtmlShares?: string[];
 };
 
 export type StorageEntry = DirectStorageEntry | ApiBackendEntry;
