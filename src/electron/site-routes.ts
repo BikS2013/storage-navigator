@@ -46,14 +46,21 @@ function resolveContentType(handleCt: string | undefined, blobPath: string): str
 function htmlCsp(trusted: boolean): string {
   const directives = [
     "default-src 'none'",
-    "img-src 'self' data:",
+    "img-src 'self' data: https:",
     "style-src 'self' 'unsafe-inline'",
     "script-src 'self' 'unsafe-inline'",
-    "font-src 'self'",
+    "font-src 'self' data: https:",
     "frame-ancestors 'self'",
     "base-uri 'self'",
-    trusted ? "connect-src 'self'" : "connect-src 'none'",
+    trusted ? "connect-src 'self' https:" : "connect-src 'none'",
     trusted ? "form-action 'self'" : "form-action 'none'",
+    // Allow third-party embeds (YouTube, Vimeo, codepen, etc.) over HTTPS only.
+    // In untrusted mode we still permit https: frame/media sources because the
+    // outer iframe sandbox confines what those embeds can do; without this,
+    // a stored page that embeds a YouTube video would render as a black box.
+    "frame-src https:",
+    "media-src 'self' data: https:",
+    "child-src https:",
   ];
   return directives.join('; ');
 }
@@ -122,7 +129,13 @@ async function serveFromBackend(opts: {
 
     const ct = resolveContentType(handle.contentType, target);
     res.setHeader('Content-Type', ct);
-    res.setHeader('Referrer-Policy', 'no-referrer');
+    // strict-origin-when-cross-origin (browser default in 2020+) sends just the
+    // origin — not the path — to cross-origin destinations like an embedded
+    // YouTube iframe. YouTube needs *some* Referer to validate the embed; the
+    // previous 'no-referrer' triggered Error 153 ("video player configuration
+    // error") on every embedded video. Same-origin requests still get the
+    // full URL, so this doesn't leak path info to third parties.
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
     if (handle.contentLength !== undefined) {
       res.setHeader('Content-Length', String(handle.contentLength));
     }

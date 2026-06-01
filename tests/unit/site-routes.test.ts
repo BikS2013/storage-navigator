@@ -74,6 +74,14 @@ describe('GET /api/site/:storage/:container/*path', () => {
     expect(r.headers['content-security-policy']).toContain("form-action 'self'");
   });
 
+  it('allows https iframes (YouTube/Vimeo) and media via CSP', async () => {
+    const app = await buildApp({ 'page.html': { ct: 'text/html', body: '<iframe src="https://www.youtube.com/embed/x"></iframe>' } });
+    const r = await request(app).get('/api/site/s1/c1/page.html');
+    const csp = r.headers['content-security-policy'];
+    expect(csp).toContain('frame-src https:');
+    expect(csp).toContain("media-src 'self' data: https:");
+  });
+
   it('falls back to extension-derived content-type when the backend reports octet-stream', async () => {
     const app = await buildApp({ 'a.css': { ct: 'application/octet-stream', body: 'body{}' } });
     const r = await request(app).get('/api/site/s1/c1/a.css');

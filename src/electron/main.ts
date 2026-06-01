@@ -194,6 +194,25 @@ app.whenReady().then(() => {
 
   win.loadURL(`http://localhost:${port}`);
 
+  // Any <a target="_blank"> or window.open() from the renderer (including from
+  // inside the sandboxed iframe used by the HTML viewer) would otherwise spawn
+  // a new BrowserWindow with the same preload — effectively "another Storage
+  // Navigator window" pointing at the external URL. Intercept here and route
+  // http(s) URLs to the OS default browser; deny everything else.
+  const routeExternal = (url: string): { action: 'deny' } => {
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        void shell.openExternal(parsed.toString());
+      }
+    } catch { /* malformed URL — swallow */ }
+    return { action: 'deny' };
+  };
+  win.webContents.setWindowOpenHandler(({ url }) => routeExternal(url));
+  win.webContents.on('did-attach-webview', (_event, wc) => {
+    wc.setWindowOpenHandler(({ url }) => routeExternal(url));
+  });
+
   win.on("closed", () => {
     app.quit();
   });
