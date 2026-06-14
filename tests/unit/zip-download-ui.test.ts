@@ -159,4 +159,27 @@ describe('zip-download-ui controller', () => {
     // The revoke happens on a delayed timer; not asserting on it.
     void revoked;
   });
+
+  it('sends wholeContainer (not prefix) for an empty-prefix container download', async () => {
+    uninstallElectronBridge();
+
+    const mockBlob = new Blob(['fake zip bytes'], { type: 'application/zip' });
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      blob: async () => mockBlob,
+    } as unknown as Response);
+    (window as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+    (window.URL as unknown as { createObjectURL: () => string }).createObjectURL = () => 'blob:fake';
+    (window.URL as unknown as { revokeObjectURL: (u: string) => void }).revokeObjectURL = () => {};
+
+    const result = await (window as unknown as { zipDownload: { downloadZipByPrefix: (a: { urlPath: string; prefix: string; archiveName: string }) => Promise<unknown> } })
+      .zipDownload.downloadZipByPrefix({ urlPath: '/api/download-zip/x/y', prefix: '', archiveName: 'y.zip' });
+
+    expect(result).toEqual({ ok: true });
+    expect(fetchMock).toHaveBeenCalledWith('/api/download-zip/x/y', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ wholeContainer: true, archiveName: 'y.zip' }),
+    }));
+  });
 });

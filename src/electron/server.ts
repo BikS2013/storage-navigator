@@ -366,7 +366,10 @@ export function createServer(port: number, publicDirOverride?: string): express.
       const prefix: string | undefined = typeof req.body?.prefix === "string" && req.body.prefix.length > 0
         ? req.body.prefix
         : undefined;
-      if (paths.length === 0 && !prefix) { res.status(400).json({ error: "paths or prefix required" }); return; }
+      // Whole-container download: no paths, no prefix, but an explicit flag so
+      // we don't confuse "archive everything" with a malformed request.
+      const wholeContainer = req.body?.wholeContainer === true;
+      if (paths.length === 0 && !prefix && !wholeContainer) { res.status(400).json({ error: "paths or prefix required" }); return; }
       const basePath = typeof req.body?.basePath === "string" ? req.body.basePath : undefined;
       const archive = String(req.body?.archiveName ?? `${req.params.container}.zip`).replace(/[\r\n"\\/]+/g, "_");
       const container = req.params.container as string;
@@ -400,7 +403,11 @@ export function createServer(port: number, publicDirOverride?: string): express.
       // writer so the response starts streaming without buffering the full
       // tree.
       async function* iterFromPrefix(): AsyncGenerator<Entry> {
-        const normalized = prefix!.endsWith("/") ? prefix! : prefix! + "/";
+        // Empty string lists every blob in the container (whole-container
+        // download); otherwise restrict to the given prefix.
+        const normalized = prefix
+          ? (prefix.endsWith("/") ? prefix : prefix + "/")
+          : "";
         const baseToStrip = basePath ?? normalized;
         const seen = new Set<string>();
         for await (const item of backend.iterateBlobsFlat(container, normalized)) {

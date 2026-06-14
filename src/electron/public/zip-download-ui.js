@@ -82,7 +82,12 @@
   // shape the embedded server expects (see /api/download-zip in server.ts).
   function buildBody({ prefix, archiveName }) {
     const normalized = prefix && !prefix.endsWith("/") ? prefix + "/" : prefix;
-    return { prefix: normalized || undefined, archiveName };
+    if (!normalized) {
+      // No prefix → whole-container download. Signal explicitly so the server
+      // distinguishes "archive everything" from a malformed (missing) request.
+      return { wholeContainer: true, archiveName };
+    }
+    return { prefix: normalized, archiveName };
   }
 
   // Browser-only fallback. Streams via the regular fetch path; the browser
