@@ -31,6 +31,7 @@
 
 import type { BlobClient } from "./blob-client.js";
 import type { CredentialStore } from "./credential-store.js";
+import { generateInstallationToken } from "./github-app-auth.js";
 import {
   buildRepoChanges,
   collectSnapshot,
@@ -102,6 +103,10 @@ export interface InitReverseLinkOptions {
    * AC-C3: `--pat <inline-token>` must override any stored PAT.
    */
   patOverride?: string;
+  /** Auth method used for this link (default "pat" for backward compat). */
+  authType?: "pat" | "github-app";
+  /** Name of the credential (PAT or GitHub App) used for this link. */
+  authCredentialName?: string;
   /** Optional progress sink (NFR7). */
   onProgress?: (msg: string) => void;
 }
@@ -289,6 +294,43 @@ function resolvePATForLink(
   );
 }
 
+/**
+ * Resolve authentication token for a reverse-link (PAT or GitHub App).
+ * 
+ * @param store Credential store
+ * @param link The reverse-link record
+ * @param patOverride Inline PAT override (takes precedence)
+ * @returns Bearer token string (PAT or installation token)
+ */
+async function resolveTokenForLink(
+  store: CredentialStore,
+  link: ReverseLink,
+  patOverride?: string,
+): Promise<string> {
+  // Inline PAT override always takes precedence (AC-C3)
+  if (patOverride) return patOverride;
+  
+  // GitHub App auth
+  if (link.authType === "github-app") {
+    const credName = link.authCredentialName ?? "";
+    const appEntry = store.getGitHubApp(credName);
+    if (!appEntry) {
+      throw new ConfigurationError(
+        `GitHub App '${credName}' not found for reverse-link '${link.id}'. ` +
+        `Run 'storage-nav list-github-apps' to see available credentials.`
+      );
+    }
+    return await generateInstallationToken(
+      appEntry.appId,
+      appEntry.privateKeyPem,
+      appEntry.installationId
+    );
+  }
+  
+  // PAT auth (default)
+  return resolvePATForLink(store, link, patOverride);
+}
+
 // ---------------------------------------------------------------------------
 // initReverseLink
 // ---------------------------------------------------------------------------
@@ -329,6 +371,8 @@ export async function initReverseLink(
     respectGitignore: opts.respectGitignore ?? true,
     createRepo: opts.createRepo ?? false,
     visibility,
+    authType: opts.authType,
+    authCredentialName: opts.authCredentialName,
     blobSnapshot: {},
     createdAt: new Date().toISOString(),
   };
@@ -340,8 +384,8 @@ export async function initReverseLink(
     opts.onProgress?.(
       `Ensuring repo ${link.repoUrl} exists (createIfMissing=true)…`,
     );
-    const pat = resolvePATForLink(opts.credentialStore, link, opts.patOverride);
-    const client = buildWriteClientForLink(link, pat);
+    const token = await resolveTokenForLink(opts.credentialStore, link, opts.patOverride);
+    const client = buildWriteClientForLink(link, token, opts.credentialStore);
     await client.ensureRepo({
       name: link.repoUrl,
       visibility,
@@ -418,11 +462,11 @@ export async function pushReverseLink(
     throw new ConfigurationError(`Reverse-link '${linkId}' not found`);
   }
 
-  // 2. Resolve PAT.
-  const pat = resolvePATForLink(opts.credentialStore, link, opts.patOverride);
+  // 2. Resolve token (PAT or GitHub App installation token).
+  const token = await resolveTokenForLink(opts.credentialStore, link, opts.patOverride);
 
   // 3. Build write client.
-  const client = buildWriteClientForLink(link, pat);
+  const client = buildWriteClientForLink(link, token, opts.credentialStore);
 
   // Ensure the repo exists (no auto-create on push — first publish must
   // explicitly opt-in via initReverseLink's createRepo flag or the

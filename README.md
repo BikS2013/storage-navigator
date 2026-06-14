@@ -17,6 +17,7 @@ A browser, editor, and automation surface for **Azure Blob Storage** and **Azure
 - **Encrypted local credential store.** Account keys, SAS tokens, OIDC refresh tokens, and PATs are encrypted at rest under a machine-bound key (`src/core/credential-store.ts`). PATs (GitHub / Azure DevOps) are kept separate from storage credentials and tagged for reuse across containers.
 - **Safe in-place text editing.** The viewer detects text-editable blobs (allow-list → content sniff → size cap), and `PUT` requests are guarded with an `If-Match` ETag round-trip so concurrent writers can't silently clobber each other.
 - **Repo ↔ container sync.** Clone GitHub / Azure DevOps repos (HTTPS + SSH) into a container, then run `sync` for incremental SHA-based updates or `diff` to compare a container against its linked remote without touching either side.
+- **Publish back to GitHub (reverse-git).** Push a container / prefix / whole account into a GitHub repo (incremental add/modify/delete), authenticating with a PAT **or** a **GitHub App** installation. A GitHub App installed with “Only select repositories” keeps the tool scoped to exactly the repos it created/manages. See [`docs/design/configuration-guide.md` §5](docs/design/configuration-guide.md).
 - **Streaming ZIP downloads.** Single-blob downloads use `Content-Disposition`; multi-blob and folder downloads stream a ZIP archive lazily — pagination is interleaved with archive writing so the response starts before the full tree is walked.
 - **DOCX rendering.** `.docx` blobs can be requested as `?format=html` (Mammoth) or `?format=text` for inline preview without leaving the app.
 - **Multi-provider agent.** OpenAI, Anthropic, Google Gemini, Azure OpenAI, Azure Anthropic, and any local OpenAI-wire endpoint (Ollama, LiteLLM, MLX, llama.cpp). Provider precedence: CLI flag > env > `~/.tool-agents/storage-nav/.env` > local `.env`.
@@ -96,6 +97,37 @@ npx tsx src/cli/index.ts diff --storage myacct --container repo-mirror
 ```
 
 For `api` backends every blob/share command accepts `--account <azure-account>` to disambiguate which Azure account behind the broker to target.
+
+### 5 · Publish to GitHub — PAT or GitHub App
+
+Publish (push) a container/prefix/account back to a GitHub repo. You can authenticate with a Personal Access Token (PAT) **or** a **GitHub App** installation. A GitHub App installed with “Only select repositories” keeps Storage Navigator limited to exactly the repos it created/manages.
+
+```bash
+# --- Option A: PAT ---
+npx tsx src/cli/index.ts publish-github --container my-docs --repo myorg/my-docs \
+  --create-repo --token-name personal
+
+# --- Option B: GitHub App (scoped, recommended) ---
+# 1. Register the app credential once (private key encrypted at rest)
+npx tsx src/cli/index.ts add-github-app \
+  --name my-publisher --app-id 123456 --installation-id 7654321 \
+  --private-key-file ./my-app.private-key.pem \
+  --companion-pat-name personal      # optional: auto-adds new repos to the install
+
+# 2. Publish using the app
+npx tsx src/cli/index.ts publish-github --container my-docs --repo myorg/my-docs \
+  --create-repo --github-app-name my-publisher
+
+# Later incremental pushes (either auth)
+npx tsx src/cli/index.ts push --container my-docs
+```
+
+Setup of the GitHub App (permissions, App ID, installation ID, private key) and the
+companion-PAT boundary behavior are documented in
+[`docs/design/configuration-guide.md` §5](docs/design/configuration-guide.md) and the
+“GitHub App authentication” section of [`docs/tools/storage-nav.md`](docs/tools/storage-nav.md).
+Both the CLI and the Desktop UI support GitHub App credential management and selecting an
+app when publishing.
 
 ---
 
@@ -263,6 +295,7 @@ Packaging the Electron app uses `electron-builder`; see `package.json` for the b
 | `docs/tools/storage-nav.md` | Full CLI + UI command reference |
 | `docs/tools/storage-nav-api.md` | API endpoints, RBAC, static-header gate |
 | `docs/tools/storage-nav-agent.md` | Agent provider matrix, tool schemas, TUI keys |
+| `docs/design/configuration-guide.md` | Credentials & config: storage backends, PATs, **GitHub App auth (§5)** |
 | `docs/design/project-design.md` | High-level architecture |
 | `docs/design/project-functions.md` | Feature catalogue |
 | `docs/design/plan-NNN-*.md` | Per-feature design + implementation plans |

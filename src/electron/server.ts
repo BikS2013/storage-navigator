@@ -3,6 +3,7 @@ import * as path from "path";
 import { fileURLToPath } from "url";
 import mammoth from "mammoth";
 import { CredentialStore } from "../core/credential-store.js";
+import { generateInstallationToken } from "../core/github-app-auth.js";
 import { BlobClient } from "../core/blob-client.js";
 import { makeBackend } from "../core/backend/factory.js";
 import type { IStorageBackend } from "../core/backend/backend.js";
@@ -1120,6 +1121,40 @@ export function createServer(port: number, publicDirOverride?: string): express.
   });
 
   // -------------------------------------------------------------------------
+  // GitHub Apps API (plan-012)
+  // -------------------------------------------------------------------------
+
+  // API: List GitHub Apps
+  app.get("/api/github-apps", (_req, res) => {
+    const store = new CredentialStore();
+    res.json(store.listGitHubApps());
+  });
+
+  // API: Add a GitHub App credential
+  app.post("/api/github-apps", (req, res) => {
+    const { name, appId, installationId, privateKeyPem, companionPatTokenName } = req.body;
+    if (!name || !appId || !installationId || !privateKeyPem) {
+      res.status(400).json({ error: "name, appId, installationId, and privateKeyPem are required" });
+      return;
+    }
+    const store = new CredentialStore();
+    store.addGitHubApp({ name, appId, installationId, privateKeyPem, companionPatTokenName });
+    res.json({ success: true });
+  });
+
+  // API: Remove a GitHub App credential
+  app.delete("/api/github-apps/:name", (req, res) => {
+    const { name } = req.params;
+    const store = new CredentialStore();
+    const removed = store.removeGitHubApp(name);
+    if (!removed) {
+      res.status(404).json({ error: `GitHub App "${name}" not found` });
+      return;
+    }
+    res.json({ success: true });
+  });
+
+  // -------------------------------------------------------------------------
   // Reverse-Git Publication API (Phase F)
   //
   // Six endpoints implementing the route table in
@@ -1227,6 +1262,8 @@ export function createServer(port: number, publicDirOverride?: string): express.
         branch,
         repoSubPath,
         tokenName,
+        authType,
+        authCredentialName,
         author,
         exclusionPatterns,
         respectGitignore,
@@ -1234,10 +1271,20 @@ export function createServer(port: number, publicDirOverride?: string): express.
         visibility,
       } = req.body ?? {};
 
-      if (!provider || !repoUrl || !tokenName) {
+      if (!provider || !repoUrl) {
         res
           .status(400)
-          .json({ error: "provider, repoUrl, and tokenName are required" });
+          .json({ error: "provider and repoUrl are required" });
+        return;
+      }
+      
+      // Validate credential: must have either tokenName (PAT) or authType + authCredentialName (GitHub App)
+      const hasPatCred = tokenName;
+      const hasAppCred = authType === "github-app" && authCredentialName;
+      if (!hasPatCred && !hasAppCred) {
+        res
+          .status(400)
+          .json({ error: "A credential is required: either tokenName (PAT) or authType + authCredentialName (GitHub App)" });
         return;
       }
       if (provider !== "github" && provider !== "azure-devops") {
@@ -1290,7 +1337,10 @@ export function createServer(port: number, publicDirOverride?: string): express.
         branch: typeof branch === "string" ? branch : undefined,
         repoSubPath:
           typeof repoSubPath === "string" ? repoSubPath : undefined,
-        tokenName: tokenName as string,
+        // tokenName is the credential name for backward compat; use authCredentialName for GitHub App, tokenName for PAT
+        tokenName: (authType === "github-app" ? authCredentialName : tokenName) as string,
+        authType: authType === "github-app" ? "github-app" : "pat",
+        authCredentialName: (authType === "github-app" ? authCredentialName : tokenName) as string | undefined,
         author:
           author && typeof author === "object"
             ? (author as CommitAuthor)

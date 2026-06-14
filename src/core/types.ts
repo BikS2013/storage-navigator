@@ -5,6 +5,7 @@
 export * from "./reverse-git-types.js";
 import type {
   AccountScopeReverseLinksRegistry,
+  GitHubAppEntry,
   ReverseGitLinkPATBinding,
 } from "./reverse-git-types.js";
 
@@ -119,6 +120,11 @@ export interface SyncResult {
 export interface CredentialData {
   storages: StorageEntry[];
   tokens?: TokenEntry[];
+  /**
+   * GitHub App credentials for installation-token authentication (plan-012).
+   * Optional for backward compatibility — defaults to [] when missing.
+   */
+  githubApps?: GitHubAppEntry[];
   /**
    * Storage-account-scope reverse-link registry. Optional for backward
    * compatibility — older config files lack this field and `CredentialStore`

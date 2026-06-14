@@ -2,6 +2,13 @@
 
 ## Pending
 
+### GitHub App auth (plan-012) follow-ups
+
+- **[R1] User-account (non-org) repo creation via installation token is empirically unverified**: `GitHubWriteClient.createRepo` issues `POST /user/repos` for non-org owners, but whether a GitHub App *installation token* may create repos on a personal account is provider-dependent and not confirmed in GitHub's docs. Org installations (`POST /orgs/{org}/repos` with Administration:write) are the verified path. Action: run a live smoke test with a real GitHub App + personal-account installation; if it 403s, document the limitation and require a PAT for personal-account creation. No silent fallback is implemented (explicit error surfaces).
+- **[Manual] End-to-end live smoke test (AC-IR1) pending**: Register a GitHub App, `add-github-app`, `publish-github --github-app-name`, verify repo created + (with companion PAT) added to the installation, make a change, `push`, verify the new commit. Unit tests cover the logic with mocked GitHub APIs; a live run is still recommended before relying on it in production.
+- **[v1 boundary] Automatic repo→installation scope-add requires a companion PAT**: Installation tokens cannot call `PUT /user/installations/{id}/repositories/{repo_id}` (GitHub allows it only for a classic PAT with `repo` scope). Without `--companion-pat-name`, storage-nav creates/pushes the repo and prints manual GitHub-UI instructions (graceful degradation, no retry). A future enhancement could add retry or a user-to-server OAuth flow.
+- **[Reserved] `clientId`/`clientSecret` on GitHubAppEntry are accepted but unused**: persisted for a future user-to-server/OAuth flow (OQ1). CLI `--client-id` is documented as reserved.
+
 ### Low Priority — Reverse-Git (plan-011) follow-ups
 
 - **`reverse-sync-engine.ts collectAccountNames` reaches into private `CredentialStore.data`**: The helper uses an `as unknown as { data?: ... }` cast to enumerate account names with reverse-link records because `CredentialStore` does not yet expose a public "list known accounts" method. Acceptable for v1 but should be replaced with a typed public accessor (e.g., `listReverseLinkAccountNames(): string[]`) when the store is next refactored. The cast lives in `src/core/reverse-sync-engine.ts` around line 184–190.
@@ -64,6 +71,7 @@
 
 ## Dependency vetting log
 
+- 2026-06-14 — jose@6.2.3 — Zero dependencies. npm audit clean (0 advisories for jose). Used for GitHub App JWT signing (RS256). Web Crypto API based. Research: `docs/research/jose-rs256-github-app-jwt.md`.
 - 2026-06-01 — supertest@7.2.2 — npm audit clean at install time (no HIGH or CRITICAL advisories attributed to supertest).
 - 2026-06-01 — @types/supertest@7.2.0 — types-only dev dependency, no runtime surface, npm audit clean at install time.
 - 2026-06-01 — Dependency validation run (reverse-git branch, commit f2f0f94). Found 14 advisories (10 moderate, 4 high). All resolved via `npm audit fix` (13) + `overrides["brace-expansion"]:"^5.0.6"` (1). Final audit: 0 vulnerabilities. Report: `docs/reference/dependency-validation-reverse-git.md`. Override expiry condition: remove `brace-expansion` override once `electron-builder` updates `app-builder-lib → minimatch@10` to a release that natively pulls `brace-expansion@>=5.0.6`.

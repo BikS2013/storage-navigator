@@ -355,3 +355,152 @@ storage → repo. PAT auth, REST-only (no local working tree). See
 | FR-RG-NFR6 | Backward compatibility: all existing forward-sync commands, endpoints, and metadata blobs continue to function unchanged. |
 | FR-RG-NFR7 | Every push operation emits progress via `onProgress?: (msg: string) => void` callback. |
 | FR-RG-NFR8 | PATs never logged; auto-created repos default to `private`. |
+
+---
+
+## GitHub App Authentication (Reverse-Git Extension)
+
+**Category:** Authentication / Reverse-Git Enhancement  
+**Design Reference:** `docs/design/project-design.md` § Technical Design: GitHub App Authentication  
+**Implementation Plan:** `docs/design/plan-012-github-app-auth.md`
+
+GitHub App installation-token authentication is an **additional authentication method** for reverse-git publication, coexisting with the existing Personal Access Token (PAT) flow. Full backward compatibility maintained.
+
+### Credential Management (FR-GHA-CM-*)
+
+| ID | Requirement |
+|---|---|
+| FR-GHA-CM1 | Store GitHub App credentials in the existing encrypted credential store (`~/.storage-navigator/credentials.json`, AES-256-GCM). |
+| FR-GHA-CM2 | `GitHubAppEntry` contains: `name` (user-defined), `appId` (numeric string), `privateKeyPem` (PKCS#1 or PKCS#8), `installationId`, optional `clientId`/`clientSecret` (reserved for future OAuth), optional `companionPatTokenName`, `addedAt`, optional `expiresAt`. |
+| FR-GHA-CM3 | Private key PEM encrypted at rest; NEVER logged, printed to console, or exposed in API responses. |
+| FR-GHA-CM4 | Multiple GitHub App entries supported (one per installation). |
+| FR-GHA-CM5 | Backward compatibility: missing `githubApps` field defaults to `[]`, no migration write on read. |
+
+### Installation Token Generation (FR-GHA-ITG-*)
+
+| ID | Requirement |
+|---|---|
+| FR-GHA-ITG1 | Generate installation access tokens on-demand using JWT-based authentication flow: create JWT signed with private key (RS256), exchange JWT for installation token via `POST /app/installations/{installation_id}/access_tokens`. |
+| FR-GHA-ITG2 | JWT claims: `iat` (now - 60 for clock skew), `exp` (now + 600, GitHub max 10 minutes), `iss` (appId). JWT header: `alg: RS256`, `typ: JWT`. |
+| FR-GHA-ITG3 | Token generation uses `jose` library (v6.2.3+, zero transitive dependencies, Web Crypto API-based). |
+| FR-GHA-ITG4 | Installation tokens cached in-memory per CLI command/UI action, keyed by `installationId`, TTL 1 hour with 1-minute safety margin. |
+| FR-GHA-ITG5 | Installation tokens NEVER persisted to disk (ephemeral, regenerated on each operation). |
+| FR-GHA-ITG6 | Token generation errors mapped to existing error taxonomy: 401 → `InvalidPATError`, 403 → `InsufficientScopesError`, 404 → `GitHubApiError`, 403/429 rate-limit → `RateLimitExceededError`. |
+
+### Repository Creation & Scope Management (FR-GHA-RCS-*)
+
+| ID | Requirement |
+|---|---|
+| FR-GHA-RCS1 | Create repositories via installation token: `POST /orgs/{org}/repos` (organization installations) or `POST /user/repos` (personal account installations, assumed working). |
+| FR-GHA-RCS2 | After repository creation, attempt to add repository to installation's "Only select repositories" set via `PUT /user/installations/{installation_id}/repositories/{repository_id}`. |
+| FR-GHA-RCS3 | **Graceful degradation:** When PUT returns 403/404 (expected — GitHub API requires classic PAT with `repo` scope, not installation token), log warning (CLI) or display toast (UI) with manual GitHub UI instructions. Exit code: 0 (repo creation succeeded). |
+| FR-GHA-RCS4 | When PUT returns 204/304, log success message: "Repository added to GitHub App installation scope." |
+| FR-GHA-RCS5 | Optional companion PAT enhancement (out of scope for v1): When `GitHubAppEntry.companionPatTokenName` is set, use that PAT for the PUT call instead of the installation token. |
+| FR-GHA-RCS6 | Repository detection logic: parse `owner` from repo URL → `GET /orgs/{owner}` (200 = org, 404 = user). |
+
+### CLI Commands (FR-GHA-CLI-*)
+
+| ID | Requirement |
+|---|---|
+| FR-GHA-CLI1 | `add-github-app` subcommand with required options: `--name`, `--app-id`, `--installation-id`, `--private-key-file`. Optional: `--client-id`, `--client-secret`, `--companion-pat-name`, `--expires-at`. |
+| FR-GHA-CLI2 | `list-github-apps` subcommand: displays metadata (name, appId, installationId, addedAt, expiresAt, hasCompanionPat) in tabular format. Private key PEM NOT printed. |
+| FR-GHA-CLI3 | `remove-github-app` subcommand with required option: `--name`. |
+| FR-GHA-CLI4 | All reverse-git publication commands (`publish-github`, `reverse-link-github`, `push`) accept `--github-app-name <name>` and `--github-app-inline <json>` flags. |
+| FR-GHA-CLI5 | Credential resolution precedence: `--github-app-inline` > `--github-app-name` > `--pat` > `--token-name` > first stored PAT with `provider: "github"` > `ConfigurationError` (exit 3, no fallback). |
+| FR-GHA-CLI6 | Error message when GitHub App credential not found: "GitHub App '{name}' not found. Run 'storage-nav list-github-apps' to see available credentials." |
+| FR-GHA-CLI7 | Error message for insufficient permissions: "GitHub App lacks required permissions. Ensure the app has 'Contents: Read & write' and 'Administration: Read & write' permissions." |
+
+### Electron UI (FR-GHA-UI-*)
+
+| ID | Requirement |
+|---|---|
+| FR-GHA-UI1 | "GitHub Apps" section in settings modal (analogous to "Personal Access Tokens" section). |
+| FR-GHA-UI2 | GitHub Apps section allows: add (form with name, appId, installationId, private key PEM textarea, optional expiresAt, optional companionPatName), list (table with metadata + "Remove" button), remove (confirmation dialog). |
+| FR-GHA-UI3 | Private key PEM textarea validates format (basic check: starts with `-----BEGIN RSA PRIVATE KEY-----` or `-----BEGIN PRIVATE KEY-----`). |
+| FR-GHA-UI4 | Publish modal credential selector shows both PATs and GitHub Apps with visual distinction: PATs labeled with 🔑 icon, GitHub Apps with ⚙️ icon. |
+| FR-GHA-UI5 | Credential selector grouped via `<optgroup>`: "Personal Access Tokens" group + "GitHub Apps" group. |
+| FR-GHA-UI6 | Reverse-links panel displays `authType` and `authCredentialName` in new "Auth" column (e.g., "Auth: GitHub App (my-app-install-1)"). |
+| FR-GHA-UI7 | API routes: `GET /api/github-apps`, `POST /api/github-apps`, `DELETE /api/github-apps/:name`. |
+
+### Reverse-Git Integration (FR-GHA-RGI-*)
+
+| ID | Requirement |
+|---|---|
+| FR-GHA-RGI1 | `ReverseLink` extended with optional `authType?: "pat" | "github-app"` and `authCredentialName?: string`. |
+| FR-GHA-RGI2 | Missing `authType` defaults to `"pat"` (backward compatibility). |
+| FR-GHA-RGI3 | `pushReverseLink` resolves GitHub App credentials when `link.authType === "github-app"`: lookup `GitHubAppEntry` by `authCredentialName`, generate installation token via `generateInstallationToken()`, pass to `buildWriteClientForLink()`. |
+| FR-GHA-RGI4 | `buildWriteClientForLink()` extended with optional `installationId?: string` parameter; passed to `GitHubWriteClient` constructor. |
+| FR-GHA-RGI5 | `GitHubWriteClient` constructor extended with optional `installationId?: string` parameter; when set, `createRepo()` performs scope-addition attempt. |
+| FR-GHA-RGI6 | Installation tokens use identical HTTP header format as PATs (`Authorization: Bearer <token>`) — no changes to `GitHubWriteClient` request logic. |
+
+### PEM Validation & Error Handling (FR-GHA-PEM-*)
+
+| ID | Requirement |
+|---|---|
+| FR-GHA-PEM1 | Basic PEM validation before cryptographic check: verify starts with `-----BEGIN RSA PRIVATE KEY-----` or `-----BEGIN PRIVATE KEY-----`. |
+| FR-GHA-PEM2 | Reject public keys: "Invalid private key: PEM contains a public key. GitHub App requires the private key." |
+| FR-GHA-PEM3 | Reject passphrase-protected keys: "GitHub App private key must not be passphrase-protected. Use openssl to remove encryption." |
+| FR-GHA-PEM4 | Reject malformed PEM: "Invalid private key: PEM format is malformed. Ensure the key starts with -----BEGIN and ends with -----END." |
+| FR-GHA-PEM5 | Defer cryptographic validation to JWT signing attempt; propagate `jose` library errors with clear context. |
+
+### Security & Compliance (FR-GHA-SEC-*)
+
+| ID | Requirement |
+|---|---|
+| FR-GHA-SEC1 | Private key PEM encrypted in same AES-256-GCM envelope as PATs; never persisted in plaintext. |
+| FR-GHA-SEC2 | Installation tokens never persisted to disk; ephemeral, regenerated on each operation. |
+| FR-GHA-SEC3 | `listGitHubApps` CLI output and API response NEVER include `privateKeyPem` (metadata only). |
+| FR-GHA-SEC4 | No logging of private keys, installation tokens, or JWTs. |
+| FR-GHA-SEC5 | No-fallback rule: missing `appId`, `privateKeyPem`, or `installationId` → throw `ConfigurationError` (exit 3), never substitute defaults. |
+
+### Backward Compatibility (FR-GHA-BC-*)
+
+| ID | Requirement |
+|---|---|
+| FR-GHA-BC1 | Existing `credentials.json` without `githubApps` field loads successfully; `listGitHubApps()` returns `[]`. |
+| FR-GHA-BC2 | Existing reverse-links without `authType`/`authCredentialName` continue to push via PAT resolution. |
+| FR-GHA-BC3 | All existing CLI commands (`clone-github`, `sync`, `publish-github`, `push`) work unchanged when GitHub App credentials not provided. |
+| FR-GHA-BC4 | Electron UI existing PAT-based workflows (forward sync, reverse-git with PAT) remain functional. |
+| FR-GHA-BC5 | Migration test: `tests/unit/credential-migration.test.ts` verifies old config loads without `githubApps`. |
+
+### Testing & Validation (FR-GHA-TV-*)
+
+| ID | Requirement |
+|---|---|
+| FR-GHA-TV1 | Unit tests for installation token generation: JWT structure validation, API exchange mocking, error handling. File: `tests/unit/github-app-auth.test.ts`. |
+| FR-GHA-TV2 | Unit tests for credential store CRUD: add, get, list, remove operations. File: `tests/unit/github-app-credential-store.test.ts`. |
+| FR-GHA-TV3 | Integration test for GitHub App-based publish/push: end-to-end workflow (add credentials → publish → push → verify). File: `tests/unit/github-app-reverse-git.test.ts`. |
+| FR-GHA-TV4 | Regression test: ALL existing Vitest tests pass (zero regressions). |
+| FR-GHA-TV5 | Dependency vetting: `jose@^6.2.3` vetted (zero transitive dependencies, zero HIGH+ advisories as of 2026-06-14). Vetting logged in `Issues - Pending Items.md`. |
+| FR-GHA-TV6 | `npm audit` confirms zero HIGH+ advisories for all dependencies. |
+| FR-GHA-TV7 | `npx tsc --noEmit` passes (no TypeScript errors). |
+
+### Documentation (FR-GHA-DOC-*)
+
+| ID | Requirement |
+|---|---|
+| FR-GHA-DOC1 | `docs/tools/storage-nav.md` contains "GitHub App Authentication" section: registration workflow, credential storage, CLI commands, precedence rules, scope model, troubleshooting. |
+| FR-GHA-DOC2 | `docs/design/configuration-guide.md` documents GitHub App credential fields (appId, privateKeyPem, installationId, clientId, clientSecret, companionPatTokenName, expiresAt) and recommended storage practices. |
+| FR-GHA-DOC3 | `storage-nav add-github-app --help` displays: purpose, required flags, optional flags, example usage, metadata source guidance. |
+| FR-GHA-DOC4 | Inline error messages explicitly guide users: insufficient permissions → list required permissions; installation not found → verify at https://github.com/settings/installations. |
+
+### Tri-State Exit Codes (FR-GHA-EC-*)
+
+| Exit Code | Meaning | GitHub App Context |
+|---|---|---|
+| 0 | Success / no-op | Repo created successfully (even if scope addition failed with warning) |
+| 1 | Changes pushed | Push operation succeeded using installation token |
+| 2 | Fatal error | Installation token generation failed, or push operation failed |
+| 3 | Configuration error | GitHub App credential not found, or required fields missing |
+
+### Non-Functional (FR-GHA-NFR-*)
+
+| ID | Requirement |
+|---|---|
+| FR-GHA-NFR1 | One new runtime dependency: `jose@^6.2.3` (zero transitive dependencies, 25–30 KB minified). |
+| FR-GHA-NFR2 | Installation token generation adds ~200–500ms per operation (JWT signing + API call); acceptable for on-demand operations. |
+| FR-GHA-NFR3 | Token caching within single CLI command / UI action reuses token across multiple links for same installation (e.g., `push --all` with 5 links on same installation → 1 token generation instead of 5). |
+| FR-GHA-NFR4 | No background health checks; token generation failure surfaces error at operation time. |
+| FR-GHA-NFR5 | In-memory token cache auto-expires at process exit (CLI) or when user navigates away (Electron UI). |
+| FR-GHA-NFR6 | GitHub API rate limits honored via existing `rateLimitedFetch` (403/429 retry with exponential back-off). |
+

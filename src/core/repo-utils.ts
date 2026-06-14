@@ -87,6 +87,7 @@ export async function buildProviderForLink(
 export function buildWriteClientForLink(
   link: ReverseLink,
   pat: string,
+  store?: any,
 ): RepoWriteClient {
   if (!pat) {
     throw new Error(
@@ -94,7 +95,25 @@ export function buildWriteClientForLink(
     );
   }
   if (link.provider === "github") {
-    return GitHubWriteClient.fromRepoUrl(pat, link.repoUrl);
+    // For GitHub App auth, pass installationId and companion PAT info
+    let installationId: string | undefined;
+    let companionPatTokenName: string | undefined;
+    
+    if (link.authType === "github-app" && link.authCredentialName && store) {
+      const appEntry = store.getGitHubApp?.(link.authCredentialName);
+      if (appEntry) {
+        installationId = appEntry.installationId;
+        companionPatTokenName = appEntry.companionPatTokenName;
+      }
+    }
+    
+    return GitHubWriteClient.fromRepoUrl(
+      pat,
+      link.repoUrl,
+      installationId,
+      store,
+      companionPatTokenName
+    );
   }
   if (link.provider === "azure-devops") {
     return DevOpsWriteClient.fromRepoUrl(pat, link.repoUrl);

@@ -22,6 +22,7 @@
         <button id="create-btn" class="icon-btn" title="Create new file">&#9998;</button>
         <button id="refresh-btn" class="icon-btn" title="Refresh">&#8635;</button>
         <button id="export-btn" class="icon-btn" title="Export storage config">&#8681;</button>
+        <button id="github-apps-btn" class="icon-btn" title="GitHub Apps">&#128273;</button>
         <button id="theme-btn" class="icon-btn" title="Toggle theme">&#9788;</button>
       </div>
     </header>
@@ -235,7 +236,7 @@
       <label>Repository URL<input type="text" id="publish-repo-url" placeholder="https://github.com/owner/repo or https://dev.azure.com/org/project/_git/repo"></label>
       <label>Branch<input type="text" id="publish-branch" placeholder="main"></label>
       <label>Repo Sub-Path<input type="text" id="publish-repo-subpath" placeholder="(repo root)"></label>
-      <label style="margin-bottom:0;">PAT Token</label>
+      <label style="margin-bottom:0;">Credential (PAT or GitHub App)</label>
       <div style="display:flex;gap:6px;align-items:center;margin-top:4px;margin-bottom:10px;">
         <select id="publish-token" style="flex:1;padding:8px;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:13px;">
           <option value="">Loading tokens...</option>
@@ -301,6 +302,41 @@
       <div class="modal-actions">
         <button id="add-token-cancel">Cancel</button>
         <button id="add-token-save" class="primary">Save Token</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- GitHub Apps modal -->
+  <div id="github-apps-modal" class="modal hidden">
+    <div class="modal-content" style="max-width: 700px;">
+      <h2>GitHub Apps</h2>
+      <div style="margin-bottom: 16px;">
+        <button id="add-github-app-btn" class="primary" style="margin-bottom: 12px;">+ Add GitHub App</button>
+        <div id="github-apps-list" style="max-height: 300px; overflow-y: auto;"></div>
+      </div>
+      <div class="modal-actions">
+        <button id="github-apps-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add GitHub App modal -->
+  <div id="add-github-app-modal" class="modal hidden">
+    <div class="modal-content" style="max-width: 600px;">
+      <h2>Add GitHub App</h2>
+      <label>App Name<input type="text" id="add-app-name" placeholder="e.g. my-storage-app"></label>
+      <label>App ID<input type="text" id="add-app-id" placeholder="Numeric App ID from GitHub settings"></label>
+      <label>Installation ID<input type="text" id="add-app-installation-id" placeholder="Installation ID for target account/org"></label>
+      <label>Private Key (PEM)
+        <textarea id="add-app-private-key" rows="8" placeholder="Paste private key PEM (-----BEGIN RSA PRIVATE KEY----- or -----BEGIN PRIVATE KEY-----)" style="font-family: monospace; font-size: 12px;"></textarea>
+      </label>
+      <label>Companion PAT Name (optional)
+        <input type="text" id="add-app-companion-pat" placeholder="Optional: PAT name for repository scope addition">
+        <small style="display: block; margin-top: 4px; color: var(--text-muted); font-size: 11px;">A GitHub PAT with 'repo' scope can automatically add created repos to the installation's selected repositories.</small>
+      </label>
+      <div class="modal-actions">
+        <button id="add-app-cancel">Cancel</button>
+        <button id="add-app-save" class="primary">Save GitHub App</button>
       </div>
     </div>
   </div>

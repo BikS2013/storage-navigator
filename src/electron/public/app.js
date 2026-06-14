@@ -8,6 +8,7 @@
   const deleteStorageCancel = document.getElementById("delete-storage-cancel");
   const deleteStorageConfirm = document.getElementById("delete-storage-confirm");
   const exportBtn = document.getElementById("export-btn");
+  const githubAppsBtn = document.getElementById("github-apps-btn");
   const refreshBtn = document.getElementById("refresh-btn");
   const themeBtn = document.getElementById("theme-btn");
   const treeContent = document.getElementById("tree-content");
@@ -127,6 +128,18 @@
   const addTokenValue = document.getElementById("add-token-value");
   const addTokenCancel = document.getElementById("add-token-cancel");
   const addTokenSave = document.getElementById("add-token-save");
+  const githubAppsModal = document.getElementById("github-apps-modal");
+  const githubAppsList = document.getElementById("github-apps-list");
+  const addGitHubAppBtn = document.getElementById("add-github-app-btn");
+  const githubAppsClose = document.getElementById("github-apps-close");
+  const addGitHubAppModal = document.getElementById("add-github-app-modal");
+  const addAppName = document.getElementById("add-app-name");
+  const addAppId = document.getElementById("add-app-id");
+  const addAppInstallationId = document.getElementById("add-app-installation-id");
+  const addAppPrivateKey = document.getElementById("add-app-private-key");
+  const addAppCompanionPat = document.getElementById("add-app-companion-pat");
+  const addAppCancel = document.getElementById("add-app-cancel");
+  const addAppSave = document.getElementById("add-app-save");
 
   let currentStorage = "";
   let currentContainer = "";
@@ -990,6 +1003,12 @@
     } catch (e) {
       alert("Export failed: " + e.message);
     }
+  });
+
+  // --- GitHub Apps ---
+  githubAppsBtn.addEventListener("click", async () => {
+    await loadGitHubApps();
+    githubAppsModal.classList.remove("hidden");
   });
 
   // --- Refresh ---
@@ -2114,8 +2133,8 @@
         // dropdown and auto-select the token we just added.
         addTokenForPublish = false;
         publishProvider.value = provider;
-        await populatePublishTokens(provider);
-        publishToken.value = name;
+        await populatePublishCredentials(provider);
+        publishToken.value = "pat:" + name;
         setPublishStatus('Token "' + name + '" added and selected.', "info");
       } else if (pendingRetryAction) {
         // Automatically retry the sync that triggered the missing PAT error
@@ -2130,6 +2149,96 @@
       addTokenSave.textContent = "Save Token";
     }
   });
+
+  // --- GitHub Apps modal ---
+  addGitHubAppBtn.addEventListener("click", () => {
+    githubAppsModal.classList.add("hidden");
+    addAppName.value = "";
+    addAppId.value = "";
+    addAppInstallationId.value = "";
+    addAppPrivateKey.value = "";
+    addAppCompanionPat.value = "";
+    addGitHubAppModal.classList.remove("hidden");
+    addAppName.focus();
+  });
+
+  githubAppsClose.addEventListener("click", () => {
+    githubAppsModal.classList.add("hidden");
+  });
+
+  addAppCancel.addEventListener("click", () => {
+    addGitHubAppModal.classList.add("hidden");
+  });
+
+  addAppSave.addEventListener("click", async () => {
+    const name = addAppName.value.trim();
+    const appId = addAppId.value.trim();
+    const installationId = addAppInstallationId.value.trim();
+    const privateKeyPem = addAppPrivateKey.value.trim();
+    const companionPatTokenName = addAppCompanionPat.value.trim() || undefined;
+
+    if (!name) { alert("App name is required."); return; }
+    if (!appId) { alert("App ID is required."); return; }
+    if (!installationId) { alert("Installation ID is required."); return; }
+    if (!privateKeyPem) { alert("Private key PEM is required."); return; }
+
+    addAppSave.disabled = true;
+    addAppSave.textContent = "Saving...";
+
+    try {
+      await apiJson("/api/github-apps", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, appId, installationId, privateKeyPem, companionPatTokenName }),
+      });
+      addGitHubAppModal.classList.add("hidden");
+      await loadGitHubApps();
+    } catch (e) {
+      alert("Failed to save GitHub App: " + e.message);
+    } finally {
+      addAppSave.disabled = false;
+      addAppSave.textContent = "Save GitHub App";
+    }
+  });
+
+  async function loadGitHubApps() {
+    try {
+      const apps = await apiJson("/api/github-apps");
+      githubAppsList.innerHTML = "";
+      if (!apps || apps.length === 0) {
+        githubAppsList.innerHTML = '<div style="color: var(--text-muted); font-size: 13px; padding: 12px;">No GitHub Apps configured. Click "+ Add GitHub App" above.</div>';
+        return;
+      }
+      apps.forEach(app => {
+        const div = document.createElement("div");
+        div.style.cssText = "padding: 12px; border: 1px solid var(--border); border-radius: 4px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;";
+        const info = document.createElement("div");
+        info.innerHTML = `
+          <div style="font-weight: 500; margin-bottom: 4px;">${escapeHtml(app.name)}</div>
+          <div style="font-size: 12px; color: var(--text-muted);">App ID: ${escapeHtml(app.appId)} | Installation: ${escapeHtml(app.installationId)}</div>
+          ${app.hasCompanionPat ? '<div style="font-size: 11px; color: var(--link);">✓ Companion PAT configured</div>' : ''}
+        `;
+        const removeBtn = document.createElement("button");
+        removeBtn.textContent = "Remove";
+        removeBtn.className = "danger";
+        removeBtn.style.cssText = "padding: 6px 12px; font-size: 12px;";
+        removeBtn.addEventListener("click", async () => {
+          if (!confirm(`Remove GitHub App "${app.name}"?`)) return;
+          try {
+            await apiJson(`/api/github-apps/${encodeURIComponent(app.name)}`, { method: "DELETE" });
+            await loadGitHubApps();
+          } catch (e) {
+            alert("Failed to remove GitHub App: " + e.message);
+          }
+        });
+        div.appendChild(info);
+        div.appendChild(removeBtn);
+        githubAppsList.appendChild(div);
+      });
+    } catch (e) {
+      githubAppsList.innerHTML = `<div style="color: var(--expiry-expired); padding: 12px;">Error loading GitHub Apps: ${escapeHtml(e.message)}</div>`;
+    }
+  }
 
   linksPanelClose.addEventListener("click", () => {
     linksPanelModal.classList.add("hidden");
@@ -2172,41 +2281,62 @@
     return "Container: " + scope.container;
   }
 
-  // --- Token-selector population (called when publish modal opens) ---
-  async function populatePublishTokens(provider) {
-    publishToken.innerHTML = '<option value="">Loading tokens...</option>';
+  // --- Credential-selector population (called when publish modal opens) ---
+  // Loads both PATs and GitHub Apps (GitHub only), using optgroups to distinguish
+  async function populatePublishCredentials(provider) {
+    publishToken.innerHTML = '<option value="">Loading credentials...</option>';
     publishInit.disabled = true;
     publishInitPush.disabled = true;
     try {
-      const all = await apiJson("/api/tokens");
-      const matching = all.filter((t) => t.provider === provider);
-      if (matching.length === 0) {
-        publishToken.innerHTML = '<option value="">(no ' + provider + " tokens — add one first)</option>";
+      const [pats, apps] = await Promise.all([
+        apiJson("/api/tokens"),
+        provider === "github" ? apiJson("/api/github-apps").catch(() => []) : Promise.resolve([])
+      ]);
+      const matchingPats = pats.filter((t) => t.provider === provider);
+      
+      if (matchingPats.length === 0 && apps.length === 0) {
+        publishToken.innerHTML = '<option value="">(no ' + provider + " credentials — add one first)</option>";
         setPublishStatus(
-          "No " + provider + " PAT found. Use the token modal to add one, then re-open Publish.",
+          "No " + provider + " PAT or GitHub App found. Add one, then re-open Publish.",
           "warning",
         );
         return;
       }
-      publishToken.innerHTML = matching
-        .map(
-          (t) =>
-            '<option value="' + escapeHtml(t.name) + '">' +
-            escapeHtml(t.name) +
-            (t.isExpired ? " [EXPIRED]" : "") +
-            "</option>",
-        )
-        .join("");
+      
+      let html = '<option value="">-- Select a credential --</option>';
+      
+      if (apps.length > 0) {
+        html += '<optgroup label="GitHub Apps">';
+        html += apps.map((app) =>
+          '<option value="app:' + escapeHtml(app.name) + '">🤖 ' +
+          escapeHtml(app.name) +
+          '</option>'
+        ).join("");
+        html += '</optgroup>';
+      }
+      
+      if (matchingPats.length > 0) {
+        html += '<optgroup label="Personal Access Tokens">';
+        html += matchingPats.map((t) =>
+          '<option value="pat:' + escapeHtml(t.name) + '">🔑 ' +
+          escapeHtml(t.name) +
+          (t.isExpired ? " [EXPIRED]" : "") +
+          '</option>'
+        ).join("");
+        html += '</optgroup>';
+      }
+      
+      publishToken.innerHTML = html;
       publishInit.disabled = false;
       publishInitPush.disabled = false;
       setPublishStatus("", "info");
     } catch (e) {
-      setPublishStatus("Failed to load tokens: " + e.message, "error");
+      setPublishStatus("Failed to load credentials: " + e.message, "error");
     }
   }
 
   publishProvider.addEventListener("change", () => {
-    populatePublishTokens(publishProvider.value);
+    populatePublishCredentials(publishProvider.value);
   });
 
   // --- "+ Add" PAT button inside the Publish dialog ---
@@ -2243,7 +2373,7 @@
     publishCommitMsg.value = "";
     setPublishStatus("", "info");
     publishModal.classList.remove("hidden");
-    populatePublishTokens("github");
+    populatePublishCredentials("github");
     publishRepoUrl.focus();
   }
 
@@ -2305,7 +2435,7 @@
     const repoUrl = publishRepoUrl.value.trim();
     const branch = publishBranch.value.trim() || "main";
     const repoSubPath = publishRepoSubpath.value.trim();
-    const tokenName = publishToken.value;
+    const credentialValue = publishToken.value;
     const exclusionRaw = publishExclusions.value.trim();
     const exclusionPatterns = exclusionRaw
       ? exclusionRaw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
@@ -2316,7 +2446,18 @@
     const commitMsg = publishCommitMsg.value.trim();
 
     if (!repoUrl) { setPublishStatus("Repository URL is required.", "warning"); return; }
-    if (!tokenName) { setPublishStatus("A PAT token must be selected.", "warning"); return; }
+    if (!credentialValue) { setPublishStatus("A credential must be selected.", "warning"); return; }
+    
+    // Parse credential: "app:name" or "pat:name"
+    let authType = "pat";
+    let credentialName = credentialValue;
+    if (credentialValue.startsWith("app:")) {
+      authType = "github-app";
+      credentialName = credentialValue.substring(4);
+    } else if (credentialValue.startsWith("pat:")) {
+      authType = "pat";
+      credentialName = credentialValue.substring(4);
+    }
 
     publishInit.disabled = true;
     publishInitPush.disabled = true;
@@ -2327,12 +2468,17 @@
       provider,
       repoUrl,
       branch,
-      tokenName,
+      authType,
+      authCredentialName: credentialName,
       exclusionPatterns,
       respectGitignore,
       createRepo,
       visibility,
     };
+    // Include tokenName for backward compat when using PAT
+    if (authType === "pat") {
+      body.tokenName = credentialName;
+    }
     if (repoSubPath) body.repoSubPath = repoSubPath;
     if (publishContext.scope === "prefix") body.prefix = publishContext.prefix;
 
@@ -2483,8 +2629,13 @@
       return;
     }
     const providerIcon = (p) => (p === "github" ? "\u{1F4BB}" : "\u{2601}️");
+    const authTypeLabel = (authType) => {
+      if (authType === "github-app") return "\ud83e\udd16 App";
+      if (authType === "ado-app") return "\ud83e\udd16 App";
+      return "\ud83d\udd11 PAT";
+    };
     let html = '<table class="reverse-links-table"><thead><tr>';
-    html += "<th></th><th>Repository</th><th>Branch</th><th>Scope</th><th>Last Push</th><th>Actions</th>";
+    html += "<th></th><th>Repository</th><th>Branch</th><th>Auth</th><th>Scope</th><th>Last Push</th><th>Actions</th>";
     html += "</tr></thead><tbody>";
     for (const link of links) {
       const shortUrl = link.repoUrl.replace(/^https?:\/\//, "").replace(/\.git$/, "");
@@ -2499,6 +2650,7 @@
       html += "<td><span class=\"link-provider-icon\">" + providerIcon(link.provider) + "</span></td>";
       html += '<td class="link-url" title="' + escapeHtml(link.repoUrl) + '">' + escapeHtml(shortUrl) + "</td>";
       html += "<td>" + escapeHtml(link.branch) + "</td>";
+      html += "<td>" + authTypeLabel(link.authType) + "</td>";
       html += "<td>" + escapeHtml(scopeLabel) + "</td>";
       html += "<td>" + escapeHtml(lastPush) + "</td>";
       html += '<td class="link-actions">';

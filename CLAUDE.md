@@ -116,7 +116,7 @@ Azure Blob Storage Navigator — browse containers and view files through CLI or
 
 ### storage-nav
 
-CLI and Electron desktop app for browsing Azure Blob Storage and Azure File Shares. Manages encrypted credentials and PATs, clones/syncs GitHub and Azure DevOps repos into containers, diffs containers against linked repos, and publishes (pushes) blob containers, prefixes, or whole storage accounts back to GitHub / Azure DevOps repositories via the reverse-git subsystem.
+CLI and Electron desktop app for browsing Azure Blob Storage and Azure File Shares. Manages encrypted credentials (PATs and GitHub Apps), clones/syncs GitHub and Azure DevOps repos into containers, diffs containers against linked repos, and publishes (pushes) blob containers, prefixes, or whole storage accounts back to GitHub / Azure DevOps repositories via the reverse-git subsystem. Supports GitHub App installation-token authentication for scoped repository access.
 
 Full documentation: [docs/tools/storage-nav.md](docs/tools/storage-nav.md)
 

@@ -54,6 +54,7 @@ vi.mock("../../src/core/reverse-sync-engine.js", () => ({
 vi.mock("../../src/cli/commands/shared.js", () => ({
   resolveStorageEntry: vi.fn(),
   resolvePatToken: vi.fn(),
+  resolveGitHubCredential: vi.fn(),
   promptYesNo: vi.fn(),
 }));
 
@@ -248,6 +249,11 @@ beforeEach(() => {
   } as any);
 
   vi.mocked(shared.resolvePatToken).mockResolvedValue("inline-pat-value");
+  vi.mocked(shared.resolveGitHubCredential).mockResolvedValue({
+    token: "inline-pat-value",
+    authType: "pat",
+    credentialName: "(inline)",
+  });
   vi.mocked(shared.promptYesNo).mockResolvedValue(true);
 });
 
@@ -270,7 +276,7 @@ describe("publishGitHub", () => {
         { container: "mycontainer" },
         { repo: "owner/repo", branch: "main" },
         STORAGE_OPTS,
-        PAT_OPTS_INLINE,
+        PAT_OPTS_INLINE, {},
       ),
       0,
     );
@@ -293,7 +299,7 @@ describe("publishGitHub", () => {
         { container: "mycontainer" },
         { repo: "owner/repo" },
         STORAGE_OPTS,
-        PAT_OPTS_INLINE,
+        PAT_OPTS_INLINE, {},
       ),
       0,
     );
@@ -307,7 +313,7 @@ describe("publishGitHub", () => {
     vi.mocked(engine.pushReverseLink).mockResolvedValue(makeNopPushResult());
 
     await assertExitCode(
-      () => publishGitHub({ container: "c" }, { repo: "owner/repo" }, STORAGE_OPTS, PAT_OPTS_INLINE),
+      () => publishGitHub({ container: "c" }, { repo: "owner/repo" }, STORAGE_OPTS, PAT_OPTS_INLINE, {}),
       0,
     );
   });
@@ -317,14 +323,14 @@ describe("publishGitHub", () => {
     vi.mocked(engine.pushReverseLink).mockResolvedValue(makeActivePushResult());
 
     await assertExitCode(
-      () => publishGitHub({ container: "c" }, { repo: "owner/repo" }, STORAGE_OPTS, PAT_OPTS_INLINE),
+      () => publishGitHub({ container: "c" }, { repo: "owner/repo" }, STORAGE_OPTS, PAT_OPTS_INLINE, {}),
       1,
     );
   });
 
   it("exits 3 (ConfigurationError) when --repo is missing", async () => {
     await assertExitCode(
-      () => publishGitHub({ container: "c" }, { repo: "" }, STORAGE_OPTS, PAT_OPTS_INLINE),
+      () => publishGitHub({ container: "c" }, { repo: "" }, STORAGE_OPTS, PAT_OPTS_INLINE, {}),
       3,
     );
   });
@@ -337,7 +343,7 @@ describe("publishGitHub", () => {
     } as any);
 
     await assertExitCode(
-      () => publishGitHub({ container: "c" }, { repo: "owner/repo" }, STORAGE_OPTS, PAT_OPTS_INLINE),
+      () => publishGitHub({ container: "c" }, { repo: "owner/repo" }, STORAGE_OPTS, PAT_OPTS_INLINE, {}),
       3,
     );
   });
@@ -349,7 +355,7 @@ describe("publishGitHub", () => {
     );
 
     await assertExitCode(
-      () => publishGitHub({ container: "c" }, { repo: "owner/repo" }, STORAGE_OPTS, PAT_OPTS_INLINE),
+      () => publishGitHub({ container: "c" }, { repo: "owner/repo" }, STORAGE_OPTS, PAT_OPTS_INLINE, {}),
       2,
     );
   });
@@ -360,7 +366,7 @@ describe("publishGitHub", () => {
     vi.mocked(engine.pushReverseLink).mockResolvedValue(makeNopPushResult());
 
     await assertExitCode(
-      () => publishGitHub({ container: "c" }, { repo: "owner/repo", visibility: "public" }, STORAGE_OPTS, PAT_OPTS_INLINE),
+      () => publishGitHub({ container: "c" }, { repo: "owner/repo", visibility: "public" }, STORAGE_OPTS, PAT_OPTS_INLINE, {}),
       0,
     );
 
@@ -374,7 +380,7 @@ describe("publishGitHub", () => {
         { container: "c" },
         { repo: "owner/repo", visibility: "protected" as unknown as string },
         STORAGE_OPTS,
-        PAT_OPTS_INLINE,
+        PAT_OPTS_INLINE, {},
       ),
       3,
     );
@@ -388,7 +394,7 @@ describe("publishGitHub", () => {
     vi.mocked(engine.pushReverseLink).mockResolvedValue(makeNopPushResult());
 
     await assertExitCode(
-      () => publishGitHub({ container: "c", prefix: "docs/" }, { repo: "owner/repo" }, STORAGE_OPTS, PAT_OPTS_INLINE),
+      () => publishGitHub({ container: "c", prefix: "docs/" }, { repo: "owner/repo" }, STORAGE_OPTS, PAT_OPTS_INLINE, {}),
       0,
     );
 
@@ -398,7 +404,7 @@ describe("publishGitHub", () => {
 
   it("throws ConfigurationError (exit 3) when --prefix is set but --container is absent", async () => {
     await assertExitCode(
-      () => publishGitHub({ prefix: "docs/" }, { repo: "owner/repo" }, STORAGE_OPTS, PAT_OPTS_INLINE),
+      () => publishGitHub({ prefix: "docs/" }, { repo: "owner/repo" }, STORAGE_OPTS, PAT_OPTS_INLINE, {}),
       3,
     );
   });
@@ -419,7 +425,7 @@ describe("publishDevOps", () => {
         { container: "c" },
         { repo: "repo", org: "org", project: "proj" },
         STORAGE_OPTS,
-        PAT_OPTS_INLINE,
+        PAT_OPTS_INLINE, {},
       ),
       0,
     );
@@ -437,7 +443,7 @@ describe("publishDevOps", () => {
     vi.mocked(engine.pushReverseLink).mockResolvedValue(makeNopPushResult());
 
     await assertExitCode(
-      () => publishDevOps({ container: "c" }, { repo: fullUrl }, STORAGE_OPTS, PAT_OPTS_INLINE),
+      () => publishDevOps({ container: "c" }, { repo: fullUrl }, STORAGE_OPTS, PAT_OPTS_INLINE, {}),
       0,
     );
 
@@ -447,7 +453,7 @@ describe("publishDevOps", () => {
 
   it("throws ConfigurationError (exit 3) when --repo is bare name without --org/--project", async () => {
     await assertExitCode(
-      () => publishDevOps({ container: "c" }, { repo: "bare-repo-name" }, STORAGE_OPTS, PAT_OPTS_INLINE),
+      () => publishDevOps({ container: "c" }, { repo: "bare-repo-name" }, STORAGE_OPTS, PAT_OPTS_INLINE, {}),
       3,
     );
   });
@@ -458,7 +464,7 @@ describe("publishDevOps", () => {
     vi.mocked(engine.pushReverseLink).mockResolvedValue(makeActivePushResult());
 
     await assertExitCode(
-      () => publishDevOps({ container: "c" }, { repo: "https://dev.azure.com/o/p/_git/r" }, STORAGE_OPTS, PAT_OPTS_INLINE),
+      () => publishDevOps({ container: "c" }, { repo: "https://dev.azure.com/o/p/_git/r" }, STORAGE_OPTS, PAT_OPTS_INLINE, {}),
       1,
     );
   });
@@ -470,7 +476,7 @@ describe("publishDevOps", () => {
     );
 
     await assertExitCode(
-      () => publishDevOps({ container: "c" }, { repo: "https://dev.azure.com/o/p/_git/r" }, STORAGE_OPTS, PAT_OPTS_INLINE),
+      () => publishDevOps({ container: "c" }, { repo: "https://dev.azure.com/o/p/_git/r" }, STORAGE_OPTS, PAT_OPTS_INLINE, {}),
       2,
     );
   });
@@ -481,7 +487,7 @@ describe("publishDevOps", () => {
     vi.mocked(engine.pushReverseLink).mockResolvedValue(makeNopPushResult());
 
     await assertExitCode(
-      () => publishDevOps({ container: "c" }, { repo: "https://dev.azure.com/o/p/_git/r" }, STORAGE_OPTS, PAT_OPTS_INLINE),
+      () => publishDevOps({ container: "c" }, { repo: "https://dev.azure.com/o/p/_git/r" }, STORAGE_OPTS, PAT_OPTS_INLINE, {}),
       0,
     );
 
@@ -500,7 +506,7 @@ describe("reverseLinkGitHub", () => {
     vi.mocked(engine.initReverseLink).mockResolvedValue(link);
 
     await assertExitCode(
-      () => reverseLinkGitHub({ container: "c" }, { repo: "owner/repo" }, STORAGE_OPTS, PAT_OPTS_INLINE),
+      () => reverseLinkGitHub({ container: "c" }, { repo: "owner/repo" }, STORAGE_OPTS, PAT_OPTS_INLINE, {}),
       0,
     );
 
@@ -513,9 +519,14 @@ describe("reverseLinkGitHub", () => {
     // Override the mock to return the inline PAT, mirroring resolvePatToken's
     // real priority-1 behaviour (inline --pat takes precedence).
     vi.mocked(shared.resolvePatToken).mockResolvedValue("my-inline-pat");
+    vi.mocked(shared.resolveGitHubCredential).mockResolvedValue({
+      token: "my-inline-pat",
+      authType: "pat",
+      credentialName: "(inline)",
+    });
 
     await assertExitCode(
-      () => reverseLinkGitHub({ container: "c" }, { repo: "owner/repo" }, STORAGE_OPTS, { pat: "my-inline-pat" }),
+      () => reverseLinkGitHub({ container: "c" }, { repo: "owner/repo" }, STORAGE_OPTS, { pat: "my-inline-pat" }, {}),
       0,
     );
 
@@ -526,14 +537,14 @@ describe("reverseLinkGitHub", () => {
   it("exits 0 on success", async () => {
     vi.mocked(engine.initReverseLink).mockResolvedValue(makeReverseLink());
     await assertExitCode(
-      () => reverseLinkGitHub({ container: "c" }, { repo: "owner/repo" }, STORAGE_OPTS, PAT_OPTS_INLINE),
+      () => reverseLinkGitHub({ container: "c" }, { repo: "owner/repo" }, STORAGE_OPTS, PAT_OPTS_INLINE, {}),
       0,
     );
   });
 
   it("exits 3 when --repo is missing", async () => {
     await assertExitCode(
-      () => reverseLinkGitHub({ container: "c" }, { repo: "" }, STORAGE_OPTS, PAT_OPTS_INLINE),
+      () => reverseLinkGitHub({ container: "c" }, { repo: "" }, STORAGE_OPTS, PAT_OPTS_INLINE, {}),
       3,
     );
   });
@@ -546,7 +557,7 @@ describe("reverseLinkGitHub", () => {
         { container: "c" },
         { repo: "owner/repo", authorName: "Alice", authorEmail: "alice@example.com" },
         STORAGE_OPTS,
-        PAT_OPTS_INLINE,
+        PAT_OPTS_INLINE, {},
       ),
       0,
     );
@@ -561,7 +572,7 @@ describe("reverseLinkGitHub", () => {
         { container: "c" },
         { repo: "owner/repo", authorName: "Alice" /* no email */ },
         STORAGE_OPTS,
-        PAT_OPTS_INLINE,
+        PAT_OPTS_INLINE, {},
       ),
       3,
     );
@@ -571,7 +582,7 @@ describe("reverseLinkGitHub", () => {
     vi.mocked(engine.initReverseLink).mockRejectedValue(new Error("network failure"));
 
     await assertExitCode(
-      () => reverseLinkGitHub({ container: "c" }, { repo: "owner/repo" }, STORAGE_OPTS, PAT_OPTS_INLINE),
+      () => reverseLinkGitHub({ container: "c" }, { repo: "owner/repo" }, STORAGE_OPTS, PAT_OPTS_INLINE, {}),
       2,
     );
   });
@@ -588,7 +599,7 @@ describe("reverseLinkDevOps", () => {
     );
 
     await assertExitCode(
-      () => reverseLinkDevOps({ container: "c" }, { repo: "https://dev.azure.com/o/p/_git/r" }, STORAGE_OPTS, PAT_OPTS_INLINE),
+      () => reverseLinkDevOps({ container: "c" }, { repo: "https://dev.azure.com/o/p/_git/r" }, STORAGE_OPTS, PAT_OPTS_INLINE, {}),
       0,
     );
 
@@ -607,7 +618,7 @@ describe("reverseLinkDevOps", () => {
         { container: "c" },
         { repo: "myrepo", org: "myorg", project: "myproj" },
         STORAGE_OPTS,
-        PAT_OPTS_INLINE,
+        PAT_OPTS_INLINE, {},
       ),
       0,
     );
@@ -634,7 +645,7 @@ describe("reverseLinkDevOps", () => {
 
   it("exits 3 when --repo is missing", async () => {
     await assertExitCode(
-      () => reverseLinkDevOps({ container: "c" }, { repo: "" }, STORAGE_OPTS, PAT_OPTS_INLINE),
+      () => reverseLinkDevOps({ container: "c" }, { repo: "" }, STORAGE_OPTS, PAT_OPTS_INLINE, {}),
       3,
     );
   });

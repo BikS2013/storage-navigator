@@ -51,8 +51,10 @@ import type {
 import type { DirectStorageEntry } from "../../core/types.js";
 import {
   promptYesNo,
+  resolveGitHubCredential,
   resolvePatToken,
   resolveStorageEntry,
+  type GitHubAppOpts,
   type PatOpts,
   type StorageOpts,
 } from "./shared.js";
@@ -291,6 +293,7 @@ export async function publishGitHub(
   target: PublishTargetOpts,
   storageOpts: StorageOpts,
   patOpts: PatOpts,
+  appOpts: GitHubAppOpts,
 ): Promise<void> {
   try {
     if (!target.repo) {
@@ -298,7 +301,15 @@ export async function publishGitHub(
     }
     const { store, entry } = await resolveStorageEntry(storageOpts);
     assertDirectEntry(entry);
-    const pat = await resolvePatToken(store, "github", patOpts);
+    
+    // Resolve GitHub credential (PAT or GitHub App)
+    const { token, authType, credentialName } = await resolveGitHubCredential(
+      store,
+      "github",
+      patOpts,
+      appOpts
+    );
+    
     const blobClient = new BlobClient(entry);
 
     const linkScope = buildScope(entry, scope);
@@ -307,11 +318,7 @@ export async function publishGitHub(
 
     console.log(`Publishing to github:${target.repo} (branch: ${target.branch ?? "main"})...`);
 
-    // Pass the resolved PAT to the engine as `patOverride` so AC-C3 holds
-    // (inline `--pat` overrides any stored token) AND so the push works
-    // when the user provided `--pat` without registering the token in the
-    // credential store. `resolvePATForLink` honours `patOverride` first.
-
+    // Pass the resolved token to the engine as `patOverride` (supports both PAT and GitHub App tokens)
     const link = await initReverseLink({
       blobClient,
       credentialStore: store,
@@ -326,7 +333,9 @@ export async function publishGitHub(
       respectGitignore: target.respectGitignore ?? true,
       createRepo: target.createRepo ?? false,
       visibility,
-      patOverride: pat,
+      authType,
+      authCredentialName: credentialName,
+      patOverride: token,
       onProgress: (msg) => console.log(`  ${msg}`),
     });
 
@@ -336,7 +345,7 @@ export async function publishGitHub(
       containerHint:
         link.scope.kind === "account" ? undefined : link.scope.container,
       commitMessage: target.commitMessage,
-      patOverride: pat,
+      patOverride: token,
       onProgress: (msg) => console.log(`  ${msg}`),
     });
 
@@ -430,6 +439,7 @@ export async function reverseLinkGitHub(
   target: PublishTargetOpts,
   storageOpts: StorageOpts,
   patOpts: PatOpts,
+  appOpts: GitHubAppOpts,
 ): Promise<void> {
   try {
     if (!target.repo) {
@@ -437,7 +447,15 @@ export async function reverseLinkGitHub(
     }
     const { store, entry } = await resolveStorageEntry(storageOpts);
     assertDirectEntry(entry);
-    const pat = await resolvePatToken(store, "github", patOpts);
+    
+    // Resolve GitHub credential (PAT or GitHub App)
+    const { token, authType, credentialName } = await resolveGitHubCredential(
+      store,
+      "github",
+      patOpts,
+      appOpts
+    );
+    
     const blobClient = new BlobClient(entry);
 
     const linkScope = buildScope(entry, scope);
@@ -456,9 +474,11 @@ export async function reverseLinkGitHub(
       author,
       exclusionPatterns: target.exclude ?? [],
       respectGitignore: target.respectGitignore ?? true,
+      authType,
+      authCredentialName: credentialName,
+      patOverride: token,
       createRepo: target.createRepo ?? false,
       visibility,
-      patOverride: pat,
       onProgress: (msg) => console.log(`  ${msg}`),
     });
 
@@ -550,6 +570,7 @@ export async function pushReverseLinkCmd(
   op: PushOperationOpts,
   storageOpts: StorageOpts,
   patOpts: PatOpts,
+  appOpts: GitHubAppOpts,
 ): Promise<void> {
   try {
     if (op.all && op.linkId) {

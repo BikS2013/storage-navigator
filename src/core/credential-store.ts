@@ -6,6 +6,7 @@ import type {
   AccountScopeReverseLinksRegistry,
   CredentialData,
   EncryptedPayload,
+  GitHubAppEntry,
   ReverseGitLinkPATBinding,
   ReverseLink,
   StorageEntry,
@@ -347,6 +348,61 @@ export class CredentialStore {
     const before = this.data.tokens.length;
     this.data.tokens = this.data.tokens.filter((t) => t.name !== name);
     if (this.data.tokens.length < before) {
+      this.save();
+      return true;
+    }
+    return false;
+  }
+
+  // -------------------------------------------------------------------------
+  // GitHub App CRUD (plan-012)
+  // -------------------------------------------------------------------------
+
+  /** Add or update a GitHub App credential */
+  addGitHubApp(entry: Omit<GitHubAppEntry, "addedAt">): void {
+    if (!this.data.githubApps) this.data.githubApps = [];
+    const existing = this.data.githubApps.findIndex((a) => a.name === entry.name);
+    const full: GitHubAppEntry = { ...entry, addedAt: new Date().toISOString() };
+    if (existing >= 0) {
+      this.data.githubApps[existing] = full;
+    } else {
+      this.data.githubApps.push(full);
+    }
+    this.save();
+  }
+
+  /** Get a GitHub App by name */
+  getGitHubApp(name: string): GitHubAppEntry | undefined {
+    return this.data.githubApps?.find((a) => a.name === name);
+  }
+
+  /** List all GitHub Apps (no secrets exposed) */
+  listGitHubApps(): Array<{
+    name: string;
+    appId: string;
+    installationId: string;
+    addedAt: string;
+    expiresAt: string | null;
+    isExpired: boolean;
+    hasCompanionPat: boolean;
+  }> {
+    return (this.data.githubApps ?? []).map((a) => ({
+      name: a.name,
+      appId: a.appId,
+      installationId: a.installationId,
+      addedAt: a.addedAt,
+      expiresAt: a.expiresAt ?? null,
+      isExpired: a.expiresAt ? new Date(a.expiresAt) < new Date() : false,
+      hasCompanionPat: !!a.companionPatTokenName,
+    }));
+  }
+
+  /** Remove a GitHub App by name */
+  removeGitHubApp(name: string): boolean {
+    if (!this.data.githubApps) return false;
+    const before = this.data.githubApps.length;
+    this.data.githubApps = this.data.githubApps.filter((a) => a.name !== name);
+    if (this.data.githubApps.length < before) {
       this.save();
       return true;
     }

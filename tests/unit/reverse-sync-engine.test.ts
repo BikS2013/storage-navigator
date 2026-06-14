@@ -524,6 +524,7 @@ describe("initReverseLink", () => {
     expect(mockBuildWriteClient).toHaveBeenCalledWith(
       expect.objectContaining({ id: "pat-override-id" }),
       "inline-override-pat",
+      expect.anything(),
     );
   });
 
@@ -774,6 +775,7 @@ describe("pushReverseLink", () => {
       expect(mockBuildWriteClient).toHaveBeenCalledWith(
         expect.objectContaining({ id: "push-pat" }),
         "inline-override-pat",
+        expect.anything(),
       );
     });
 
@@ -795,6 +797,7 @@ describe("pushReverseLink", () => {
       expect(mockBuildWriteClient).toHaveBeenCalledWith(
         expect.anything(),
         "explicit-link-pat",
+        expect.anything(),
       );
     });
 

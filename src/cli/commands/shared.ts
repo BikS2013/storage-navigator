@@ -1,8 +1,9 @@
 import * as readline from "readline";
 import { CredentialStore } from "../../core/credential-store.js";
-import type { DirectStorageEntry, StorageEntry } from "../../core/types.js";
+import type { DirectStorageEntry, GitHubAppEntry, StorageEntry } from "../../core/types.js";
 import type { IStorageBackend } from "../../core/backend/backend.js";
 import { makeBackend } from "../../core/backend/factory.js";
+import { generateInstallationToken } from "../../core/github-app-auth.js";
 
 /**
  * Prompt the user for a secret value (input is visible — terminal limitation).
@@ -123,6 +124,68 @@ export async function resolvePatToken(
   console.error(`  npx tsx src/cli/index.ts add-token --name <name> --provider ${provider} --token <token>`);
   console.error(`\nOr provide one inline with --pat <token>`);
   process.exit(1);
+}
+
+/**
+ * GitHub App credential options for CLI commands.
+ */
+export interface GitHubAppOpts {
+  githubAppName?: string;
+  githubAppInline?: string;  // JSON string
+}
+
+/**
+ * Resolve GitHub credential (PAT or GitHub App installation token).
+ * Precedence: --github-app-name > --github-app-inline > --pat > --token-name > first stored PAT
+ */
+export async function resolveGitHubCredential(
+  store: CredentialStore,
+  provider: "github" | "azure-devops",
+  patOpts: PatOpts,
+  appOpts: GitHubAppOpts
+): Promise<{
+  token: string;
+  authType: "pat" | "github-app";
+  credentialName: string;
+}> {
+  // 1. GitHub App inline
+  if (appOpts.githubAppInline) {
+    try {
+      const appEntry = JSON.parse(appOpts.githubAppInline) as GitHubAppEntry;
+      if (!appEntry.appId || !appEntry.privateKeyPem || !appEntry.installationId) {
+        throw new Error("Missing required fields: appId, privateKeyPem, installationId");
+      }
+      const token = await generateInstallationToken(
+        appEntry.appId,
+        appEntry.privateKeyPem,
+        appEntry.installationId
+      );
+      return { token, authType: "github-app", credentialName: "(inline)" };
+    } catch (err) {
+      throw new Error(`Invalid --github-app-inline JSON: ${(err as Error).message}`);
+    }
+  }
+  
+  // 2. GitHub App by name
+  if (appOpts.githubAppName) {
+    const appEntry = store.getGitHubApp(appOpts.githubAppName);
+    if (!appEntry) {
+      console.error(`GitHub App '${appOpts.githubAppName}' not found.`);
+      console.error(`Run 'storage-nav list-github-apps' to see available credentials.`);
+      process.exit(3);  // ConfigurationError
+    }
+    const token = await generateInstallationToken(
+      appEntry.appId,
+      appEntry.privateKeyPem,
+      appEntry.installationId
+    );
+    return { token, authType: "github-app", credentialName: appOpts.githubAppName };
+  }
+  
+  // 3. PAT resolution (existing chain)
+  const pat = await resolvePatToken(store, provider, patOpts);
+  const credName = patOpts.tokenName ?? "(first for provider)";
+  return { token: pat, authType: "pat", credentialName: credName };
 }
 
 /**

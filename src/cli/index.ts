@@ -8,6 +8,7 @@ import { removeStorage, deleteStorage } from "./commands/remove-storage.js";
 import { viewBlob, listContainers, listBlobs, downloadBlob } from "./commands/view.js";
 import { createContainer, renameBlob, deleteBlob, deleteFolder, createBlob } from "./commands/blob-ops.js";
 import { addToken, listTokens, removeToken } from "./commands/token-ops.js";
+import { addGitHubApp, listGitHubApps, removeGitHubApp } from "./commands/github-app-ops.js";
 import { cloneGitHub, cloneDevOps, cloneSsh, syncContainer } from "./commands/repo-sync.js";
 import { linkGitHub, linkDevOps, linkSsh, unlinkContainer, listLinks } from "./commands/link-ops.js";
 import { diffContainer } from "./commands/diff-ops.js";
@@ -267,6 +268,54 @@ program
     removeToken(opts.name);
   });
 
+// Add GitHub App
+program
+  .command("add-github-app")
+  .description("Add a GitHub App credential for installation-token authentication")
+  .requiredOption("--name <name>", "Display name for this GitHub App")
+  .requiredOption("--app-id <id>", "GitHub App ID (numeric)")
+  .requiredOption("--installation-id <id>", "Installation ID for the target account/org")
+  .requiredOption("--private-key-file <path>", "Path to private key PEM file")
+  .option("--client-id <id>", "OAuth client ID (reserved for future)")
+  .option("--client-secret <secret>", "OAuth client secret (reserved for future)")
+  .option("--companion-pat-name <name>", "Stored PAT name for repository scope addition")
+  .option("--expires-at <date>", "Private key expiration date (ISO 8601)")
+  .action(async (opts) => {
+    try {
+      await addGitHubApp(opts);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+  });
+
+// List GitHub Apps
+program
+  .command("list-github-apps")
+  .description("List configured GitHub App credentials")
+  .action(async () => {
+    try {
+      await listGitHubApps();
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+  });
+
+// Remove GitHub App
+program
+  .command("remove-github-app")
+  .description("Remove a GitHub App credential")
+  .requiredOption("--name <name>", "Name of the GitHub App to remove")
+  .action(async (opts) => {
+    try {
+      await removeGitHubApp(opts);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+  });
+
 // Clone GitHub repo
 program
   .command("clone-github")
@@ -500,6 +549,8 @@ program
   .option("--sas-token <token>", "SAS token (inline)")
   .option("--token-name <name>", "PAT token name (uses first GitHub token if omitted)")
   .option("--pat <token>", "GitHub PAT (inline, overrides stored token)")
+  .option("--github-app-name <name>", "GitHub App credential name")
+  .option("--github-app-inline <json>", "GitHub App credentials (inline JSON)")
   .action(async (opts) => {
     await publishGitHub(
       { container: opts.container, prefix: opts.prefix },
@@ -517,6 +568,7 @@ program
       },
       { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account },
       { pat: opts.pat, tokenName: opts.tokenName },
+      { githubAppName: opts.githubAppName, githubAppInline: opts.githubAppInline },
     );
   });
 
@@ -585,6 +637,8 @@ program
   .option("--sas-token <token>", "SAS token (inline)")
   .option("--token-name <name>", "PAT token name (uses first GitHub token if omitted)")
   .option("--pat <token>", "GitHub PAT (inline, overrides stored token)")
+  .option("--github-app-name <name>", "GitHub App credential name")
+  .option("--github-app-inline <json>", "GitHub App credentials (inline JSON)")
   .action(async (opts) => {
     await reverseLinkGitHub(
       { container: opts.container, prefix: opts.prefix },
@@ -601,6 +655,7 @@ program
       },
       { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account },
       { pat: opts.pat, tokenName: opts.tokenName },
+      { githubAppName: opts.githubAppName, githubAppInline: opts.githubAppInline },
     );
   });
 
@@ -661,6 +716,8 @@ program
   .option("--sas-token <token>", "SAS token (inline)")
   .option("--token-name <name>", "PAT token name")
   .option("--pat <token>", "PAT (inline, overrides stored token)")
+  .option("--github-app-name <name>", "GitHub App credential name")
+  .option("--github-app-inline <json>", "GitHub App credentials (inline JSON)")
   .action(async (opts) => {
     await pushReverseLinkCmd(
       { container: opts.container, prefix: opts.prefix },
@@ -673,6 +730,7 @@ program
       },
       { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account },
       { pat: opts.pat, tokenName: opts.tokenName },
+      { githubAppName: opts.githubAppName, githubAppInline: opts.githubAppInline },
     );
   });
 

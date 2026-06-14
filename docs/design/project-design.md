@@ -6824,3 +6824,329 @@ Every architectural choice with rationale. Citations point to the investigation,
 | H | AC-H2 (forward commands unchanged) | Re-run existing forward CLI tests; manual smoke per cross-phase verification block in plan-011 |
 | H | AC-H3 (`.repo-sync-meta.json` / `.repo-links.json` coexist) | `tests/unit/reverse-link-registry.test.ts` (writes alongside existing forward `.repo-links.json` fixture) |
 
+
+---
+
+## Technical Design: GitHub App Authentication (Reverse-Git Extension)
+
+**Date:** 2026-06-14  
+**References:**
+- `docs/reference/refined-request-github-app-auth.md` (requirements with resolved OQ1–OQ7)
+- `docs/reference/investigation-github-app-auth.md` (JWT library choice, auth abstraction, token caching)
+- `docs/research/github-app-installation-auth-and-repo-scope.md` (critical finding: PUT /user/installations requires PAT)
+- `docs/research/jose-rs256-github-app-jwt.md` (jose library vetting, PKCS#1/PKCS#8 support)
+- `docs/reference/codebase-scan-github-app-auth.md` (integration points)
+- `docs/design/plan-012-github-app-auth.md` (implementation plan with 9 phases)
+
+### Design Provenance
+
+This design extends the existing reverse-git feature (plan-011) to support GitHub App installation-token authentication as an **additional authentication method** alongside the existing Personal Access Token (PAT) flow. Full backward compatibility maintained — existing PAT-based workflows unchanged.
+
+**User-confirmed scoping decisions (refined-request OQ1–OQ7 resolutions):**
+1. Client ID/secret: optional fields on `GitHubAppEntry`, reserved for future OAuth flows, NOT implemented in this phase
+2. Multiple installations: one credential entry per installation with user-defined distinct names
+3. Installation health check: no background checks; token generation failure surfaces error at operation time
+4. Scope addition retry: no retry in v1; warn + continue (repo created, user adds manually via GitHub UI)
+5. Key format validation: basic PEM validation (starts with `-----BEGIN`), defer crypto check to JWT signing
+6. Token caching: in-memory per CLI command/UI action, keyed by `installationId`, flushed at command exit
+7. Azure DevOps equivalence: `authType` made extensible (`"pat" | "github-app" | "ado-app"`), ADO app auth NOT implemented in this phase
+
+### 1. Architecture Overview
+
+#### 1.1 Authentication Resolution Chain (Credential → Bearer Token)
+
+GitHub App authentication integrates into the existing reverse-git architecture via a **token-provider abstraction pattern**. The resolution chain branches on `authType` at the credential-resolution layer, then converges to a single bearer token string before reaching the write client.
+
+**Architectural layers (existing + new):**
+
+```
+CLI/UI Layer
+  └─ Credential Resolver (shared.ts / repo-utils.ts)
+      ├─ PAT branch (existing)
+      │   └─ resolvePatToken(store, provider, opts)
+      │       └─ returns: PAT string
+      └─ GitHub App branch (NEW)
+          └─ resolveGitHubAppCredential(store, opts)
+              ├─ Lookup GitHubAppEntry by name
+              ├─ Generate JWT (jose + RS256)
+              ├─ Exchange JWT for installation token (POST /app/installations/{id}/access_tokens)
+              └─ returns: installation token string
+  └─ Write Client Factory (repo-utils.ts)
+      └─ buildWriteClientForLink(link, token, installationId?)
+          └─ GitHubWriteClient(token, owner, repo, installationId?)
+              └─ Uses token as "Authorization: Bearer <token>" (same for PAT and installation token)
+```
+
+**Key architectural decisions:**
+1. **Token-type agnostic write client:** `GitHubWriteClient` unchanged — installation tokens use identical HTTP header format (`Authorization: Bearer <token>`) as PATs
+2. **Token-provider resolver:** new `github-app-auth.ts` module generates ephemeral installation tokens on-demand; no changes to `github-write-client.ts` request logic
+3. **Discriminated union at link level:** `ReverseLink.authType?: "pat" | "github-app"` signals which credential path to take during push
+4. **Graceful co-existence:** missing `authType` defaults to `"pat"` (backward compatibility); both auth types can coexist in the same credential store
+
+
+#### 1.2 Boundary Mechanism — Scoped Repository Access
+
+**Design goal:** GitHub App creates and manages repositories while remaining limited to exactly the repositories it created, with the ability to extend scope later.
+
+**Implemented approach (investigation §Decision 2 → Option 2b with graceful degradation):**
+
+| Operation | Token Type | Endpoint | Outcome |
+|---|---|---|---|
+| **Create repository (org)** | Installation token | `POST /orgs/{org}/repos` | ✅ Works with `Administration: Read & write` permission |
+| **Create repository (user)** | Installation token | `POST /user/repos` | ⚠️ Assumed working (needs empirical verification); fallback: org-only support or OAuth flow |
+| **Push contents (commits)** | Installation token | Git Data API (`POST /git/blobs`, `POST /git/trees`, etc.) | ✅ Works with `Contents: Read & write` permission |
+| **Add created repo to installation scope** | Installation token | `PUT /user/installations/{id}/repositories/{repo_id}` | ❌ **CRITICAL LIMITATION:** GitHub API explicitly requires classic PAT with `repo` scope (research finding) |
+| **Add created repo to installation scope (fallback)** | Classic PAT (optional) | `PUT /user/installations/{id}/repositories/{repo_id}` | ✅ Works when `GitHubAppEntry.companionPatTokenName` is set |
+
+**Graceful degradation sequence (implemented in `GitHubWriteClient.createRepo()`):**
+
+1. Create repository via `POST /orgs/{org}/repos` or `POST /user/repos` with installation token → extract `repository.id` from response
+2. **Attempt scope addition** via `PUT /user/installations/{installationId}/repositories/{repository_id}` with installation token (known to fail but tried for future-proofing)
+3. **On 403 Forbidden or 404 Not Found:**
+   - Log warning (CLI) or display toast (UI): "Repository created successfully, but could not be automatically added to the GitHub App installation's selected repositories. To grant the app access, navigate to: Settings → Applications → Installed GitHub Apps → Configure → [App Name] → Repository access → Select repositories → Add '{repo_name}'."
+   - Exit code: 0 (repo creation succeeded)
+4. **On 204 No Content:** Log success: "Repository added to GitHub App installation scope."
+
+**Optional companion PAT enhancement:**
+- `GitHubAppEntry.companionPatTokenName?: string` field references a stored classic PAT
+- When set, `createRepo` uses the companion PAT for the PUT call instead of the installation token
+- Enables automatic scope addition without manual GitHub UI steps
+- **Out of scope for v1** (documented as future enhancement in plan-012 §Phase 9)
+
+
+### 2. Data Model & Integration Points
+
+#### 2.1 Type Extensions
+
+**GitHubAppEntry (reverse-git-types.ts):**
+```typescript
+export interface GitHubAppEntry {
+  name: string;                        // User-defined unique name
+  appId: string;                       // GitHub App ID (numeric string)
+  privateKeyPem: string;               // RSA private key (PKCS#1/PKCS#8, encrypted at rest)
+  installationId: string;              // Installation ID for target account/org
+  clientId?: string;                   // Optional OAuth client ID (reserved)
+  clientSecret?: string;               // Optional OAuth client secret (reserved)
+  companionPatTokenName?: string;      // Optional PAT for scope-add (v2)
+  addedAt: string;                     // ISO 8601 timestamp
+  expiresAt?: string;                  // Optional key rotation tracking
+}
+```
+
+**CredentialData Extension (types.ts):**
+```typescript
+export interface CredentialData {
+  storages: StorageEntry[];
+  tokens?: TokenEntry[];
+  githubApps?: GitHubAppEntry[];      // NEW — defaults to [] when missing
+  reverseLinks?: AccountScopeReverseLinksRegistry;
+  reverseLinkPatBindings?: ReverseGitLinkPATBinding[];
+}
+```
+
+**ReverseLink Extension (reverse-git-types.ts):**
+```typescript
+export interface ReverseLink {
+  // ... existing fields ...
+  authType?: "pat" | "github-app";          // NEW — defaults to "pat"
+  authCredentialName?: string;               // NEW — credential name
+}
+```
+
+**Backward compatibility:** Missing `githubApps` → `[]`, missing `authType` → `"pat"`. Verified via `tests/unit/credential-migration.test.ts`.
+
+#### 2.2 Module Contracts
+
+**github-app-auth.ts (NEW, ~250 lines):**
+
+```typescript
+// Generate installation token via JWT signing + API exchange
+export async function generateInstallationToken(
+  appId: string,
+  privateKeyPem: string,
+  installationId: string
+): Promise<string>;
+
+// Validate PEM format, return { format: 'pkcs1' | 'pkcs8' }
+export function validatePrivateKeyPem(pem: string): { format: 'pkcs1' | 'pkcs8' };
+
+// Clear in-memory token cache (testing only)
+export function clearInstallationTokenCache(): void;
+```
+
+**Token caching:** In-memory `Map<installationId, { token, expiresAt }>`, 1-hour TTL with 1-minute safety margin. Cache scoped to single CLI command / UI action, auto-expires at process exit.
+
+**Error handling:**
+- Invalid PEM → `Error("Invalid private key: PEM format not detected...")`
+- 401 → `InvalidPATError("GitHub: JWT has expired...")`
+- 403 → `InsufficientScopesError("GitHub: Installation suspended...")`
+- 404 → `GitHubApiError(404, "Installation not found...")`
+- Rate-limit exhausted → `RateLimitExceededError`
+
+**CredentialStore Extensions (~120 new lines):**
+
+```typescript
+addGitHubApp(entry: Omit<GitHubAppEntry, "addedAt">): void;
+getGitHubApp(name: string): GitHubAppEntry | undefined;
+listGitHubApps(): Array<{ name, appId, installationId, addedAt, expiresAt, isExpired, hasCompanionPat }>;
+removeGitHubApp(name: string): boolean;
+```
+
+Private key PEM encrypted in same AES-256-GCM envelope as PATs. `listGitHubApps()` NEVER exposes `privateKeyPem` (NFR1 security compliance).
+
+
+### 3. CLI & UI Surface Extensions
+
+#### 3.1 New CLI Subcommands (github-app-ops.ts, ~80 lines)
+
+```bash
+# Add GitHub App credential
+storage-nav add-github-app \
+  --name my-app-install-1 \
+  --app-id 123456 \
+  --installation-id 789012 \
+  --private-key-file ~/Downloads/my-app.pem \
+  [--expires-at 2027-06-14] \
+  [--companion-pat-name my-github-pat]
+
+# List GitHub Apps (no secrets printed)
+storage-nav list-github-apps
+
+# Remove GitHub App credential
+storage-nav remove-github-app --name my-app-install-1
+```
+
+**Extended reverse-git flags (all publication commands):**
+- `--github-app-name <name>` — use named GitHub App credential
+- `--github-app-inline <json>` — inline credential (JSON: `{ appId, privateKeyPem, installationId }`)
+
+**Precedence chain (R4.1):**
+1. `--github-app-inline`
+2. `--github-app-name`
+3. `--pat`
+4. `--token-name`
+5. First stored PAT with `provider: "github"`
+6. `ConfigurationError` (exit 3, no fallback)
+
+#### 3.2 Electron UI Extensions
+
+**New modals (index.html):**
+- `#github-apps-modal` — settings panel for GitHub App CRUD (analogous to token modal)
+- `#add-github-app-modal` — form with fields: name, appId, installationId, privateKeyPem (textarea), expiresAt, companionPatName
+
+**Settings navigation:** New button "GitHub Apps" alongside "Tokens"
+
+**Publish modal credential selector:**
+- Shows both PATs and GitHub Apps with visual distinction:
+  - PATs: `🔑 PAT: my-github-token`
+  - GitHub Apps: `⚙️ GitHub App: my-app-install-1`
+- Grouped via `<optgroup>` (PATs group + GitHub Apps group)
+
+**Reverse-links panel:** New "Auth" column displaying `authType` and `authCredentialName`:
+- Example: "Auth: GitHub App (my-app-install-1)" or "Auth: PAT (my-token)"
+
+**API routes (site-routes.ts):**
+- `GET /api/github-apps` — list all (no secrets)
+- `POST /api/github-apps` — add new
+- `DELETE /api/github-apps/:name` — remove by name
+
+### 4. Error Handling & Security
+
+#### 4.1 Error Taxonomy Mapping
+
+| GitHub API Response | Mapped Error | Exit Code | User Message |
+|---|---|---|---|
+| 401 (JWT expired) | `InvalidPATError` | 2 | "GitHub: JWT has expired. The PAT is missing, expired, or malformed." |
+| 403 (installation suspended) | `InsufficientScopesError` | 2 | "GitHub: Installation suspended or app lacks required permissions. Ensure the app has 'Contents: Read & write' and 'Administration: Read & write' permissions." |
+| 404 (installation not found) | `GitHubApiError(404)` | 2 | "GitHub App installation {id} not found. Possible causes: (1) Installation was uninstalled, (2) Installation ID is incorrect. Verify at https://github.com/settings/installations." |
+| 403/429 (rate-limit) | `RateLimitExceededError` | 2 | "GitHub API rate limit exceeded. Retry after {seconds} seconds." |
+| Missing GitHub App | `ConfigurationError` | 3 | "GitHub App '{name}' not found. Run 'storage-nav list-github-apps' to see available credentials." |
+
+**No-fallback rule:** Missing `appId`, `privateKeyPem`, or `installationId` → throw `ConfigurationError` (exit 3), never substitute defaults.
+
+**PEM validation error messages:**
+- Public key instead of private: "Invalid private key: PEM contains a public key. GitHub App requires the private key (downloaded from app settings)."
+- Passphrase-protected: "GitHub App private key must not be passphrase-protected. Use openssl to remove encryption."
+- Malformed: "Invalid private key: PEM format is malformed. Ensure the key starts with -----BEGIN and ends with -----END."
+
+#### 4.2 Security Compliance (NFR1)
+
+- Private key PEM MUST NEVER be logged, printed to console, or exposed in API responses
+- Installation tokens MUST NOT be persisted to disk (ephemeral, regenerated on each operation)
+- `listGitHubApps` CLI output / API response MUST NOT include `privateKeyPem`
+- Encryption at rest: private keys encrypted in same AES-256-GCM envelope as PATs
+
+### 5. Validation Boundaries & Acceptance Criteria
+
+#### 5.1 Acceptance Criteria Groups
+
+| AC Group | Validation Method | Evidence |
+|---|---|---|
+| **AC-GM** (GitHub App Credential Management) | Unit tests + manual CLI/UI | `tests/unit/github-app-credential-store.test.ts` — CRUD operations; manual: add/list/remove via CLI and UI |
+| **AC-AF** (Authentication Flow) | Integration tests + API mocks | `tests/unit/github-app-auth.test.ts` — JWT signing, token exchange; `tests/unit/github-app-reverse-git.test.ts` — end-to-end publish/push |
+| **AC-CP** (Credential Precedence) | Unit tests + CLI flag combos | `tests/unit/reverse-git-cli.test.ts` — precedence chain validation |
+| **AC-RS** (Repository Scope Management) | Manual testing (live GitHub App) | Manual: create repo, inspect GitHub UI Settings → Applications → verify repo in selected list OR warning displayed |
+| **AC-BC** (Backward Compatibility) | Migration tests + regression suite | `tests/unit/credential-migration.test.ts` — old config loads; ALL existing tests pass (zero regressions) |
+| **AC-DE** (Documentation & Error Messages) | Doc review + CLI help inspection | Manual: verify `docs/tools/storage-nav.md`, `docs/design/configuration-guide.md` updated; run `--help` commands |
+| **AC-UX** (UI/UX) | Manual Electron UI testing | Manual: open UI, add/list/remove GitHub App, verify credential selector shows both PATs and apps |
+| **AC-IR** (Integration & Regression) | Full integration test + npm audit | `tests/unit/github-app-reverse-git.test.ts` — complete workflow; `npm audit` confirms zero HIGH+ advisories for `jose` |
+
+#### 5.2 Tri-State Exit Codes (preserved from plan-011 R10.11)
+
+| Exit Code | Meaning | GitHub App Context |
+|---|---|---|
+| 0 | Success / no-op | Repo created successfully (even if scope addition failed with warning) |
+| 1 | Changes pushed (or would be pushed under `--dry-run`) | Push operation succeeded using installation token |
+| 2 | Fatal error (auth, divergence, rate-limit) | Installation token generation failed, or push failed |
+| 3 | Configuration error (missing required value) | GitHub App credential not found, or required fields missing |
+
+### 6. Implementation Phases & Risks
+
+#### 6.1 Phase Summary (from plan-012)
+
+| Phase | Description | Key Files |
+|---|---|---|
+| 0 | Dependency vetting (`jose@^6.2.3`) | `package.json`, `Issues - Pending Items.md` |
+| 1 | Core data model & types | `types.ts`, `reverse-git-types.ts`, `credential-store.ts` |
+| 2 | GitHub App auth core (JWT + token generation) | `github-app-auth.ts` (NEW) |
+| 3 | Credential store CRUD | `credential-store.ts` |
+| 4 | CLI commands for GitHub App management | `github-app-ops.ts` (NEW), `index.ts` |
+| 5 | Auth resolution chain & reverse-git integration | `shared.ts`, `reverse-git.ts`, `reverse-sync-engine.ts`, `repo-utils.ts` |
+| 6 | Repository scope addition (graceful degradation) | `github-write-client.ts`, `repo-utils.ts` |
+| 7 | Electron UI extensions | `index.html`, `app.js`, `site-routes.ts` |
+| 8 | Testing & validation | `tests/unit/github-app-*.test.ts` (NEW), regression suite |
+| 9 | Documentation | `storage-nav.md`, `configuration-guide.md`, `project-functions.md` |
+
+**Total estimated new code:** ~1,200–1,500 lines (including tests)
+
+#### 6.2 Known Risks
+
+| Risk | Severity | Mitigation |
+|---|---|---|
+| **R1: Personal account repo creation uncertain** | HIGH | Assumption: `POST /user/repos` works with installation tokens. Requires empirical verification. Fallback: org-only support or OAuth flow. |
+| **R2: Scope addition API limitation** | MEDIUM | Graceful degradation implemented — warn user, provide manual GitHub UI instructions. Companion PAT enhancement deferred. |
+| **R3: JWT library dependency** | LOW | `jose@^6.2.3` vetted (zero deps, zero HIGH+ advisories as of 2026-06-14). Dependency vetting log updated. |
+| **R4: Token caching edge cases** | LOW | In-memory only, 1-minute safety margin. Long-running ops (>1 hour) regenerate automatically. |
+
+#### 6.3 Open Decisions (for Implementation Phase)
+
+| Decision | Options | Recommendation |
+|---|---|---|
+| **D1: Companion PAT implementation** | (a) v1: skip, document as future enhancement<br>(b) v1: implement basic flow | (a) — defer to v2 based on user feedback |
+| **D2: OAuth flow for PAT acquisition** | (a) Out of scope<br>(b) Implement OAuth device flow | (a) — significant scope expansion, not required for v1 |
+| **D3: "All repositories" installation mode** | (a) Reject as security risk<br>(b) Allow with explicit confirmation | (a) — contradicts "limited to created repos" requirement |
+
+### 7. References
+
+All design decisions trace to:
+- **Refined Request:** `docs/reference/refined-request-github-app-auth.md` (requirements, AC, resolved OQ1–OQ7)
+- **Investigation:** `docs/reference/investigation-github-app-auth.md` (JWT library: `jose`, auth abstraction: token-provider, caching: in-memory)
+- **Research (Critical):** `docs/research/github-app-installation-auth-and-repo-scope.md` (PUT /user/installations requires PAT; graceful degradation)
+- **Research (JWT):** `docs/research/jose-rs256-github-app-jwt.md` (jose vetting, PKCS#1/PKCS#8, zero deps)
+- **Codebase Scan:** `docs/reference/codebase-scan-github-app-auth.md` (integration points, conventions)
+- **Implementation Plan:** `docs/design/plan-012-github-app-auth.md` (9-phase execution, ~1,200–1,500 lines estimate)
+
+---
+
+**End of GitHub App Authentication Design**
+

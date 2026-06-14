@@ -262,31 +262,50 @@ export class GitHubWriteClient implements RepoWriteClient {
   private readonly pat: string;
   private readonly owner: string;
   private readonly repo: string;
+  private readonly installationId?: string;
+  private readonly store?: any;
+  private readonly companionPatTokenName?: string;
 
   /**
-   * @param pat     A GitHub PAT with `repo` (classic) or `Contents:
-   *                Read & Write` + `Administration: Read & Write` (fine-
-   *                grained) scope. `Administration: Read & Write` is only
-   *                needed when the client may auto-create the repo.
+   * @param pat     A GitHub PAT or installation token with appropriate scope.
    * @param owner   GitHub account or organization that owns the repo.
    * @param repo    Repository name (without owner prefix, no `.git`).
+   * @param installationId  Optional GitHub App installation ID for scope addition.
+   * @param store   Optional CredentialStore for companion PAT resolution.
+   * @param companionPatTokenName  Optional PAT name for scope addition.
    */
-  constructor(pat: string, owner: string, repo: string) {
+  constructor(
+    pat: string,
+    owner: string,
+    repo: string,
+    installationId?: string,
+    store?: any,
+    companionPatTokenName?: string
+  ) {
     if (!pat) throw new Error("GitHubWriteClient: missing PAT");
     if (!owner) throw new Error("GitHubWriteClient: missing owner");
     if (!repo) throw new Error("GitHubWriteClient: missing repo");
     this.pat = pat;
     this.owner = owner;
     this.repo = repo;
+    this.installationId = installationId;
+    this.store = store;
+    this.companionPatTokenName = companionPatTokenName;
   }
 
   /**
    * Convenience constructor that derives `owner`/`repo` from a URL or
    * bare `owner/repo` string.
    */
-  static fromRepoUrl(pat: string, repoUrl: string): GitHubWriteClient {
+  static fromRepoUrl(
+    pat: string,
+    repoUrl: string,
+    installationId?: string,
+    store?: any,
+    companionPatTokenName?: string
+  ): GitHubWriteClient {
     const { owner, repo } = parseGitHubRepoUrl(repoUrl);
-    return new GitHubWriteClient(pat, owner, repo);
+    return new GitHubWriteClient(pat, owner, repo, installationId, store, companionPatTokenName);
   }
 
   // -------------------------------------------------------------------------
@@ -657,6 +676,18 @@ export class GitHubWriteClient implements RepoWriteClient {
 
     const res = await ghRequest(url, this.pat, { method: "POST", body });
     if (res.status === 201) {
+      // Attempt to add repo to installation scope if GitHub App auth is used
+      if (this.installationId) {
+        try {
+          const repoData = (await res.json()) as { id?: number };
+          if (repoData.id) {
+            await this.attemptScopeAddition(repoData.id);
+          }
+        } catch (err) {
+          // Non-fatal: repo was created successfully, scope-add is optional
+          console.warn(`Could not parse repository ID for scope addition: ${(err as Error).message}`);
+        }
+      }
       return;
     }
     if (res.status === 422) {
@@ -670,6 +701,81 @@ export class GitHubWriteClient implements RepoWriteClient {
       res,
       `Failed to create repository ${this.owner}/${this.repo}`,
     );
+  }
+
+  /**
+   * Attempt to add created repository to installation's "Only select repositories" set.
+   * 
+   * Per research: PUT /user/installations/{id}/repositories/{repo_id} ONLY works with
+   * classic PAT with `repo` scope, NOT installation tokens. This method implements
+   * graceful degradation: attempt the call with companion PAT if available, warn on
+   * failure, continue.
+   * 
+   * @param repositoryId The numeric repository ID returned by GitHub on creation
+   */
+  private async attemptScopeAddition(repositoryId: number): Promise<void> {
+    if (!this.installationId) return;
+
+    // Resolve companion PAT if available
+    let companionPat: string | undefined;
+    if (this.companionPatTokenName && this.store) {
+      const token = this.store.getToken?.(this.companionPatTokenName);
+      companionPat = token?.token;
+    }
+
+    // If no companion PAT, warn and provide manual instructions
+    if (!companionPat) {
+      console.warn(
+        `\nWARNING: Repository created successfully, but cannot be automatically added to the GitHub App installation's selected repositories.\n` +
+        `A companion PAT with 'repo' scope is required for automatic scope addition, but none was configured.\n` +
+        `\nTo grant the app access to this repository manually:\n` +
+        `  1. Go to: https://github.com/settings/installations\n` +
+        `  2. Click "Configure" next to your GitHub App\n` +
+        `  3. Under "Repository access", select "Only select repositories"\n` +
+        `  4. Add "${this.owner}/${this.repo}" to the selected repositories list\n` +
+        `\nTo avoid this warning in the future, add a companion PAT when configuring the GitHub App:\n` +
+        `  npx tsx src/cli/index.ts add-github-app --name <app-name> --companion-pat-name <pat-name> ...\n`
+      );
+      return;
+    }
+
+    // Attempt scope addition with companion PAT
+    const url = `${GITHUB_API_BASE}/user/installations/${this.installationId}/repositories/${repositoryId}`;
+    
+    try {
+      const res = await ghRequest(url, companionPat, { method: "PUT" });
+      
+      if (res.status === 204) {
+        console.log(
+          `✓ Repository added to GitHub App installation scope (installation ID: ${this.installationId}).`
+        );
+        return;
+      }
+      
+      if (res.status === 304) {
+        console.log(
+          `✓ Repository already in GitHub App installation scope (installation ID: ${this.installationId}).`
+        );
+        return;
+      }
+      
+      // 403, 404, or other errors: companion PAT may lack scope or installation not found
+      const errBody = await safeJson(res);
+      console.warn(
+        `\nWARNING: Repository created successfully, but could not be added to the GitHub App installation.\n` +
+        `GitHub API returned: ${res.status} ${errBody.message ?? "(no message)"}\n` +
+        `\nPossible causes:\n` +
+        `  - The companion PAT lacks 'repo' scope\n` +
+        `  - The installation ID is incorrect\n` +
+        `  - The GitHub App was uninstalled\n` +
+        `\nManually add the repository via: https://github.com/settings/installations\n`
+      );
+    } catch (err) {
+      console.warn(
+        `\nWARNING: Error adding repository to installation scope: ${(err as Error).message}\n` +
+        `Repository was created successfully. Manually add it via: https://github.com/settings/installations\n`
+      );
+    }
   }
 
   /**

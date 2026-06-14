@@ -107,6 +107,53 @@ storage-nav clone-github --repo https://github.com/org/repo --container myrepo \
 
 **When to use**: CI/CD pipelines, one-off operations, or when you don't want to persist credentials.
 
+### 5. GitHub App Credentials (reverse-git publication)
+
+**Purpose**: Authenticate reverse-git publication (`publish-github` / `reverse-link-github` / `push`) as a **GitHub App installation** instead of a Personal Access Token (PAT). A GitHub App installed with **“Only select repositories”** keeps storage-nav limited to exactly the repositories it created/manages, which is a tighter security boundary than a broadly-scoped PAT. GitHub App auth is **additive** — the existing PAT flow keeps working unchanged.
+
+**Options** (multiple ways to supply the credential; priority below):
+
+| Option | Flag | Meaning |
+|---|---|---|
+| Stored GitHub App | `--github-app-name <name>` | Use an encrypted GitHub App entry added via `add-github-app`. |
+| Inline GitHub App | `--github-app-inline <json>` | Provide `{ "appId", "privateKeyPem", "installationId" }` inline (scripting/CI). |
+| PAT (existing) | `--pat` / `--token-name` | Unchanged Personal Access Token flow. |
+
+**Resolution chain** (in priority order): `--github-app-inline` > `--github-app-name` > PAT chain (`--pat` > `--token-name` > first stored GitHub PAT). Per the project's no-fallback rule, if a named GitHub App is not found the command exits with configuration-error code 3 rather than silently falling back.
+
+**How to configure**:
+
+```bash
+# Register the credential once (private key encrypted at rest)
+storage-nav add-github-app \
+  --name my-publisher \
+  --app-id 123456 \
+  --installation-id 7654321 \
+  --private-key-file ./my-app.private-key.pem \
+  --companion-pat-name my-github-pat   # optional; see scope note below
+
+# Publish a container using the GitHub App
+storage-nav publish-github --container my-docs --repo myorg/my-docs \
+  --create-repo --github-app-name my-publisher
+
+storage-nav list-github-apps     # never prints the private key
+storage-nav remove-github-app --name my-publisher
+```
+
+**How to obtain each value**:
+- **App ID** (`--app-id`): GitHub > Settings > Developer settings > GitHub Apps > *your app* > **About** (numeric “App ID”).
+- **Private key** (`--private-key-file` / `privateKeyPem`): same page > **Private keys** > *Generate a private key* — downloads a `.pem` (PKCS#1 `-----BEGIN RSA PRIVATE KEY-----`; PKCS#8 also accepted). Passphrase-protected keys are rejected with guidance.
+- **Installation ID** (`--installation-id`): install the app on your account/org, then read it from the installation settings URL `https://github.com/settings/installations/<INSTALLATION_ID>` (or org equivalent). Each account/org the app is installed on has its own installation ID — register one credential entry per installation with a distinct `--name`.
+- **Companion PAT** (`--companion-pat-name`, optional): a stored classic PAT **with `repo` scope**. Required only for *automatic* addition of a newly-created repo to a “select repositories” installation (the installation token itself cannot perform that call). Without it, the repo is still created and pushed, and storage-nav prints instructions to add it to the installation via the GitHub UI.
+
+**Required GitHub App permissions**: Administration: Read & write (create repos), Contents: Read & write (push), Metadata: Read-only.
+
+**Recommended approach**: Prefer a **GitHub App** over a long-lived PAT for publication when you want least-privilege, repository-scoped access. Store the App via `add-github-app` so the private key is held in the same AES-256-GCM encrypted store as other secrets; installation access tokens are minted on demand (RS256 JWT → installation token) and **never written to disk**. Use `--github-app-inline` only for ephemeral CI.
+
+**Expiration handling**: GitHub App private keys do not auto-expire but can be rotated/revoked in the app settings. Installation access tokens are short-lived (~1 hour) and regenerated automatically per command, so token expiry is handled transparently. If you rotate the private key, re-run `add-github-app --name <same-name> ...` to overwrite the stored entry. You may record a renewal reminder via the optional `--expires-at` metadata field when set.
+
+**When to use**: Publishing/pushing to GitHub where you want the app constrained to exactly the repositories it created, with the option to extend scope later by installing additional repositories (or adding more installations as separate credential entries).
+
 ## Configuration Priority
 
 All secrets follow the resolution chain: inline CLI param → stored credential → interactive prompt. No environment variables or config files are used.

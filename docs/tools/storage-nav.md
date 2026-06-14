@@ -75,6 +75,19 @@
           list-tokens  List configured personal access tokens
           remove-token Remove a personal access token (--name <name>)
 
+          add-github-app  Add a GitHub App credential for installation-token authentication
+            --name <name>           Display name for the GitHub App
+            --app-id <id>           GitHub App ID (numeric, from app settings)
+            --installation-id <id>  Installation ID for the target account/org
+            --private-key-file <path>  Path to private key PEM file
+            --client-id <id>        OAuth client ID (optional, reserved for future)
+            --client-secret <secret>  OAuth client secret (optional, reserved for future)
+            --companion-pat-name <name>  Stored PAT name for repository scope addition (optional)
+            --expires-at <date>     Private key expiration date (ISO 8601, optional)
+
+          list-github-apps  List configured GitHub App credentials
+          remove-github-app  Remove a GitHub App credential (--name <name>)
+
           clone-github Clone a GitHub repository into a blob container
             --repo <url>          GitHub repository URL
             --container <name>    Target container name
@@ -361,6 +374,10 @@
             --author-email <e>        Default: "storage-nav@local".
             Common credential / PAT flags: --storage, --account,
             --account-key, --sas-token, --token-name, --pat.
+            GitHub App authentication (alternative to PAT):
+            --github-app-name <name>  Use stored GitHub App credential.
+            --github-app-inline <json>  Inline GitHub App credentials (JSON).
+            Precedence: --github-app-inline > --github-app-name > PAT chain.
 
           publish-devops
             Same as publish-github but targets Azure DevOps. Additional
@@ -481,7 +498,72 @@
           npx tsx src/cli/index.ts reverse-unlink \
               --link-id 1234abcd-... --container my-docs --yes
 
+        GitHub App authentication (alternative to PAT):
+          storage-nav can authenticate GitHub publication/push as a
+          GitHub App INSTALLATION instead of a Personal Access Token.
+          A GitHub App installed with "Only select repositories" keeps
+          storage-nav limited to exactly the repositories it created or
+          manages — a tighter boundary than a broadly-scoped PAT. The
+          feature is ADDITIVE: the PAT flow is unchanged, and configs
+          without GitHub Apps load as before.
+
+          Model:
+            - You register/own the GitHub App and provide App ID,
+              installation ID, and a private key (PEM). The private key
+              is stored encrypted (AES-256-GCM) in the same credential
+              store as PATs; it is never printed by list-github-apps.
+            - At operation time storage-nav signs a short-lived RS256
+              JWT (App ID as issuer) and exchanges it for an
+              installation access token (~1h, cached in memory for the
+              command/UI action, never written to disk).
+            - The installation token CREATES the repo (org installs:
+              POST /orgs/{org}/repos with Administration:write; user
+              installs: POST /user/repos) and PUSHES contents
+              (Contents:write). Required app permissions:
+              Administration R/W, Contents R/W, Metadata R/O.
+
+          Boundary + scope extension:
+            - Adding a newly-created repo to a "select repositories"
+              installation cannot be done by the installation token
+              itself — GitHub only allows it via a classic PAT with
+              'repo' scope. Configure an OPTIONAL companion PAT
+              (--companion-pat-name) to have storage-nav self-add the
+              repo automatically. Without it, the repo is still created
+              and pushed, and storage-nav prints instructions to add it
+              via the GitHub UI (graceful degradation; no retry in v1).
+            - Extend scope later by installing additional repositories
+              on the app, or by registering additional installations as
+              separate GitHub App credential entries (distinct --name).
+
+          Credential management commands:
+            storage-nav add-github-app --name <n> --app-id <id> \
+                --installation-id <id> --private-key-file <pem> \
+                [--companion-pat-name <pat>] [--expires-at <iso>] \
+                [--client-id <id>]   # client-id reserved for future use
+            storage-nav list-github-apps      # never prints the key
+            storage-nav remove-github-app --name <n>
+
+          Use on publish/push (precedence:
+          --github-app-inline > --github-app-name > PAT chain):
+            storage-nav publish-github --container my-docs \
+                --repo myorg/my-docs --create-repo \
+                --github-app-name my-publisher
+
+          Both the CLI and the Electron desktop UI support GitHub App
+          credential management AND selecting a GitHub App when
+          publishing/pushing (the publish dialog credential selector
+          lists PATs and GitHub Apps; the reverse-links panel shows the
+          auth type per link). See docs/design/configuration-guide.md
+          §5 for how to obtain each value and the recommended storage
+          approach.
+
         Known limitations (v1):
+          - GitHub App auth: automatic repo→installation scope addition
+            requires a companion PAT ('repo' scope); otherwise it is a
+            manual GitHub-UI step. User-account (non-org) repo creation
+            via an installation token is provider-dependent and should
+            be smoke-tested against your app (org installs are the
+            primary verified path).
           - No Git LFS support — large binaries trigger
             GitHubBlobTooLargeError per file.
           - No conflict resolution — divergence requires manual

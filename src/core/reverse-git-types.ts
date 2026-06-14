@@ -109,6 +109,10 @@ export interface ReverseLink {
     deleted: number;
     errors: PushError[];
   };
+  /** Auth method used for this link (default "pat" for backward compat). */
+  authType?: "pat" | "github-app" | "ado-app";
+  /** Name of the credential (PAT or GitHub App) used for this link. */
+  authCredentialName?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -308,4 +312,33 @@ export interface EnumeratedBlob {
   repoPath: string;
   etag: string;
   size: number;
+}
+
+// ---------------------------------------------------------------------------
+// GitHub App authentication (plan-012)
+// ---------------------------------------------------------------------------
+
+/**
+ * GitHub App credential entry for installation-token authentication.
+ * Stored encrypted in CredentialData.githubApps.
+ */
+export interface GitHubAppEntry {
+  /** User-defined name (unique within githubApps array) */
+  name: string;
+  /** GitHub App ID (from app settings) */
+  appId: string;
+  /** RSA private key in PKCS#1 or PKCS#8 PEM format (encrypted at rest) */
+  privateKeyPem: string;
+  /** Installation ID for the target account/org */
+  installationId: string;
+  /** Optional OAuth client ID (reserved for future user-to-server flows) */
+  clientId?: string;
+  /** Optional OAuth client secret (reserved for future) */
+  clientSecret?: string;
+  /** Optional stored PAT name for repo-scope addition (graceful degradation) */
+  companionPatTokenName?: string;
+  /** ISO 8601 timestamp when credential was added */
+  addedAt: string;
+  /** Optional ISO 8601 timestamp for private key rotation tracking */
+  expiresAt?: string;
 }
