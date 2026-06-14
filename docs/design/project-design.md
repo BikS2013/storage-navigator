@@ -5796,3 +5796,1031 @@ src/cli/commands/agent.ts
 - All TUI files are under `src/tui/`. Host agent code (`src/agent/`) is read-only except
   for two minimal touches: `confirm.ts` (delegate to bridge if set) and `agent.ts` (TTY
   branch that calls `mountTui`).
+
+---
+
+## Reverse-Git Publication
+
+### Provenance
+
+| Artifact | Path |
+|---|---|
+| Refined request | `docs/reference/refined-request-reverse-git.md` |
+| Investigation | `docs/reference/investigation-reverse-git.md` |
+| Research (GitHub) | `docs/research/github-git-data-api.md` |
+| Research (ADO) | `docs/research/azure-devops-git-pushes-api.md` |
+| Codebase scan | `docs/reference/codebase-scan-reverse-git.md` |
+| Plan | `docs/design/plan-011-reverse-git.md` |
+
+The reverse-git feature publishes Azure Blob Storage content to a remote Git repository (GitHub or Azure DevOps) and incrementally pushes subsequent storage changes as new commits. It is the directional mirror of the existing forward `sync-engine.ts` and ships as an extension of the `storage-nav` tool — no new tool, no new runtime dependency.
+
+---
+
+### 1. System architecture
+
+```
+                       ┌──────────────────────────────────────────────────────┐
+                       │           Reverse-Git Subsystem (new code)            │
+                       └──────────────────────────────────────────────────────┘
+                                              │
+   ┌─────────────────────┬─────────────────────┼──────────────────────┬─────────────────────────┐
+   │                     │                     │                      │                         │
+┌──▼──────────┐  ┌───────▼─────────┐  ┌────────▼──────────┐  ┌────────▼──────────┐  ┌───────────▼───────────┐
+│ CLI handlers│  │ Server routes   │  │ Electron renderer │  │ reverse-sync-     │  │  reverse-link-registry │
+│ src/cli/    │  │ src/electron/   │  │ src/electron/     │  │ engine.ts         │  │  src/core/             │
+│ commands/   │  │ server.ts       │  │ public/app.js     │  │ (orchestrator)    │  │  reverse-link-registry │
+│ reverse-git │──┤ (Express)       │──┤ (modals + badges) │──┤                   │──┤  .ts                   │
+│ .ts         │  │                 │  │                   │  │                   │  │                        │
+└─────┬───────┘  └────┬────────────┘  └─────────┬─────────┘  └────────┬──────────┘  └──────────┬────────────┘
+      │               │                         │                     │                        │
+      │               │ HTTP                    │ fetch /api/*        │ invokes                │ reads/writes
+      │ direct call   │                         ▼                     ▼                        ▼
+      │               │                  ┌──────────────┐    ┌─────────────────┐      ┌──────────────────────┐
+      ├───────────────┴──────────────────┤  buildWrite  │    │ blob-enumerator │      │ .reverse-git-links   │
+      │                                  │  ClientFor   │    │   .ts           │      │  .json (per          │
+      ▼                                  │  Link()      │    │                 │      │  container)          │
+┌──────────────────────────┐             └──────┬───────┘    └────────┬────────┘      └──────────────────────┘
+│ shared.ts                │                    │                     │                          │
+│ resolveStorageEntry      │                    │                     │ uses                     │
+│ resolvePatToken          │            ┌───────┴──────────┐          ▼                          │
+└────────┬─────────────────┘            │                  │   ┌─────────────┐                   │
+         │                              ▼                  ▼   │ reverse-    │                   │
+         ▼                       ┌──────────────┐ ┌──────────┐ │ diff-engine │                   │
+┌──────────────────────────┐     │ GitHubWrite  │ │ DevOpsWr.│ │   .ts       │                   │
+│  CredentialStore         │     │ Client.ts    │ │ Client.ts│ └─────────────┘                   │
+│  (extended w/            │     │ (REST + Git  │ │ (single  │                                   │
+│   reverseLinks?:         │     │  Data API)   │ │ POST     │                                   │
+│   AccountScopeReverse..) │     └──────┬───────┘ │ /pushes) │                                   │
+└────────┬─────────────────┘            │         └────┬─────┘                                   │
+         │                              │              │                                         │
+         │ reads .json @                ▼              ▼                                         │
+         │ ~/.storage-navigator/   ┌──────────────────────────┐                                  │
+         ▼                          │ rateLimitedFetch (reuse) │                                 │
+┌─────────────────────────┐         └──────────────┬───────────┘                                 │
+│ credentials.json (AES)  │                        │                                             │
+│ holds storage-account-  │                        ▼                                             │
+│ scope reverseLinks      │              ┌──────────────────┐                                    │
+└─────────────────────────┘              │ api.github.com   │                                    │
+                                         │ dev.azure.com    │                                    │
+                                         └──────────────────┘                                    │
+                                                                                                 │
+┌────────────────────────────────────────────────────────────────────────────────────────────────┘
+│ BlobClient (existing)        — used by blob-enumerator (listContainers / listBlobsFlat / getBlobContent)
+│ repo-utils.ts (existing)     — rateLimitedFetch, processInBatches reused; buildWriteClientForLink appended
+│ Forward sync-engine.ts       — UNTOUCHED  (NFR6 backward-compat)
+│ Forward diff-engine.ts       — UNTOUCHED  (separate fingerprint family)
+│ GitHubClient / DevOpsClient  — UNTOUCHED  (sibling write clients — OQ-3 decision)
+└────────────────────────────────────────────────────────────────────────────────────────────────
+```
+
+**Three runtime paths:**
+
+1. **CLI** — `src/cli/index.ts` Commander → `src/cli/commands/reverse-git.ts` handler → `reverse-sync-engine.ts` → `RepoWriteClient` → REST. No HTTP layer.
+2. **Electron + storage-nav-api** — `src/electron/public/app.js` modal → `fetch` against Express endpoint in `src/electron/server.ts` → same `reverse-sync-engine.ts` → REST. Server routes are thin adapters; business logic lives only in the engine.
+3. **Storage-nav-api standalone** (future) — same Express routes mount inside the API package because the engine has no Express dependency. Verified via the existing `IStorageBackend` factory pattern.
+
+---
+
+### 2. Module structure
+
+All paths absolute from project root. Cite the codebase-scan's "Conventions" section (`codebase-scan-reverse-git.md` §3): named imports with `.js` extension (Node16 ESM), `Error` throws (no `Result` wrappers), `onProgress?: (msg: string) => void` callbacks (NFR7), no fallback defaults for required config (per `<structure-and-conventions>`), well-known blob constants at file head.
+
+| New / modified file | Responsibility |
+|---|---|
+| `src/core/reverse-git-types.ts` **(NEW)** | `ReverseLink`, `ReverseGitLinkRegistry`, `AccountScopeReverseLinksRegistry`, `ReverseLinkScope`, `ReverseLinkPATBinding`, `RepoChange`, `PushResult`, `PushError`, `ReverseDiffResult`, `DiffCategoryReverse`, `RepoWriteClient`, `RepoWriteClientCommitInput`, `RepoWriteClientCommitResult`. Constant `REVERSE_LINKS_BLOB = ".reverse-git-links.json"`. Constant `EXCLUDED_BLOB_NAMES = [".repo-sync-meta.json", ".repo-links.json", ".reverse-git-links.json"]`. Re-exported from `src/core/types.ts` to preserve the single-import surface for downstream files (the plan also allows appending directly to `types.ts`; this design lifts it into its own file to keep the type bloat isolated — see "Decisions log" D-MOD-1). |
+| `src/core/reverse-git-errors.ts` **(NEW)** | Typed error classes: `ReverseGitError` (base), `RepoNotFoundError`, `RemoteDivergedError`, `InsufficientScopesError`, `PayloadTooLargeError`, `RateLimitExceededError`, `InvalidPATError` (alias `AuthenticationError`), `GitHubApiError`, `GitHubEmptyRepoError`, `GitHubBlobTooLargeError`, `DevOpsApiError`, `PathCollisionError`, `ConfigurationError`. Each carries a static `exitCode: number` (CLI tri-state) and `httpStatus: number` (server mapping). |
+| `src/core/repo-write-client.ts` **(NEW — interface only)** | Re-exports `RepoWriteClient` from `reverse-git-types.ts` as the single import location for write clients. Pure type module — zero runtime code. Provided for symmetry with `src/core/repo-utils.ts` and to satisfy the refined request's enumeration of files. |
+| `src/core/github-write-client.ts` **(NEW)** | Class `GitHubWriteClient implements RepoWriteClient`. Internal helpers: `uploadBlob`, `createTree`, `createTreeChunked` (chunks of 700, per research §11), `createCommit`, `updateRef`, `createRef`, `getBranchTip`, `bootstrapEmptyRepo`, `createRepo` (with `auto_init: true` per research §7+§8), `mapStatusToError`. All HTTP via `rateLimitedFetch`. Concurrency cap 10 in-flight blob uploads, 100 ms inter-batch pause (per research §12). |
+| `src/core/devops-write-client.ts` **(NEW)** | Class `DevOpsWriteClient implements RepoWriteClient`. Internal helpers: `getOrCreateRepo`, `getCurrentRefSha`, `listRepoFiles`, `pushChanges` (single `POST /git/pushes`, per research §1), `pushInBatches` (chunking at 500 changes per push when needed), `mapStatusToError`. Uses 40-zeros `oldObjectId` for empty-repo initial commit (research §3). All paths leading-slash-prefixed per research §2. |
+| `src/core/reverse-link-registry.ts` **(NEW)** | CRUD on `.reverse-git-links.json` (container/prefix scope) AND on `CredentialStore.reverseLinks` (account scope). Functions: `readReverseLinks(blobClient, container): Promise<ReverseGitLinkRegistry>`, `writeReverseLinks(blobClient, container, registry): Promise<void>`, `createReverseLink(blobClient, container, link)`, `removeReverseLink(blobClient, container, linkId)`, `findReverseLink(blobClient, container, linkId)`, plus account-scope variants `readAccountReverseLinks(store, account)`, `writeAccountReverseLinks(store, account, links)`. Dispatches by `ReverseLinkScope.kind`. |
+| `src/core/blob-enumerator.ts` **(NEW)** | `enumerateScope(blobClient, store, scope, opts): AsyncIterable<EnumeratedBlob>` — async iterator over `{ storagePath, repoPath, etag, size }`. Applies path-mapping rules R5.1–R5.5, exclusion patterns (R6), and `.gitignore` (R6.2, scope-root-relative per OQ-11). Surfaces `PathCollisionError` (R5.5) and warnings for illegal paths (R5.4). |
+| `src/core/reverse-diff-engine.ts` **(NEW)** | `computeReverseDiff(currentSnapshot, lastSnapshot): ReverseDiffResult`. Categories: `added | modified | deleted | unchanged`. Pure function — no I/O. Special-cases empty `lastSnapshot` (all current → added). Does NOT import the forward `diff-engine.ts`. |
+| `src/core/reverse-sync-engine.ts` **(NEW)** | Orchestration. Exposes `publishRepo(opts): Promise<PushResult>` (initial publish) and `pushReverseLink(opts): Promise<PushResult>` (incremental). Wires `blob-enumerator → reverse-diff-engine → RepoWriteClient.createCommit → reverse-link-registry`. Pre-flight divergence check via `getBranchTip()`. Streams progress through `onProgress?: (msg: string) => void` (NFR7). |
+| `src/core/credential-store.ts` **(MODIFY)** | Append `getAccountReverseLinks(account: string): ReverseLink[]` and `setAccountReverseLinks(account: string, links: ReverseLink[]): Promise<void>`. Extend `CredentialData` interface (in `types.ts`) with `reverseLinks?: AccountScopeReverseLinksRegistry`. Missing field on existing config files → empty registry (no migration write — backward compatibility). |
+| `src/core/repo-utils.ts` **(MODIFY)** | Append `buildWriteClientForLink(link: ReverseLink, pat: string): RepoWriteClient` factory after the existing `buildProviderForLink` at line 17. Provider branches: `"github"` → `new GitHubWriteClient(...)`; `"azure-devops"` → `new DevOpsWriteClient(...)`. |
+| `src/core/types.ts` **(MODIFY)** | Append `export *` re-exports from `reverse-git-types.ts` so legacy imports of `RepoLink` siblings continue to find new types in the same place. Extend `CredentialData` to add optional `reverseLinks?: AccountScopeReverseLinksRegistry`. No removals; no edits to existing forward types. |
+| `src/cli/commands/reverse-git.ts` **(NEW)** | Handler functions one per CLI command: `publishGitHub`, `publishDevOps`, `reverseLinkGitHub`, `reverseLinkDevOps`, `pushReverseLink`, `reverseUnlink`, `listReverseLinks`. Each resolves storage + PAT via `resolveStorageEntry` / `resolvePatToken` from `shared.ts` (read-only), instantiates `BlobClient`, dispatches to `reverse-sync-engine.ts`, formats output, returns tri-state exit codes. |
+| `src/cli/index.ts` **(MODIFY)** | Register 7 new Commander subcommands after the existing `list-links` / `diff` registrations (≈ line 405). All commands accept the standard storage + PAT chain (`--storage`, `--account`, `--account-key`, `--sas-token`, `--token-name`, `--pat`). |
+| `src/electron/server.ts` **(MODIFY)** | Append 6 new Express routes after the existing `/api/sync*` block. Use `buildWriteClientForLink()` factory. Map error types to HTTP statuses via shared `mapReverseGitErrorToHttp(err)` helper (defined in `src/core/reverse-git-errors.ts`). |
+| `src/electron/public/index.html` **(MODIFY)** | Add menu items to `#container-context-menu` (line 261), `#folder-context-menu` (line 253). Create new `#storage-account-context-menu`. Append two new modals: `#publish-modal` and `#reverse-links-panel-modal`, mirroring the existing `#link-modal` / `#links-panel-modal` (lines 206–222). |
+| `src/electron/public/app.js` **(MODIFY)** | Add `openReverseLinksPanel()` (mirror of `openLinksPanel()` at line 1645). Add `openPublishModal()` driving the publish wizard. Wire new context-menu handlers. Token-selector calls existing `/api/tokens?provider=...`. Add `.reverse-link-badge` rendering distinct from `.link-badge` (`↑` outbound arrow vs `↓` inbound). Errors inline via existing toast pattern — no `alert()`. |
+| `tests/unit/reverse-link-registry.test.ts` **(NEW)** | Phase C tests. |
+| `tests/unit/credential-store-reverse-links.test.ts` **(NEW)** | Phase C tests. |
+| `tests/unit/github-write-client.test.ts` **(NEW)** | Phase A tests. |
+| `tests/unit/devops-write-client.test.ts` **(NEW)** | Phase A tests. |
+| `tests/unit/blob-enumerator.test.ts` **(NEW)** | Phase B tests. |
+| `tests/unit/reverse-diff-engine.test.ts` **(NEW)** | Phase B tests. |
+| `tests/unit/reverse-sync-engine.test.ts` **(NEW)** | Phase D tests. |
+| `tests/unit/reverse-git-cli.test.ts` **(NEW)** | Phase E tests. |
+| `tests/unit/server-reverse-links.test.ts` **(NEW)** | Phase F tests. |
+| `docs/tools/storage-nav.md` **(MODIFY — Phase E)** | New "Reverse-Git Publication" subsection. |
+| `CLAUDE.md` (project root) **(MODIFY — Phase E)** | `storage-nav` Tools entry description amended. |
+| `Issues - Pending Items.md` **(MODIFY — Phase E)** | Register v1 limitations (no LFS, no conflict resolution, no event-driven monitoring, account-scope "use sparingly"). |
+
+---
+
+### 3. Data models
+
+All TypeScript source below lives in `src/core/reverse-git-types.ts` (re-exported via `src/core/types.ts`). The plan permits inlining these directly into `types.ts`; the design lifts them into a dedicated file to keep the forward-direction types unmodified (per codebase-scan §4 "preserve existing forward types").
+
+```typescript
+// ===========================================================================
+// src/core/reverse-git-types.ts
+// All types and constants for the reverse-git feature.
+// ===========================================================================
+
+import type { CredentialStore } from "./credential-store.js"; // for JSDoc only
+
+/** Well-known blob name for container/prefix-scope reverse-link metadata. */
+export const REVERSE_LINKS_BLOB = ".reverse-git-links.json";
+
+/** Blob names that must NEVER be published to a remote repo. */
+export const EXCLUDED_BLOB_NAMES: readonly string[] = [
+  ".repo-sync-meta.json",
+  ".repo-links.json",
+  ".reverse-git-links.json",
+];
+
+/** Source scope for a reverse-link. Discriminated union by `kind`. */
+export type ReverseLinkScope =
+  | { kind: "account"; account: string }
+  | { kind: "container"; account: string; container: string }
+  | { kind: "prefix"; account: string; container: string; prefix: string };
+
+/** Default author identity for generated commits. */
+export interface CommitAuthor {
+  name: string;
+  email: string;
+}
+
+/** Configurable per-link visibility for first-time repo auto-creation. */
+export type RepoVisibility = "public" | "private";
+
+/**
+ * The ReverseGitLink record — directional opposite of RepoLink.
+ *
+ * Persisted (a) inside `.reverse-git-links.json` at the container root
+ * for container/prefix scope, or (b) inside CredentialData.reverseLinks
+ * for storage-account scope.
+ */
+export interface ReverseLink {
+  /** UUID v4 via crypto.randomUUID() */
+  id: string;
+  /** Source scope (account / container / prefix) */
+  scope: ReverseLinkScope;
+  /** Provider — drives which RepoWriteClient is instantiated */
+  provider: "github" | "azure-devops";
+  /**
+   * Target repository identifier.
+   *  - GitHub:        "owner/repo"  (or full URL — normalised at parse)
+   *  - Azure DevOps:  "https://dev.azure.com/{org}/{project}/_git/{repo}"
+   */
+  repoUrl: string;
+  /** Branch name. Default "main" when omitted by user. */
+  branch: string;
+  /** Sub-folder inside the repo to write to. Default "" (repo root). */
+  repoSubPath: string;
+  /** Name of the TokenEntry in CredentialStore used for this link. */
+  tokenName: string;
+  /** Author identity baked into every commit. */
+  author: CommitAuthor;
+  /** .gitignore-style exclusion patterns relative to the source scope root. */
+  exclusionPatterns: string[];
+  /** When true, honour a .gitignore present inside the source scope. */
+  respectGitignore: boolean;
+  /** Whether ensureRepo may create the repo if missing. Honoured ONLY on first publish. */
+  createRepo: boolean;
+  /** Visibility used iff createRepo=true and the repo did not exist. */
+  visibility: RepoVisibility;
+  /** ISO 8601 of last successful push. */
+  lastPushedAt?: string;
+  /** Last pushed commit SHA — used for divergence detection. */
+  lastPushedCommitSha?: string;
+  /** Last pushed tree SHA — informational. Null for ADO (server-side only). */
+  lastPushedTreeSha?: string | null;
+  /** path → ETag map for the LAST successful push. Drives reverse-diff. */
+  blobSnapshot: Record<string, string>;
+  /** ISO 8601 of creation. */
+  createdAt: string;
+  /** Counts + per-file errors from the last attempt. */
+  lastPushResult?: {
+    added: number;
+    modified: number;
+    deleted: number;
+    errors: PushError[];
+  };
+}
+
+/** Container-scope registry blob shape. */
+export interface ReverseGitLinkRegistry {
+  /** Schema version. Bump on incompatible changes. */
+  schemaVersion: 1;
+  /** All reverse-links rooted at this container (kind: "container" or "prefix"). */
+  links: ReverseLink[];
+}
+
+/** Storage-account-scope registry shape (lives inside CredentialData). */
+export interface AccountScopeReverseLinksRegistry {
+  schemaVersion: 1;
+  /** Keyed by storage-account name. Each entry is a list of kind:"account" links. */
+  byAccount: Record<string, ReverseLink[]>;
+}
+
+/** Optional PAT-binding record stored alongside TokenEntry (informational). */
+export interface ReverseGitLinkPATBinding {
+  linkId: string;
+  tokenName: string;
+}
+
+/** Unified change for RepoWriteClient.createCommit(). */
+export type RepoChange =
+  | { kind: "add"; path: string; contentBytes: Uint8Array }
+  | { kind: "edit"; path: string; contentBytes: Uint8Array }
+  | { kind: "delete"; path: string };
+
+/** Input shape for RepoWriteClient.createCommit. */
+export interface RepoWriteClientCommitInput {
+  branch: string;
+  /** null → root commit (initial publish to empty repo). */
+  parentCommitSha: string | null;
+  /** null → use server-side resolution (ADO). GitHub uses for base_tree. */
+  parentTreeSha: string | null;
+  message: string;
+  author: CommitAuthor;
+  changes: RepoChange[];
+  /** force ref update past divergence (--allow-overwrite-remote). */
+  allowForce?: boolean;
+}
+
+/** Output shape from RepoWriteClient.createCommit. */
+export interface RepoWriteClientCommitResult {
+  commitSha: string;
+  /** Returned by GitHub; ADO returns it in commits[0].treeId. */
+  treeSha: string | null;
+  /** Per-file failures that did NOT abort the commit. */
+  perFileErrors: Array<{ path: string; reason: string }>;
+}
+
+/** The provider-agnostic write contract — implemented by GitHub + ADO clients. */
+export interface RepoWriteClient {
+  /**
+   * Verify the repo exists. If `createIfMissing` and the repo is absent,
+   * create it (GitHub: POST /user/repos or /orgs/.. with auto_init:true;
+   * ADO: POST /_apis/git/repositories). Throws RepoNotFoundError otherwise.
+   */
+  ensureRepo(opts: {
+    name: string;
+    visibility: RepoVisibility;
+    createIfMissing: boolean;
+  }): Promise<void>;
+
+  /**
+   * Read the current tip of `branch`. Returns null when the branch does
+   * not exist (truly empty repo OR branch never created).
+   */
+  getBranchTip(
+    branch: string,
+  ): Promise<{ commitSha: string; treeSha: string | null } | null>;
+
+  /**
+   * Build one commit from `changes` and advance `branch`. Returns the
+   * new commit + tree SHAs. Throws RemoteDivergedError when the current
+   * tip != input.parentCommitSha (unless allowForce is true).
+   */
+  createCommit(
+    input: RepoWriteClientCommitInput,
+  ): Promise<RepoWriteClientCommitResult>;
+
+  // Convenience helpers exposed for the engine layer:
+
+  /** Build-or-create repo (alias for ensureRepo — kept for naming parity). */
+  getOrCreateRepo(opts: {
+    name: string;
+    visibility: RepoVisibility;
+    createIfMissing: boolean;
+  }): Promise<void>;
+
+  /** Synonym for getBranchTip().commitSha — null when branch absent. */
+  getCurrentRefSha(branch: string): Promise<string | null>;
+
+  /** List existing files (paths only) on `branch`. Used by --force re-push. */
+  listRepoFiles(branch: string): Promise<string[]>;
+
+  /** Apply a batch of changes — alias for createCommit (provider-neutral). */
+  pushChanges(input: RepoWriteClientCommitInput): Promise<RepoWriteClientCommitResult>;
+
+  /**
+   * Strategy A bootstrap: invoked by ensureRepo when GitHub creates the
+   * repo with `auto_init: true`. Pull init commit/tree SHAs so the
+   * subsequent createCommit can use base_tree.
+   * For ADO (which has no auto-init), this is a no-op.
+   */
+  bootstrapEmpty(branch: string): Promise<void>;
+}
+
+/** Per-file error accumulated in PushResult (NFR4). */
+export interface PushError {
+  path: string;
+  reason: string;
+  /** ISO 8601 of when the error was captured. */
+  at: string;
+}
+
+/** Result of a push (initial or incremental). */
+export interface PushResult {
+  linkId: string;
+  /** Whether any commit was actually pushed (false on no-op / dry-run with no changes). */
+  pushed: boolean;
+  /** New commit SHA on the remote, set when pushed=true. */
+  commitSha?: string;
+  /** New tree SHA — GitHub only; null/undefined for ADO. */
+  treeSha?: string | null;
+  added: string[];
+  modified: string[];
+  deleted: string[];
+  skipped: string[];
+  errors: PushError[];
+  /** ISO 8601 of the push attempt. */
+  at: string;
+}
+
+/** Reverse-diff classification. */
+export type DiffCategoryReverse = "added" | "modified" | "deleted" | "unchanged";
+
+/** Detailed diff between current storage snapshot and last-pushed snapshot. */
+export interface ReverseDiffResult {
+  linkId: string;
+  added: string[];      // repo paths now present in storage
+  modified: string[];   // repo paths whose ETag changed
+  deleted: string[];    // repo paths last pushed but now absent from storage
+  unchanged: string[];  // repo paths whose ETag matches snapshot
+  /** Total counts for the CLI/UI summary. */
+  counts: { added: number; modified: number; deleted: number; unchanged: number };
+}
+
+/** A single enumerated blob from blob-enumerator. */
+export interface EnumeratedBlob {
+  storagePath: string;
+  repoPath: string;
+  etag: string;
+  size: number;
+}
+```
+
+#### Credential store extension
+
+```typescript
+// src/core/types.ts  (edit existing CredentialData)
+export interface CredentialData {
+  storages: StorageEntry[];
+  tokens?: TokenEntry[];
+  /** NEW — storage-account-scope reverse-link registry. Optional for backward compat. */
+  reverseLinks?: AccountScopeReverseLinksRegistry;
+  /** NEW — optional explicit PAT bindings (Phase C may defer; informational). */
+  reverseLinkPatBindings?: ReverseGitLinkPATBinding[];
+}
+```
+
+#### Typed errors (CLI exit-code and HTTP-status mapping)
+
+`src/core/reverse-git-errors.ts`:
+
+```typescript
+export abstract class ReverseGitError extends Error {
+  abstract readonly code: string;
+  abstract readonly exitCode: 0 | 1 | 2 | 3;
+  abstract readonly httpStatus: number;
+}
+
+export class RepoNotFoundError extends ReverseGitError {
+  code = "REPO_NOT_FOUND"; exitCode = 2 as const; httpStatus = 404;
+}
+export class RemoteDivergedError extends ReverseGitError {
+  code = "REMOTE_DIVERGED"; exitCode = 2 as const; httpStatus = 409;
+  constructor(
+    public readonly localKnownSha: string,
+    public readonly remoteActualSha: string,
+    message?: string,
+  ) { super(message ?? `Remote diverged (local=${localKnownSha} remote=${remoteActualSha})`); }
+}
+export class InsufficientScopesError extends ReverseGitError {
+  code = "INSUFFICIENT_SCOPES"; exitCode = 2 as const; httpStatus = 403;
+}
+export class PayloadTooLargeError extends ReverseGitError {
+  code = "PAYLOAD_TOO_LARGE"; exitCode = 2 as const; httpStatus = 413;
+}
+export class RateLimitExceededError extends ReverseGitError {
+  code = "RATE_LIMIT"; exitCode = 2 as const; httpStatus = 503;
+}
+export class InvalidPATError extends ReverseGitError {
+  code = "INVALID_PAT"; exitCode = 2 as const; httpStatus = 401;
+}
+export class GitHubApiError extends ReverseGitError {
+  code = "GITHUB_API"; exitCode = 2 as const; httpStatus = 502;
+  constructor(public readonly status: number, message: string) { super(message); }
+}
+export class GitHubEmptyRepoError extends GitHubApiError {
+  code = "GITHUB_EMPTY_REPO" as const;
+  constructor(message: string) { super(409, message); }
+}
+export class GitHubBlobTooLargeError extends GitHubApiError {
+  code = "GITHUB_BLOB_TOO_LARGE" as const;
+  exitCode = 1 as const; // per-file — not fatal, accumulated into PushResult.errors
+  httpStatus = 200; // not propagated to HTTP
+  constructor(message: string) { super(422, message); }
+}
+export class DevOpsApiError extends ReverseGitError {
+  code = "DEVOPS_API"; exitCode = 2 as const; httpStatus = 502;
+  constructor(public readonly status: number, public readonly typeKey: string | undefined, message: string) { super(message); }
+}
+export class PathCollisionError extends ReverseGitError {
+  code = "PATH_COLLISION"; exitCode = 2 as const; httpStatus = 422;
+  constructor(public readonly collidingPaths: [string, string]) {
+    super(`Storage paths collide when mapped to repo paths: ${collidingPaths.join(" vs ")}`);
+  }
+}
+export class ConfigurationError extends ReverseGitError {
+  code = "CONFIG_MISSING"; exitCode = 3 as const; httpStatus = 400;
+}
+
+/** Single source of truth for CLI ↔ HTTP mapping. */
+export function mapReverseGitErrorToHttp(err: unknown): { status: number; body: { error: string; code?: string; details?: unknown } } {
+  if (err instanceof ReverseGitError) {
+    return { status: err.httpStatus, body: { error: err.message, code: err.code } };
+  }
+  return { status: 500, body: { error: err instanceof Error ? err.message : String(err) } };
+}
+```
+
+**CLI exit-code summary (tri-state per plan-005 / R10.11):** `0` = success / no-op; `1` = changes pushed (or would be pushed in `--dry-run`); `2` = fatal error; `3` = configuration error (missing required value, per `<structure-and-conventions>` no-fallback rule).
+
+---
+
+### 4. API contracts
+
+#### 4.1 CLI subcommands
+
+All commands accept the standard chain: `--storage <name>`, `--account <name>`, `--account-key <k>`, `--sas-token <t>`, `--token-name <name>`, `--pat <inline>`. Tri-state exit code per R10.11.
+
+| Command | Scope flags | Target flags | Operation flags | Exit codes |
+|---|---|---|---|---|
+| `publish-github` | `--container <name>` or `--prefix <p>` (with `--container`) or (none = account scope when `--storage` only) | `--repo <owner/repo>`, `--branch <name>` (default `main`), `--commit-message <msg>`, `--exclude <pattern>` (repeatable), `--respect-gitignore` (default true), `--repo-sub-path <p>`, `--visibility public\|private` (default `private`), `--create-repo`, `--author-name`, `--author-email` | — | 0 no-op, 1 pushed, 2 fatal, 3 config |
+| `publish-devops` | (same scope flags as above) | `--org <name>`, `--project <name>`, `--repo <name>`, `--branch`, `--commit-message`, `--exclude`, `--respect-gitignore`, `--repo-sub-path`, `--visibility` (ignored — ADO inherits from project), `--create-repo`, `--author-name`, `--author-email` | — | (same) |
+| `reverse-link-github` | (same scope flags) | (same target flags as `publish-github`) | (no push performed) | 0 created, 2 fatal |
+| `reverse-link-devops` | (same) | (same target flags as `publish-devops`) | (no push performed) | 0 created, 2 fatal |
+| `push` | `--container <name>`, `--prefix <p>`, `--all`, `--link-id <uuid>` | — | `--dry-run`, `--force`, `--allow-overwrite-remote` | 0 no changes, 1 pushed / would push, 2 fatal |
+| `reverse-unlink` | `--container` or `--storage` (for account scope) | `--link-id <uuid>` | — | 0 removed, 2 fatal |
+| `list-reverse-links` | `--container` or `--storage` (for account scope) | (none) | (none) | 0 listed (even when empty), 2 fatal |
+
+Flag semantics:
+- `--force` re-classifies every tracked path as `modify` (R4.8). Independent of divergence handling.
+- `--allow-overwrite-remote` enables force-push on PATCH (GitHub `force: true`) / ADO push when local diverged from remote. Default OFF.
+- Scope resolution precedence: `--prefix > --container > --storage` (account scope when only `--storage` provided).
+- Mutual exclusion: `--all` and `--link-id` are mutually exclusive.
+
+#### 4.2 HTTP API
+
+All routes mounted under `src/electron/server.ts`. Request/response payloads JSON. Errors mapped via `mapReverseGitErrorToHttp`.
+
+| Method | Path | Request body | Response (200/201) | Notable error codes |
+|---|---|---|---|---|
+| `GET` | `/api/reverse-links/:storage/:container?` | — | `{ links: ReverseLink[] }` | 404 if storage entry missing |
+| `POST` | `/api/reverse-links/:storage/:container?` | `{ scope, provider, repoUrl, branch?, repoSubPath?, tokenName, author?, exclusionPatterns?, respectGitignore?, createRepo?, visibility? }` | `{ link: ReverseLink }` (201) | 400 invalid body, 409 if a link with identical scope+repoUrl exists |
+| `DELETE` | `/api/reverse-links/:storage/:container?/:linkId` | — | `{ removed: true }` | 404 link not found |
+| `POST` | `/api/push/:storage/:container?/:linkId?dryRun=&force=&allowOverwriteRemote=` | (none) | `{ result: PushResult }` | 401 invalid PAT, 403 insufficient scope, 404 repo missing, 409 diverged, 413 payload too large, 503 rate-limited |
+| `POST` | `/api/push-all/:storage/:container?` | (none) | `{ results: PushResult[] }` | 502 if any link fails — overall response keeps successful results; per-link errors preserved |
+| `GET` | `/api/reverse-diff/:storage/:container?/:linkId` | — | `{ diff: ReverseDiffResult }` | 404 link not found |
+
+Server handlers call `buildWriteClientForLink(link, pat)` (from `repo-utils.ts`) and dispatch to `reverse-sync-engine.ts`. No business logic in `server.ts`.
+
+#### 4.3 Inter-module signatures
+
+```typescript
+// src/core/reverse-sync-engine.ts
+export async function publishRepo(opts: {
+  blobClient: BlobClient;
+  credentialStore: CredentialStore;
+  link: ReverseLink;
+  pat: string;
+  options?: { dryRun?: boolean; force?: boolean; allowOverwriteRemote?: boolean };
+  onProgress?: (msg: string) => void;
+}): Promise<PushResult>;
+
+export async function pushReverseLink(opts: {
+  blobClient: BlobClient;
+  credentialStore: CredentialStore;
+  link: ReverseLink;
+  pat: string;
+  options?: { dryRun?: boolean; force?: boolean; allowOverwriteRemote?: boolean };
+  onProgress?: (msg: string) => void;
+}): Promise<PushResult>;
+
+export async function resolveReverseLinks(opts: {
+  blobClient: BlobClient;
+  credentialStore: CredentialStore;
+  scopeHint: { container?: string; prefix?: string; account?: string; linkId?: string; all?: boolean };
+}): Promise<ReverseLink[]>;
+
+// src/core/blob-enumerator.ts
+export interface EnumerateScopeOptions {
+  exclusionPatterns: string[];
+  respectGitignore: boolean;
+  repoSubPath: string;
+  onWarn?: (msg: string) => void;
+}
+
+export function enumerateScope(
+  blobClient: BlobClient,
+  scope: ReverseLinkScope,
+  opts: EnumerateScopeOptions,
+): AsyncIterable<EnumeratedBlob>;
+
+// src/core/reverse-diff-engine.ts
+export function computeReverseDiff(
+  currentSnapshot: Map<string /* repoPath */, string /* etag */>,
+  lastSnapshot: Record<string, string>,
+  options?: { force?: boolean },
+): ReverseDiffResult;
+
+// src/core/reverse-link-registry.ts
+export async function readReverseLinks(
+  blobClient: BlobClient,
+  container: string,
+): Promise<ReverseGitLinkRegistry>;
+
+export async function writeReverseLinks(
+  blobClient: BlobClient,
+  container: string,
+  registry: ReverseGitLinkRegistry,
+): Promise<void>;
+
+export async function createReverseLink(
+  blobClient: BlobClient,
+  container: string,
+  link: ReverseLink,
+): Promise<void>;
+
+export async function removeReverseLink(
+  blobClient: BlobClient,
+  container: string,
+  linkId: string,
+): Promise<void>;
+
+export async function findReverseLink(
+  blobClient: BlobClient,
+  container: string,
+  linkId: string,
+): Promise<ReverseLink | null>;
+
+export function readAccountReverseLinks(
+  store: CredentialStore,
+  account: string,
+): ReverseLink[];
+
+export async function writeAccountReverseLinks(
+  store: CredentialStore,
+  account: string,
+  links: ReverseLink[],
+): Promise<void>;
+
+// src/core/repo-utils.ts (appended)
+export function buildWriteClientForLink(
+  link: ReverseLink,
+  pat: string,
+): RepoWriteClient;
+```
+
+---
+
+### 5. Key algorithms
+
+#### 5.1 Reverse-diff (ETag-based snapshot diff)
+
+```
+INPUT:  currentSnapshot: Map<repoPath, etag>   ← built by blob-enumerator
+        lastSnapshot:    Record<repoPath, etag> ← read from ReverseLink.blobSnapshot
+        force?: boolean
+
+current = set(currentSnapshot.keys())
+last    = set(lastSnapshot.keys())
+
+added    = current \ last
+deleted  = last \ current
+both     = current ∩ last
+
+modified = { p ∈ both : currentSnapshot[p] != lastSnapshot[p] }
+unchanged = both \ modified
+
+if force:
+    modified = (modified ∪ unchanged)
+    unchanged = ∅
+
+return { added, modified, deleted, unchanged, counts: {...} }
+```
+
+Pure function. No I/O. Snapshot keys are repo paths (post-mapping), values are opaque Azure ETag strings.
+
+#### 5.2 Path mapping (blob path → repo path)
+
+| Scope kind | Source blob | Repo path | Notes |
+|---|---|---|---|
+| `container` | `foo/bar.txt` (container `my-container`) | `<repoSubPath>/foo/bar.txt` | R5.1 — 1:1 |
+| `prefix` (prefix=`docs/`) | `docs/foo/bar.txt` | `<repoSubPath>/foo/bar.txt` | R5.2 — prefix stripped |
+| `account` | container `cust-data`, blob `foo/bar.txt` | `<repoSubPath>/cust-data/foo/bar.txt` | R5.3 — container becomes top folder |
+
+Normalisation steps (applied in order, every scope):
+1. Strip leading `/`.
+2. Reject backslash-containing paths (R5.4) — warn + skip.
+3. Reject `.git/...`-prefixed paths (R5.4) — warn + skip.
+4. Reject control-char-containing paths — warn + skip.
+5. Apply scope-specific transform (table above).
+6. Prepend `repoSubPath` (after collapsing leading/trailing slashes; empty = no prefix).
+7. Detect case-only collision against paths already in `currentSnapshot`. On collision, throw `PathCollisionError([existing, new])` per R5.5 default `abort` policy.
+
+#### 5.3 Initial push to an empty GitHub repo (Strategy A — `auto_init: true`)
+
+The design selects **Strategy A** over the Contents-API `.gitkeep` bootstrap. Justification (cited from `docs/research/github-git-data-api.md` §7):
+
+- Strategy A: one extra param on `POST /user/repos` (`auto_init: true`, `default_branch: main`). Subsequent flow is identical to an incremental push (`base_tree = initTreeSha`).
+- Strategy B (`.gitkeep` Contents API bootstrap): requires a transition between two API surfaces, leaves a placeholder file the user did not upload, and increases failure points.
+- Strategy A keeps the implementation linear; Strategy B remains in code as a fallback for repos created externally (where `auto_init` was not used). The fallback path is invoked only when `getBranchTip()` returns `null` AND `ensureRepo` did not just create the repo.
+
+Algorithm (initial publish, GitHub):
+
+```
+1. ensureRepo({ name, visibility, createIfMissing: true })
+     ├─ GET /repos/{owner}/{repo}                    → 200 = exists, skip create
+     ├─                                              → 404 + createIfMissing=false → throw RepoNotFoundError
+     └─                                              → 404 + createIfMissing=true  → POST /user/repos or /orgs/{o}/repos
+                                                                                       with { auto_init: true, default_branch: branch, private: visibility==="private" }
+
+2. bootstrapEmpty(branch):
+     tip = await getBranchTip(branch)
+     if (tip == null) {
+         // External repo with auto_init=false. Fallback Strategy B:
+         PUT /repos/{o}/{r}/contents/.gitkeep   { content: "", message: "Initialize repository" }
+         tip = await getBranchTip(branch)        // now non-null
+     }
+     // We do NOT delete the README/.gitkeep — base_tree inherits it.
+     // If the user's storage contains its own README.md, it overwrites by same-path entry.
+
+3. Enumerate blobs, compute reverseDiff against empty snapshot → all added.
+
+4. uploadBlob × N (concurrency 10, 100ms inter-batch pause)
+        each → { sha }
+
+5. createTreeChunked(base_tree=initTreeSha, entries) → finalTreeSha
+        chunks of 700 entries chained via base_tree
+
+6. createCommit(message, finalTreeSha, parents=[initCommitSha], author)
+        → newCommitSha
+
+7. updateRef(branch, newCommitSha, force=false)
+        on 422 "Update is not a fast forward" → throw RemoteDivergedError
+
+8. Persist ReverseLink:
+        lastPushedCommitSha = newCommitSha
+        lastPushedTreeSha = finalTreeSha
+        blobSnapshot = { repoPath → etag for each added }
+        lastPushedAt = now
+        lastPushResult = { added, modified=0, deleted=0, errors: perFileErrors }
+```
+
+#### 5.4 Initial push to an empty Azure DevOps repo (40-zeros `oldObjectId`)
+
+Algorithm (research §3):
+
+```
+1. ensureRepo:
+     GET /git/repositories/{repoName}            → 200 = exists
+     GET 404 + createIfMissing=false             → throw RepoNotFoundError
+     GET 404 + createIfMissing=true:
+         GET /_apis/projects/{project}            → project.id (UUID)
+         POST /git/repositories                   { name, project: { id } }
+                                                  → 201 { id, defaultBranch: null }
+
+2. getCurrentRefSha(branch)                       → null (empty repo)
+
+3. Enumerate + diff → all added.
+
+4. Build a single push payload:
+     {
+       refUpdates: [{ name: `refs/heads/${branch}`, oldObjectId: "0" * 40 }],
+       commits: [{
+         comment: message,
+         author: { name, email, date: now },
+         changes: changes.map → {
+           changeType: "add",
+           item: { path: "/" + repoPath },
+           newContent: { content: base64(bytes), contentType: "base64encoded" }
+         }
+       }]
+     }
+
+5. POST /git/pushes?api-version=7.1               → 200 { commits: [{ commitId, treeId }] }
+
+6. Persist:
+     lastPushedCommitSha = commits[0].commitId
+     lastPushedTreeSha   = commits[0].treeId
+     blobSnapshot, lastPushedAt, lastPushResult
+```
+
+#### 5.5 Incremental push with `base_tree` (GitHub)
+
+```
+1. ensureRepo({ createIfMissing: false })
+
+2. tip = await getBranchTip(branch)               → { commitSha, treeSha }
+   if (tip.commitSha != ReverseLink.lastPushedCommitSha) {
+       if (!allowOverwriteRemote) throw RemoteDivergedError(...)
+       // else proceed with force=true on updateRef in step 7
+   }
+
+3. Enumerate + computeReverseDiff → { added, modified, deleted, unchanged }
+   if (added.length + modified.length + deleted.length == 0) return PushResult { pushed: false, ... }
+
+4. uploadBlob for each (added ∪ modified)
+   per-file 422 → push GitHubBlobTooLargeError into errors, drop from tree
+
+5. entries = []
+   for each added/modified: { path, mode: "100644", type: "blob", sha: blobSha }
+   for each deleted:        { path, mode: "100644", type: "blob", sha: null }
+   newTreeSha = createTreeChunked(base_tree=tip.treeSha, entries)
+
+6. newCommitSha = createCommit(message, newTreeSha, parents=[tip.commitSha], author)
+
+7. updateRef(branch, newCommitSha, force=allowOverwriteRemote)
+   on 422 (and allowOverwriteRemote=false) → RemoteDivergedError
+
+8. Persist updated ReverseLink (lastPushed*, blobSnapshot, lastPushResult)
+```
+
+#### 5.6 Incremental push with `oldObjectId` (Azure DevOps)
+
+```
+1. ensureRepo({ createIfMissing: false })
+
+2. oldSha = await getCurrentRefSha(branch)
+   if (oldSha != ReverseLink.lastPushedCommitSha) {
+       if (!allowOverwriteRemote) throw RemoteDivergedError(...)
+       // ADO has no clean "force push" path on /pushes; allowOverwriteRemote
+       // re-bases by setting oldObjectId = oldSha (overwrites since-last-pushed).
+   }
+
+3. Enumerate + diff (classification distinguishes "add" vs "edit" using lastSnapshot membership)
+
+4. Build changes:
+     added    → changeType: "add"     + base64 content
+     modified → changeType: "edit"    + base64 content
+     deleted  → changeType: "delete"
+
+5. POST /git/pushes with oldObjectId = oldSha (or 0×40 if oldSha is null)
+   on 400 GitRefUpdateNeedsForcePermissionException → RemoteDivergedError
+
+6. Persist updated ReverseLink
+```
+
+#### 5.7 Chunked tree creation (GitHub, > 700 entries)
+
+`TREE_CHUNK_SIZE = 700` constant in `github-write-client.ts`. Algorithm per research §11:
+
+```
+currentBase = baseTree   // may be null for a true root commit
+for i in range(0, entries.length, 700):
+    chunk = entries[i : i+700]
+    currentBase = POST /git/trees { base_tree: currentBase, tree: chunk } → sha
+return currentBase
+```
+
+Each call adds (or overrides) the chunk's entries on top of the running tree. Order matters only for same-path overrides — entries are de-duplicated before chunking.
+
+#### 5.8 Chunked push (ADO, > 500 changes / > 5 GB payload)
+
+`ADO_PUSH_CHUNK_SIZE = 500` constant in `devops-write-client.ts`. Plan-011 §Phase A risk row. Algorithm:
+
+```
+oldSha = await getCurrentRefSha(branch) || "0" * 40
+for chunk in split(changes, 500):
+    payload = build_push_payload(oldSha, chunk, author, message + " (part k/N)")
+    response = POST /git/pushes
+    oldSha = response.commits[0].commitId       // chain commits
+finalCommitSha = oldSha
+```
+
+The chunking is invisible to the engine — it sees a single `PushResult` with the last commit SHA.
+
+#### 5.9 `.gitignore` pattern evaluation (scope-root-relative — OQ-11)
+
+Patterns are evaluated against the **storage path relative to the scope root**, NOT against the mapped repo path. Implementation in `blob-enumerator.ts`:
+
+```
+function isExcluded(blob: BlobItem, link: ReverseLink, scopeRootPath: string, gitignore?: GitignoreMatcher): boolean {
+    // strip the scope root prefix once
+    const relative = blob.name.slice(scopeRootPath.length).replace(/^\//, "");
+
+    // 1. Always-excluded blob names
+    if (EXCLUDED_BLOB_NAMES.includes(path.basename(relative))) return true;
+
+    // 2. User-supplied exclusion patterns (relative to scope root)
+    for (const pat of link.exclusionPatterns) {
+        if (minimatch(relative, pat, { dot: true })) return true;
+    }
+
+    // 3. .gitignore matcher (only when respectGitignore && a .gitignore exists at scope root)
+    if (link.respectGitignore && gitignore && gitignore.ignores(relative)) {
+        // .gitignore file itself is NOT excluded (AC-D6).
+        if (path.basename(relative) === ".gitignore") return false;
+        return true;
+    }
+
+    return false;
+}
+```
+
+A small in-tree pattern matcher is implemented (≈ 80 lines) — no new runtime dependency (NFR1). It supports the common glob subset used in `.gitignore` (literal paths, `*`, `?`, `**/`, leading `/`, trailing `/`, `!` negation). Documented in `blob-enumerator.ts` JSDoc.
+
+#### 5.10 Binary file handling
+
+- **GitHub:** every blob is uploaded with `encoding: "base64"`. The content is `Buffer.from(bytes).toString("base64")`. This is safe for text and binary alike — eliminates the text/binary branching the research §6 warns about.
+- **ADO:** every change uses `newContent.contentType: "base64encoded"` and the same `Buffer.from(bytes).toString("base64")`. The optimisation of `rawtext` for confirmed-text content is intentionally NOT used (consistent encoding simplifies test fixtures and avoids latent UTF-8 surprises).
+
+#### 5.11 Divergence detection per provider + `--allow-overwrite-remote` semantics
+
+| Provider | Pre-push check | Server-side guard | `--allow-overwrite-remote` effect |
+|---|---|---|---|
+| GitHub | `getBranchTip().commitSha !== lastPushedCommitSha` → throw `RemoteDivergedError` | `PATCH /git/refs` with `force: false` returns 422 → `RemoteDivergedError` | Use `force: true` on PATCH. Caller assumes destructive-overwrite risk. |
+| ADO | `getCurrentRefSha() !== lastPushedCommitSha` → throw `RemoteDivergedError` | `POST /git/pushes` rejects mismatched `oldObjectId` (400 `GitRefUpdateNeedsForcePermissionException`) → `RemoteDivergedError` | Send `oldObjectId = currentRefSha` (the actual remote tip), bypassing the local snapshot. Caller assumes destructive-overwrite risk. |
+
+`--force` (R4.8 — repush every file) and `--allow-overwrite-remote` (divergence override) are **independent flags** with disjoint semantics. They may be combined.
+
+---
+
+### 6. Error handling strategy
+
+- **No-fallback rule (per `<structure-and-conventions>`):** Required configuration (`tokenName`, `repoUrl`, `scope`) absent → throw `ConfigurationError` (exit 3). No silent defaults.
+- **Per-file errors (NFR4):** `GitHubBlobTooLargeError`, ADO `VS403729`, individual upload failures are caught inside the write client and appended to `RepoWriteClientCommitResult.perFileErrors`. The engine forwards them into `PushResult.errors`. The commit proceeds with the remaining files. The CLI/UI summary surfaces the count and full path list.
+- **Divergence:** `RemoteDivergedError` (exit 2, HTTP 409). User sees: `"Remote branch <branch> has diverged. Last pushed: <localSha>. Remote tip: <remoteSha>. Re-run with --allow-overwrite-remote to force-push (destructive)."`.
+- **Authentication:** `InvalidPATError` (alias `AuthenticationError`) on 401 / GitHub `Bad credentials` / ADO `UnauthorizedException`. User sees: `"Invalid or expired PAT for <provider>. Use 'add-token' to update."`. Exit 2 / HTTP 401.
+- **Insufficient scope:** `InsufficientScopesError` on GitHub 403 `"Resource not accessible by personal access token"` or ADO `UnauthorizedRequestException`. User sees the required scope (`repo` for GitHub classic / `Contents: Read & Write` for GitHub fine-grained / `vso.code_write` or `vso.code_manage` for ADO). Exit 2 / HTTP 403.
+- **Rate-limit:** `rateLimitedFetch` already retries 403/429 with exponential back-off (existing helper, codebase-scan §3). After exhausting retries, the write client throws `RateLimitExceededError`. User sees: `"GitHub/Azure DevOps rate limit hit. Retry after <Retry-After> seconds."`. Exit 2 / HTTP 503.
+- **Payload-too-large:** ADO 413 → `PayloadTooLargeError`. Engine triggers `pushInBatches` if not already engaged. If the batch is already at chunk size 1 and still 413 → fatal exit 2.
+- **Path collision:** Default behaviour aborts (R5.5). User sees both colliding paths. Exit 2 / HTTP 422.
+
+**Propagation map:**
+
+```
+write client throw → engine catch (per-file) or rethrow (fatal)
+  └─ engine rethrows → CLI handler maps via err.exitCode  → process.exit(N)
+                    └─ HTTP handler maps via mapReverseGitErrorToHttp(err) → res.status(N).json(body)
+                                                          └─ UI catches body.code → inline error banner
+```
+
+UI never shows raw stack traces. CLI prints `error.message` and uses `process.exit(error.exitCode)`. HTTP returns JSON `{ error, code }`.
+
+---
+
+### 7. Integration points (citations from codebase-scan §4)
+
+| Existing module | What we ADD | What we DO NOT touch | Rationale |
+|---|---|---|---|
+| `src/core/types.ts` (lines 68–106) | Append `export * from "./reverse-git-types.js"`. Extend `CredentialData` (line 109) with `reverseLinks?: AccountScopeReverseLinksRegistry`. | `RepoLink`, `RepoLinksRegistry`, `SyncResult`, `RepoSyncMeta`, `RepoFileEntry`, `RepoProvider`, `DiffCategory`, `DiffEntry`, `DiffReport`. | Forward types remain authoritative for forward direction (NFR6). |
+| `src/core/credential-store.ts` (lines 6–9, `CredentialStore` class) | Two new methods: `getAccountReverseLinks`, `setAccountReverseLinks`. Save path preserves the new field for files missing it (no migration write). | AES-256-GCM envelope, `getToken`, `getTokenByProvider`, `addToken`, file path. | New field rides inside the existing encrypted blob — zero schema upheaval. |
+| `src/core/blob-client.ts` (lines 1–end) | None — `BlobClient` consumed read-only by `blob-enumerator`. | All methods. | Read-only consumer. |
+| `src/core/repo-utils.ts` (line 17 `buildProviderForLink`, line 66 `rateLimitedFetch`) | Append `buildWriteClientForLink(link, pat)` factory after `buildProviderForLink`. | `buildProviderForLink`, `rateLimitedFetch`, `processInBatches`, `inferContentType`. | Symmetric sibling factory — does not modify existing exports. |
+| `src/core/github-client.ts` (lines 1–65, `GitHubClient`) | NOTHING. Sibling `github-write-client.ts` is the write-path landing site (OQ-3). | All read methods. | OQ-3 decision: sibling-write-client. |
+| `src/core/devops-client.ts` (lines 1–71, `DevOpsClient`) | NOTHING. Sibling `devops-write-client.ts` is the write-path landing site. | All read methods. | OQ-3 decision. |
+| `src/core/sync-engine.ts` (lines 6–7 constants, `cloneRepo`, `syncRepo`, …) | NOTHING. New `reverse-sync-engine.ts` is a sibling. | All forward-sync logic. | NFR6 / AC-H2. |
+| `src/core/diff-engine.ts` (lines 1–195) | NOTHING. New `reverse-diff-engine.ts` is a sibling. | All forward diff logic. | Investigation §Dimension 10 — different fingerprint families. |
+| `src/cli/index.ts` (line 405+ after `list-links` / `diff` registrations) | Register 7 new Commander subcommands. | Existing 13+ subcommand registrations. | Additive only. |
+| `src/cli/commands/shared.ts` (line 80 `resolveStorageEntry`, line 100 `resolvePatToken`) | NONE — read-only consumption. | All helpers. | Reuse-as-is. |
+| `src/cli/commands/repo-sync.ts`, `link-ops.ts`, `diff-ops.ts` | NONE. | All forward CLI handlers. | NFR6 / AC-H2. |
+| `src/electron/server.ts` (line ~990 after Sync / Links / Diff block) | Append 6 new Express routes. Call `buildWriteClientForLink()` from `repo-utils.ts`. | OIDC middleware, existing `/api/links/*`, `/api/sync*`, `/api/diff*`, file-share routes. | Additive section. |
+| `src/electron/public/index.html` (lines 244–266 context menus, line 222 modals) | New context-menu items, new `#storage-account-context-menu`, two new modals. | Existing modals (`#link-modal`, `#links-panel-modal`), existing context-menu items, file-tree templates. | Additive only. |
+| `src/electron/public/app.js` (line 1645 `openLinksPanel`, lines 564–578 badge rendering) | New `openReverseLinksPanel`, `openPublishModal`, `.reverse-link-badge` rendering, new context-menu wiring. | `openLinksPanel`, `.link-badge`, `.sync-badge`, existing tree render. | Additive only. |
+
+---
+
+### 8. Parallelization map (verification)
+
+Restatement of the plan DAG: **C → {A, B} → D → {E, F} → G**.
+
+**{A, B} parallel pair — disjoint files:**
+
+| Phase | Files OWNED (exclusive write) |
+|---|---|
+| A | `src/core/github-write-client.ts`, `src/core/devops-write-client.ts`, `tests/unit/github-write-client.test.ts`, `tests/unit/devops-write-client.test.ts` |
+| B | `src/core/blob-enumerator.ts`, `src/core/reverse-diff-engine.ts`, `tests/unit/blob-enumerator.test.ts`, `tests/unit/reverse-diff-engine.test.ts` |
+
+**Intersection:** `∅`. Both depend on Phase C types but import them read-only. No shared write target.
+
+**{E, F} parallel pair — disjoint files:**
+
+| Phase | Files OWNED (exclusive write) |
+|---|---|
+| E | `src/cli/commands/reverse-git.ts`, `src/cli/index.ts` (additive append), `docs/tools/storage-nav.md` (append), `CLAUDE.md` (Tools entry edit), `Issues - Pending Items.md` (append), `tests/unit/reverse-git-cli.test.ts` |
+| F | `src/electron/server.ts` (additive append), `tests/unit/server-reverse-links.test.ts` |
+
+**Intersection:** `∅`. E owns CLI surface + project docs; F owns the HTTP surface. Both depend on Phase D (`reverse-sync-engine.ts` + `buildWriteClientForLink`) but read-only.
+
+**G runs alone after F** — touches `index.html`, `app.js`, `styles.css` only.
+
+**C, D, G run alone in their slots** (no parallel siblings).
+
+**Conclusion:** Each parallel pair touches strictly disjoint files. No shared write target across `{A,B}` or `{E,F}`. The plan DAG is implementable as stated.
+
+---
+
+### 9. Decisions log
+
+Every architectural choice with rationale. Citations point to the investigation, the two research files, and the codebase scan.
+
+| # | Decision | Source / Rationale |
+|---|---|---|
+| D-1 | **Pure REST API; no local Git working copy and no Git binary.** | Investigation §Dimension 1 (Option 1a) — `docs/reference/investigation-reverse-git.md`. Confirms Assumption A4 of refined request. |
+| D-2 | **ETag-based reverse diff in a NEW `reverse-diff-engine.ts` (no extension of forward `diff-engine.ts`).** | Investigation §Dimension 2 (Option 2a) + §Dimension 10. The fingerprint families differ (Azure ETag vs Git SHA-1). |
+| D-3 | **Opt-in repo auto-creation via `--create-repo`. Default `--visibility private`.** | Investigation §Dimension 3 (Option 3c). Resolves OQ-1. |
+| D-4 | **Storage-account scope publishes to ONE repo with containers as top-level folders.** | Investigation §Dimension 4 (Option 4b). Confirms R5.3. |
+| D-5 | **Hybrid metadata location: container/prefix scope → `.reverse-git-links.json` blob at container root; account scope → `CredentialData.reverseLinks`.** | Investigation §Dimension 5. Resolves OQ-2. |
+| D-6 | **One commit per push (batched).** | Investigation §Dimension 6 (Option 6a). Resolves OQ-4. |
+| D-7 | **Raw `fetch` via existing `rateLimitedFetch` — no `@octokit/rest`, no `azure-devops-node-api`, no `simple-git`, no `isomorphic-git`.** | Investigation §Dimension 7. Preserves NFR1 (zero new runtime dependencies). |
+| D-8 | **Provider-agnostic `RepoWriteClient` interface (in `reverse-git-types.ts`). Engine layer is provider-neutral.** | Investigation §Dimension 8. Resolves OQ-7. |
+| D-9 | **Fail-closed on divergence with optional `--allow-overwrite-remote` flag (separate from `--force` which re-pushes every file).** | Investigation §Dimension 9. Resolves OQ-5. |
+| D-10 | **Sibling write clients (`github-write-client.ts`, `devops-write-client.ts`); existing read clients untouched.** | Investigation OQ-3 final answer + codebase-scan §5. |
+| D-11 | **Empty-repo bootstrap: Strategy A (`auto_init: true` on `POST /user/repos`). Strategy B (`.gitkeep` via Contents API) retained as a fallback for externally created empty repos.** | Research GitHub §7 (`docs/research/github-git-data-api.md`). Plan-011 §"Open clarifications" item 2. |
+| D-12 | **GitHub tree chunking at 700 entries; chained via `base_tree`.** | Research GitHub §11. |
+| D-13 | **GitHub blob upload concurrency capped at 10 in-flight with 100 ms inter-batch pause.** | Research GitHub §12 (secondary rate-limit safety). |
+| D-14 | **All blob content uploaded base64-encoded (GitHub `encoding:"base64"`; ADO `contentType:"base64encoded"`).** | Research GitHub §6; research ADO §2. Eliminates text/binary branching. |
+| D-15 | **ADO push uses single `POST /git/pushes`; `oldObjectId = "0"×40` for empty-repo initial commit.** | Research ADO §1, §3. |
+| D-16 | **ADO `add` vs `edit` classification is the engine's responsibility — `reverse-diff-engine` produces it from snapshot membership.** | Research ADO §2 + plan-011 §Phase A risk row. |
+| D-17 | **ADO chunked push at 500 changes per `POST` when exceeding 5 GB payload cap; commits chained via successive `oldObjectId` returned from prior response.** | Research ADO §1 (5 GB cap) + §13 (413 handling). |
+| D-18 | **Commit author identity: configurable per-link; default `"Storage Navigator <storage-nav@local>"`.** | Investigation §OQ-9. |
+| D-19 | **Storage-account scope iteration: documented as "use sparingly" in `docs/tools/storage-nav.md`; engine unchanged.** | Investigation §OQ-10. |
+| D-20 | **`.gitignore` patterns evaluated relative to source scope root (NOT mapped repo path).** | Investigation §OQ-11. |
+| D-21 | **Forward × reverse coexistence: allow both independently; no implicit chaining.** | Investigation §OQ-12. |
+| D-22 | **CLI naming: `publish-github`, `publish-devops`, `push`, `reverse-link-github`, `reverse-link-devops`, `reverse-unlink`, `list-reverse-links`. Metadata blob: `.reverse-git-links.json`.** | Investigation §OQ-8. |
+| D-23 | **Event-driven monitoring (Event Grid / change feed): out of scope for v1; on-demand only.** | Investigation §OQ-6. Documented as v2 in `Issues - Pending Items.md`. |
+| D-MOD-1 | **New types live in `src/core/reverse-git-types.ts` and are re-exported from `src/core/types.ts` (not appended in-place).** | Codebase-scan §3 (types.ts is the public surface). Keeps forward types unmodified; minimises plan-011 surface area on `types.ts`. The plan permits the inline approach as an alternative — the design chooses the dedicated file for cleanliness. |
+| D-MOD-2 | **`repo-write-client.ts` is a pure re-export shim** for `RepoWriteClient`. Listed in the refined request's enumeration of files; implemented as a type-only re-export to satisfy the inventory without duplicating definitions. | Refined-request "Produce a technical design covering Module structure" enumeration. |
+
+**Resolution of all 12 open questions from the refined request (each cites the investigation):**
+
+| OQ | Question | Resolution | Citation |
+|---|---|---|---|
+| OQ-1 | Repo auto-creation policy | Opt-in via `--create-repo`; default visibility `private` | D-3 / investigation §Dimension 3 |
+| OQ-2 | Storage-account-scope metadata location | Hybrid: container blob + `CredentialData.reverseLinks` | D-5 / investigation §Dimension 5 |
+| OQ-3 | Extend read clients vs sibling write clients | Sibling write clients | D-10 / investigation §"OQ-3" |
+| OQ-4 | Commit granularity | One commit per push | D-6 / investigation §Dimension 6 |
+| OQ-5 | Branch divergence handling | Fail-closed; optional `--allow-overwrite-remote` | D-9 / investigation §Dimension 9 |
+| OQ-6 | Event-driven monitoring | Out of scope for v1 | D-23 / investigation §"OQ-6" |
+| OQ-7 | Provider extensibility | `RepoWriteClient` interface, engine provider-agnostic | D-8 / investigation §Dimension 8 |
+| OQ-8 | Naming | Refined-request names accepted as-is | D-22 / investigation §"OQ-8" |
+| OQ-9 | Commit author identity | Configurable per-link; default `"Storage Navigator <storage-nav@local>"` | D-18 / investigation §"OQ-9" |
+| OQ-10 | Storage-account-scope iteration cost | Documented "use sparingly"; engine unchanged | D-19 / investigation §"OQ-10" |
+| OQ-11 | `.gitignore` semantics | Scope-root-relative | D-20 / investigation §"OQ-11" |
+| OQ-12 | Forward × reverse coexistence | Allow both independently; no implicit chaining | D-21 / investigation §"OQ-12" |
+
+---
+
+### 10. Verification criteria (acceptance-criteria → test file mapping)
+
+| AC group | Acceptance criterion | Owning test file(s) |
+|---|---|---|
+| A — Initialization | AC-A1 (publish-github container scope) | `tests/unit/reverse-sync-engine.test.ts`, `tests/unit/github-write-client.test.ts`, manual `test_scripts/011-reverse-git-publish-github.md` |
+| A | AC-A2 (publish-github prefix scope, prefix stripped) | `tests/unit/blob-enumerator.test.ts`, `tests/unit/reverse-sync-engine.test.ts` |
+| A | AC-A3 (publish-github storage-account scope) | `tests/unit/blob-enumerator.test.ts`, `tests/unit/reverse-sync-engine.test.ts` |
+| A | AC-A4 (publish-devops container scope) | `tests/unit/reverse-sync-engine.test.ts`, `tests/unit/devops-write-client.test.ts`, manual `test_scripts/011-reverse-git-publish-devops.md` |
+| A | AC-A5 (`--create-repo` honoured; without it → RepoNotFoundError) | `tests/unit/github-write-client.test.ts`, `tests/unit/devops-write-client.test.ts`, `tests/unit/reverse-git-cli.test.ts` |
+| A | AC-A6 (metadata persisted after success) | `tests/unit/reverse-sync-engine.test.ts`, `tests/unit/reverse-link-registry.test.ts` |
+| A | AC-A7 (re-run with no changes → 0 commits, exit 0, NFR5) | `tests/unit/reverse-sync-engine.test.ts` |
+| A | AC-A8 (invalid PAT → clear error, exit 2) | `tests/unit/github-write-client.test.ts`, `tests/unit/devops-write-client.test.ts`, `tests/unit/reverse-git-cli.test.ts` |
+| B — Incremental | AC-B1/B2/B3 (add/modify/delete classification + commit) | `tests/unit/reverse-diff-engine.test.ts`, `tests/unit/reverse-sync-engine.test.ts` |
+| B | AC-B4 (`--dry-run` reports counts, zero writes, tri-state exit) | `tests/unit/reverse-sync-engine.test.ts`, `tests/unit/reverse-git-cli.test.ts` |
+| B | AC-B5 (`--force` re-pushes every file) | `tests/unit/reverse-diff-engine.test.ts` (force option), `tests/unit/reverse-sync-engine.test.ts` |
+| B | AC-B6 (`--all` iterates, partial failure tolerated) | `tests/unit/reverse-sync-engine.test.ts`, `tests/unit/server-reverse-links.test.ts` (push-all endpoint) |
+| B | AC-B7 (unchanged blob detected, not re-uploaded) | `tests/unit/reverse-diff-engine.test.ts`, `tests/unit/reverse-sync-engine.test.ts` |
+| C — Authentication | AC-C1/C2 (token-name resolution per provider) | `tests/unit/reverse-git-cli.test.ts` |
+| C | AC-C3 (`--pat` inline override) | `tests/unit/reverse-git-cli.test.ts` |
+| C | AC-C4 (no PAT + non-TTY → clear error, exit 2) | `tests/unit/reverse-git-cli.test.ts` |
+| C | AC-C5 (expired PAT warning) | `tests/unit/reverse-git-cli.test.ts` |
+| D — Path mapping / exclusions | AC-D1 (`.git/...` excluded with warning) | `tests/unit/blob-enumerator.test.ts` |
+| D | AC-D2 (case-only collision → PathCollisionError, abort) | `tests/unit/blob-enumerator.test.ts` |
+| D | AC-D3 (file > 100 MB → per-file error, others succeed) | `tests/unit/github-write-client.test.ts`, `tests/unit/reverse-sync-engine.test.ts` |
+| D | AC-D4 (binary byte-identical content) | `tests/unit/github-write-client.test.ts`, `tests/unit/devops-write-client.test.ts` |
+| D | AC-D5 (`*.log` exclusion add/remove semantics) | `tests/unit/blob-enumerator.test.ts`, `tests/unit/reverse-diff-engine.test.ts` |
+| D | AC-D6 (storage-side `.gitignore` honoured; the file itself IS published) | `tests/unit/blob-enumerator.test.ts` |
+| D | AC-D7 (metadata blobs never published) | `tests/unit/blob-enumerator.test.ts` |
+| E — Lifecycle | AC-E1 (reverse-link-* creates metadata, no push) | `tests/unit/reverse-link-registry.test.ts`, `tests/unit/reverse-git-cli.test.ts` |
+| E | AC-E2 (list-reverse-links tabular output) | `tests/unit/reverse-git-cli.test.ts` |
+| E | AC-E3/E4 (reverse-unlink removes record, remote untouched) | `tests/unit/reverse-link-registry.test.ts`, `tests/unit/reverse-git-cli.test.ts` |
+| E | AC-E5 (multiple reverse-links per account coexist) | `tests/unit/credential-store-reverse-links.test.ts`, `tests/unit/reverse-sync-engine.test.ts` |
+| F — CLI/UI parity | AC-F1/F2/F3 (UI parity, distinct badge, inline errors) | Manual `test_scripts/011-reverse-git-ui-smoke.md` |
+| F | AC-F4 (CLI ↔ API see the same `.reverse-git-links.json`) | `tests/unit/server-reverse-links.test.ts`, `tests/unit/reverse-link-registry.test.ts` |
+| G — Documentation | AC-G1 (`docs/tools/storage-nav.md` covers every new subcommand) | Phase E doc-review checkpoint |
+| G | AC-G2 (this `project-design.md` section) | This document (you are reading it) |
+| G | AC-G3 (`project-functions.md` registers R1–R12) | Phase C doc-review checkpoint |
+| G | AC-G4 (`Issues - Pending Items.md` known limitations) | Phase E doc-review checkpoint |
+| G | AC-G5 (dependency-vetting log — N/A, zero new deps per D-7) | Phase E doc-review checkpoint |
+| H — Compilation / Regression | AC-H1 (`npx tsc --noEmit` clean) | CI gate after every phase |
+| H | AC-H2 (forward commands unchanged) | Re-run existing forward CLI tests; manual smoke per cross-phase verification block in plan-011 |
+| H | AC-H3 (`.repo-sync-meta.json` / `.repo-links.json` coexist) | `tests/unit/reverse-link-registry.test.ts` (writes alongside existing forward `.repo-links.json` fixture) |
+

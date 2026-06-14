@@ -221,6 +221,70 @@
     </div>
   </div>
 
+  <!-- Publish (Reverse Git) Modal -->
+  <div id="publish-modal" class="modal hidden">
+    <div class="modal-content">
+      <h2 id="publish-modal-title">Publish to Git Repository</h2>
+      <div id="publish-scope-info" style="font-size:12px;color:var(--text-dim);margin-bottom:12px;"></div>
+      <label>Provider
+        <select id="publish-provider" style="display:block;width:100%;margin-top:4px;padding:8px;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:13px;">
+          <option value="github">GitHub</option>
+          <option value="azure-devops">Azure DevOps</option>
+        </select>
+      </label>
+      <label>Repository URL<input type="text" id="publish-repo-url" placeholder="https://github.com/owner/repo or https://dev.azure.com/org/project/_git/repo"></label>
+      <label>Branch<input type="text" id="publish-branch" placeholder="main"></label>
+      <label>Repo Sub-Path<input type="text" id="publish-repo-subpath" placeholder="(repo root)"></label>
+      <label style="margin-bottom:0;">PAT Token</label>
+      <div style="display:flex;gap:6px;align-items:center;margin-top:4px;margin-bottom:10px;">
+        <select id="publish-token" style="flex:1;padding:8px;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:13px;">
+          <option value="">Loading tokens...</option>
+        </select>
+        <button type="button" id="publish-add-token" class="primary" title="Add a new personal access token" style="white-space:nowrap;padding:8px 12px;">+ Add</button>
+      </div>
+      <label>Exclusion Patterns (one per line, .gitignore style)<textarea id="publish-exclusions" rows="3" placeholder="*.log&#10;tmp/"></textarea></label>
+      <label style="display:flex;align-items:center;gap:6px;flex-direction:row;">
+        <input type="checkbox" id="publish-respect-gitignore" checked style="width:auto;margin:0;">
+        <span>Respect a .gitignore present in the source scope</span>
+      </label>
+      <label>Visibility (used only when the repo is created)
+        <select id="publish-visibility" style="display:block;width:100%;margin-top:4px;padding:8px;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:13px;">
+          <option value="private">Private</option>
+          <option value="public">Public</option>
+        </select>
+      </label>
+      <label style="display:flex;align-items:center;gap:6px;flex-direction:row;">
+        <input type="checkbox" id="publish-create-repo" style="width:auto;margin:0;">
+        <span>Create remote repository if missing</span>
+      </label>
+      <label>Commit Message (optional override)<input type="text" id="publish-commit-msg" placeholder="(default: storage-navigator publish)"></label>
+      <div id="publish-status" class="status-line" style="font-size:12px;margin-bottom:8px;"></div>
+      <div class="modal-actions">
+        <button id="publish-cancel">Cancel</button>
+        <button id="publish-init" class="primary">Publish Only</button>
+        <button id="publish-init-push" class="primary">Publish &amp; Push Now</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Reverse Links Panel Modal -->
+  <div id="reverse-links-panel-modal" class="modal hidden">
+    <div class="modal-content links-panel-content">
+      <div class="links-panel-header">
+        <h2>Reverse Links</h2>
+        <div class="links-panel-actions-top">
+          <button id="reverse-links-push-all" class="primary" style="font-size:12px;padding:4px 12px;">Push All</button>
+        </div>
+      </div>
+      <div id="reverse-links-panel-body" style="flex:1;overflow-y:auto;margin-bottom:16px;min-height:100px;">
+        <p class="placeholder">Loading reverse-links...</p>
+      </div>
+      <div class="modal-actions">
+        <button id="reverse-links-panel-close">Close</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Add Token Modal -->
   <div id="add-token-modal" class="modal hidden">
     <div class="modal-content">
@@ -254,6 +318,7 @@
     <div class="context-menu-item" id="ctx-refresh-folder">Refresh</div>
     <div class="context-menu-item" id="ctx-download-folder">Download as ZIP</div>
     <div class="context-menu-item" id="ctx-link-folder">Link to Repo</div>
+    <div class="context-menu-item" id="ctx-publish-folder">Publish to Git Repository&hellip;</div>
     <div class="context-menu-item ctx-danger" id="ctx-delete-folder">Delete Folder</div>
   </div>
 
@@ -263,6 +328,14 @@
     <div class="context-menu-item" id="ctx-download-container">Download all as ZIP</div>
     <div class="context-menu-item" id="ctx-link-container">Link to Repo</div>
     <div class="context-menu-item" id="ctx-view-links">View Links</div>
+    <div class="context-menu-item" id="ctx-publish-container">Publish to Git Repository&hellip;</div>
+    <div class="context-menu-item" id="ctx-view-reverse-links">Reverse Links&hellip;</div>
+  </div>
+
+  <!-- Context Menu (storage account / direct-kind root) -->
+  <div id="storage-account-context-menu" class="context-menu hidden">
+    <div class="context-menu-item" id="ctx-publish-storage-account">Publish to Git Repository&hellip;</div>
+    <div class="context-menu-item" id="ctx-view-reverse-links-account">Reverse Links&hellip;</div>
   </div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" integrity="sha384-F/bZzf7p3Joyp5psL90p/p89AZJsndkSoGwRpXcZhleCWhd8SnRuoYo4d0yirjJp" crossorigin="anonymous"></script>

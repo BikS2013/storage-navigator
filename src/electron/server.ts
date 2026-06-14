@@ -17,6 +17,22 @@ import {
   DEFAULT_MAX_EDIT_BYTES,
 } from "../util/text-detect.js";
 import { registerSiteRoutes } from "./site-routes.js";
+import {
+  initReverseLink,
+  pushReverseLink,
+  previewReverseDiff,
+  removeReverseLink,
+  listReverseLinks,
+  resolveReverseLinks,
+  type InitReverseLinkOptions,
+} from "../core/reverse-sync-engine.js";
+import type {
+  CommitAuthor,
+  PushResult,
+  RepoVisibility,
+  ReverseLinkScope,
+} from "../core/reverse-git-types.js";
+import { mapReverseGitErrorToHttp } from "../core/reverse-git-errors.js";
 
 /**
  * Build the appropriate IStorageBackend for a request.
@@ -1095,6 +1111,332 @@ export function createServer(port: number, publicDirOverride?: string): express.
     store.addToken({ name, provider, token });
     res.json({ success: true });
   });
+
+  // -------------------------------------------------------------------------
+  // Reverse-Git Publication API (Phase F)
+  //
+  // Six endpoints implementing the route table in
+  // `docs/design/project-design.md` §"Reverse-Git Publication" §4.2.
+  //
+  // Routing notes:
+  //   * Express 5 (path-to-regexp 8) dropped the `:param?` optional-param
+  //     syntax used in the design's compact form `:container?`. Each
+  //     endpoint is therefore registered twice — once with `:container`
+  //     (container/prefix scope) and once without (account scope).
+  //   * Account scope uses the storage entry's own `accountName`.
+  //   * Handlers are thin: they validate input, build a BlobClient +
+  //     CredentialStore, dispatch to `reverse-sync-engine.ts`, and map
+  //     any thrown error via `mapReverseGitErrorToHttp`.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Build the BlobClient + CredentialStore + accountName context for a
+   * reverse-git request. Returns null after sending the appropriate 4xx
+   * response when the storage entry is missing or is api-backed (the
+   * reverse-git engine talks directly to Azure Blob storage and the
+   * `BlobClient` only supports direct backends).
+   */
+  function reverseGitContext(
+    req: express.Request,
+    res: express.Response,
+  ): { store: CredentialStore; blobClient: BlobClient; account: string } | null {
+    const store = new CredentialStore();
+    const entry = store.getStorage(req.params.storage as string);
+    if (!entry) {
+      res.status(404).json({ error: "Storage not found" });
+      return null;
+    }
+    const direct = requireDirect(entry, res);
+    if (!direct) return null;
+    return {
+      store,
+      blobClient: new BlobClient(direct),
+      account: direct.accountName,
+    };
+  }
+
+  /**
+   * Build a `ReverseLinkScope` from the request URL params + body.
+   *
+   *   - When `:container` is absent → account scope.
+   *   - When `:container` is present and `body.prefix` is set → prefix scope.
+   *   - Otherwise → container scope.
+   */
+  function scopeFromRequest(
+    req: express.Request,
+    account: string,
+  ): ReverseLinkScope {
+    const container = req.params.container as string | undefined;
+    if (!container) {
+      return { kind: "account", account };
+    }
+    const prefix =
+      typeof req.body?.prefix === "string" && req.body.prefix.length > 0
+        ? (req.body.prefix as string)
+        : undefined;
+    if (prefix) {
+      return { kind: "prefix", account, container, prefix };
+    }
+    return { kind: "container", account, container };
+  }
+
+  /**
+   * Convert any error thrown by the reverse-sync engine into an HTTP
+   * response. ReverseGitError subclasses carry their own `httpStatus`;
+   * anything else surfaces as a 500.
+   */
+  function sendReverseGitError(res: express.Response, err: unknown): void {
+    const mapped = mapReverseGitErrorToHttp(err);
+    res.status(mapped.status).json(mapped.body);
+  }
+
+  // GET /api/reverse-links/:storage/:container? — list reverse-links in scope.
+  const handleListReverseLinks: express.RequestHandler = async (req, res) => {
+    try {
+      const ctx = reverseGitContext(req, res);
+      if (!ctx) return;
+      const scope = scopeFromRequest(req, ctx.account);
+      const links = await listReverseLinks(scope, {
+        blobClient: ctx.blobClient,
+        credentialStore: ctx.store,
+      });
+      res.json({ links });
+    } catch (err: unknown) {
+      sendReverseGitError(res, err);
+    }
+  };
+  app.get("/api/reverse-links/:storage/:container", handleListReverseLinks);
+  app.get("/api/reverse-links/:storage", handleListReverseLinks);
+
+  // POST /api/reverse-links/:storage/:container? — create + persist a link.
+  const handleCreateReverseLink: express.RequestHandler = async (req, res) => {
+    try {
+      const ctx = reverseGitContext(req, res);
+      if (!ctx) return;
+
+      const {
+        provider,
+        repoUrl,
+        branch,
+        repoSubPath,
+        tokenName,
+        author,
+        exclusionPatterns,
+        respectGitignore,
+        createRepo,
+        visibility,
+      } = req.body ?? {};
+
+      if (!provider || !repoUrl || !tokenName) {
+        res
+          .status(400)
+          .json({ error: "provider, repoUrl, and tokenName are required" });
+        return;
+      }
+      if (provider !== "github" && provider !== "azure-devops") {
+        res
+          .status(400)
+          .json({ error: 'provider must be "github" or "azure-devops"' });
+        return;
+      }
+      if (
+        visibility !== undefined &&
+        visibility !== "public" &&
+        visibility !== "private"
+      ) {
+        res
+          .status(400)
+          .json({ error: 'visibility must be "public" or "private"' });
+        return;
+      }
+      if (
+        exclusionPatterns !== undefined &&
+        (!Array.isArray(exclusionPatterns) ||
+          !exclusionPatterns.every((p) => typeof p === "string"))
+      ) {
+        res
+          .status(400)
+          .json({ error: "exclusionPatterns must be an array of strings" });
+        return;
+      }
+
+      const scope = scopeFromRequest(req, ctx.account);
+
+      // Conflict check: refuse duplicate scope + repoUrl pair.
+      const existing = await listReverseLinks(scope, {
+        blobClient: ctx.blobClient,
+        credentialStore: ctx.store,
+      });
+      if (existing.some((l) => l.repoUrl === repoUrl)) {
+        res.status(409).json({
+          error: `A reverse-link for repo '${repoUrl}' already exists in this scope`,
+        });
+        return;
+      }
+
+      const initOpts: InitReverseLinkOptions = {
+        blobClient: ctx.blobClient,
+        credentialStore: ctx.store,
+        scope,
+        provider: provider as "github" | "azure-devops",
+        repoUrl: repoUrl as string,
+        branch: typeof branch === "string" ? branch : undefined,
+        repoSubPath:
+          typeof repoSubPath === "string" ? repoSubPath : undefined,
+        tokenName: tokenName as string,
+        author:
+          author && typeof author === "object"
+            ? (author as CommitAuthor)
+            : undefined,
+        exclusionPatterns:
+          exclusionPatterns as string[] | undefined,
+        respectGitignore:
+          typeof respectGitignore === "boolean"
+            ? respectGitignore
+            : undefined,
+        createRepo:
+          typeof createRepo === "boolean" ? createRepo : undefined,
+        visibility:
+          visibility === "public" || visibility === "private"
+            ? (visibility as RepoVisibility)
+            : undefined,
+      };
+
+      const link = await initReverseLink(initOpts);
+      res.status(201).json({ link });
+    } catch (err: unknown) {
+      sendReverseGitError(res, err);
+    }
+  };
+  app.post("/api/reverse-links/:storage/:container", handleCreateReverseLink);
+  app.post("/api/reverse-links/:storage", handleCreateReverseLink);
+
+  // DELETE /api/reverse-links/:storage/:container?/:linkId — drop a link.
+  const handleDeleteReverseLink: express.RequestHandler = async (req, res) => {
+    try {
+      const ctx = reverseGitContext(req, res);
+      if (!ctx) return;
+      await removeReverseLink(req.params.linkId as string, {
+        blobClient: ctx.blobClient,
+        credentialStore: ctx.store,
+        containerHint: req.params.container as string | undefined,
+      });
+      res.json({ removed: true });
+    } catch (err: unknown) {
+      sendReverseGitError(res, err);
+    }
+  };
+  app.delete(
+    "/api/reverse-links/:storage/:container/:linkId",
+    handleDeleteReverseLink,
+  );
+  app.delete(
+    "/api/reverse-links/:storage/:linkId",
+    handleDeleteReverseLink,
+  );
+
+  // POST /api/push/:storage/:container?/:linkId — execute push for one link.
+  // Query: dryRun=true|false, force=true|false, allowOverwriteRemote=true|false.
+  const handlePushReverseLink: express.RequestHandler = async (req, res) => {
+    try {
+      const ctx = reverseGitContext(req, res);
+      if (!ctx) return;
+      const result = await pushReverseLink(req.params.linkId as string, {
+        blobClient: ctx.blobClient,
+        credentialStore: ctx.store,
+        containerHint: req.params.container as string | undefined,
+        dryRun: req.query.dryRun === "true",
+        force: req.query.force === "true",
+        allowOverwriteRemote: req.query.allowOverwriteRemote === "true",
+      });
+      res.json({ result });
+    } catch (err: unknown) {
+      sendReverseGitError(res, err);
+    }
+  };
+  app.post("/api/push/:storage/:container/:linkId", handlePushReverseLink);
+  app.post("/api/push/:storage/:linkId", handlePushReverseLink);
+
+  // POST /api/push-all/:storage/:container? — push every link in scope.
+  // Partial-failure tolerated: per-link errors are preserved in the result list
+  // and the overall response surfaces 502 if any link failed (per design §4.2).
+  const handlePushAll: express.RequestHandler = async (req, res) => {
+    try {
+      const ctx = reverseGitContext(req, res);
+      if (!ctx) return;
+      const container = req.params.container as string | undefined;
+      const links = await resolveReverseLinks({
+        blobClient: ctx.blobClient,
+        credentialStore: ctx.store,
+        scopeHint: container
+          ? { container }
+          : { account: ctx.account },
+      });
+
+      const dryRun = req.query.dryRun === "true";
+      const force = req.query.force === "true";
+      const allowOverwriteRemote = req.query.allowOverwriteRemote === "true";
+
+      const results: Array<
+        | { linkId: string; ok: true; result: PushResult }
+        | {
+            linkId: string;
+            ok: false;
+            error: { error: string; code?: string };
+          }
+      > = [];
+      let anyFailed = false;
+
+      for (const link of links) {
+        try {
+          const result = await pushReverseLink(link.id, {
+            blobClient: ctx.blobClient,
+            credentialStore: ctx.store,
+            dryRun,
+            force,
+            allowOverwriteRemote,
+          });
+          results.push({ linkId: link.id, ok: true, result });
+        } catch (err: unknown) {
+          anyFailed = true;
+          const mapped = mapReverseGitErrorToHttp(err);
+          results.push({
+            linkId: link.id,
+            ok: false,
+            error: { error: mapped.body.error, code: mapped.body.code },
+          });
+        }
+      }
+
+      if (anyFailed) {
+        res.status(502).json({ results });
+        return;
+      }
+      res.json({ results });
+    } catch (err: unknown) {
+      sendReverseGitError(res, err);
+    }
+  };
+  app.post("/api/push-all/:storage/:container", handlePushAll);
+  app.post("/api/push-all/:storage", handlePushAll);
+
+  // GET /api/reverse-diff/:storage/:container?/:linkId — preview diff (no push).
+  const handleReverseDiff: express.RequestHandler = async (req, res) => {
+    try {
+      const ctx = reverseGitContext(req, res);
+      if (!ctx) return;
+      const diff = await previewReverseDiff(req.params.linkId as string, {
+        blobClient: ctx.blobClient,
+        credentialStore: ctx.store,
+        containerHint: req.params.container as string | undefined,
+      });
+      res.json({ diff });
+    } catch (err: unknown) {
+      sendReverseGitError(res, err);
+    }
+  };
+  app.get("/api/reverse-diff/:storage/:container/:linkId", handleReverseDiff);
+  app.get("/api/reverse-diff/:storage/:linkId", handleReverseDiff);
 
   app.listen(port, "127.0.0.1", () => {
     console.log(`Storage Navigator server running on http://127.0.0.1:${port}`);

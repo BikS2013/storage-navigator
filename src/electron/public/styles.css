@@ -481,6 +481,78 @@ header h1 { font-size: 14px; font-weight: 600; color: var(--text-accent); }
 .diff-result + .diff-result { margin-top: 12px; }
 .links-table .link-actions button.link-diff-btn { background: var(--bg-tertiary); border-color: var(--border); color: var(--text-accent); }
 
+/* ===== Reverse-link indicator badge (outbound — storage -> repo) ===== */
+.reverse-link-badge {
+  display: inline-block;
+  font-size: 10px;
+  color: var(--expiry-warn, #d18616);
+  margin-left: 4px;
+  cursor: pointer;
+  opacity: 0.9;
+  vertical-align: middle;
+}
+.reverse-link-badge:hover { opacity: 1; }
+
+/* ===== Reverse-links Panel ===== */
+.reverse-links-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.reverse-links-table th,
+.reverse-links-table td {
+  padding: 6px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.reverse-links-table th {
+  background: var(--bg-secondary);
+  color: var(--text-dim);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.reverse-links-table td { color: var(--text); }
+.reverse-links-table td.link-url {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.reverse-links-table .link-actions { display: flex; gap: 4px; }
+.reverse-links-table .link-actions button {
+  padding: 2px 8px;
+  font-size: 11px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  background: var(--btn-bg);
+  color: var(--text);
+  cursor: pointer;
+}
+.reverse-links-table .link-actions button:hover { opacity: 0.9; }
+.reverse-links-table .link-actions button.reverse-push-btn { background: var(--btn-primary); border-color: var(--btn-primary); color: white; }
+.reverse-links-table .link-actions button.reverse-unlink-btn { color: var(--expiry-expired); }
+.reverse-links-table .link-actions button.reverse-unlink-btn:hover { background: var(--expiry-expired); color: white; }
+.reverse-links-table .link-actions button.reverse-diff-btn { background: var(--bg-tertiary); border-color: var(--border); color: var(--text-accent); }
+
+.reverse-diff-result {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  font-size: 12px;
+}
+.reverse-diff-summary { font-weight: 600; margin-bottom: 8px; }
+.reverse-diff-section { margin-top: 6px; }
+.reverse-diff-section summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
+.reverse-diff-file { padding: 2px 8px; font-family: monospace; font-size: 11px; }
+.reverse-diff-prefix-add { color: #2ea44f; font-weight: 700; }
+.reverse-diff-prefix-mod { color: #d18616; font-weight: 700; }
+.reverse-diff-prefix-del { color: var(--expiry-expired); font-weight: 700; }
+
+.status-line.status-error { color: var(--expiry-expired); }
+.status-line.status-warning { color: var(--expiry-warn, #d18616); }
+.status-line.status-success { color: #2ea44f; }
+.status-line.status-info { color: var(--text-dim); }
+
 /* ===== Add Storage Modal: tab bar ===== */
 .tab-bar {
   display: flex;

@@ -209,3 +209,149 @@ REPL is used.
 | FR-AGT-TUI-10 | `/provider` re-loads `~/.tool-agents/storage-nav/.env` (Policy B file-wins, override:true) before re-running `loadAgentConfig`. Missing required env vars surface ConfigurationError to the TUI. |
 | FR-AGT-TUI-11 | Destructive tool calls are confirmed via an in-TUI modal that runs against the same raw-mode stdin (no second readline). The legacy readline confirm path is preserved for non-TUI callers. |
 | FR-AGT-TUI-12 | Structured logger writes are redirected to `~/.tool-agents/storage-nav/logs/tui-<ts>.log` (mode 0600); stderr is silenced in TUI mode. `--log-file` overrides the default location. Critical errors are surfaced as `[error]` lines in the TUI. |
+
+---
+
+## Reverse Git Publication (FR-RG-*)
+
+Added by plan-011. Publishes Azure Blob Storage content as a Git repository on GitHub or
+Azure DevOps. Directional opposite of the forward Repository Sync feature. One-way only:
+storage → repo. PAT auth, REST-only (no local working tree). See
+`docs/design/plan-011-reverse-git.md` for the full implementation plan and provenance.
+
+### R1 — Reverse-link creation (initialize)
+
+| ID | Requirement |
+|---|---|
+| FR-RG-R1.1 | Reverse-link creation supports storage-account scope (every blob across every container; container name becomes top-level folder per R5.3). |
+| FR-RG-R1.2 | Reverse-link creation supports container scope (all blobs in a single container, 1:1 mapping). |
+| FR-RG-R1.3 | Reverse-link creation supports prefix (subfolder) scope (blobs under a prefix; prefix stripped per R5.2). |
+
+### R2 — Target identification
+
+| ID | Requirement |
+|---|---|
+| FR-RG-R2.1 | GitHub target: `owner/repo` plus optional `branch` (default `main`). When repo missing and `--create-repo` set, creates via `POST /user/repos` or `POST /orgs/{org}/repos` with `auto_init:true`, `private:true` default. |
+| FR-RG-R2.2 | Azure DevOps target: `org/project/repo` plus optional `branch`. When repo missing and `--create-repo` set, creates via `POST /{org}/{project}/_apis/git/repositories`. ADO repos inherit project visibility (no per-repo visibility flag). |
+| FR-RG-R2.3 | Auth reuses existing `TokenEntry` from `CredentialStore`. CLI flags `--token-name <name>` or `--pat <inline>`; no parallel PAT store. |
+
+### R3 — Initial push (publish)
+
+| ID | Requirement |
+|---|---|
+| FR-RG-R3.1 | Enumerates every blob under the source scope (recursive for account + prefix scopes). |
+| FR-RG-R3.2 | Maps each blob to a deterministic repo path per R5.1–R5.5. |
+| FR-RG-R3.3 | Applies user-supplied exclusion patterns and (default-on) storage-side `.gitignore`. |
+| FR-RG-R3.4 | Produces a single commit with configurable message; default: `"Initial publish from storage <scope> at <iso>"`. |
+| FR-RG-R3.5 | Pushes commit to the configured branch. |
+| FR-RG-R3.6 | Persists a `ReverseLink` record (blob ETag snapshot + pushed commit SHA + tree SHA) to durable storage. |
+
+### R4 — Incremental push (update)
+
+| ID | Requirement |
+|---|---|
+| FR-RG-R4.1 | Change detection by ETag comparison: current `listBlobsFlat` ETag map vs. stored `blobSnapshot`. |
+| FR-RG-R4.2 | Classifies each path as `added`, `modified`, `deleted`, or `unchanged`. |
+| FR-RG-R4.3 | Builds a single commit per push run with all add/modify/delete changes. |
+| FR-RG-R4.4 | Configurable commit message; default: `"Sync from storage <scope> at <iso> (+N ~M -K)"`. |
+| FR-RG-R4.5 | Pushes to configured branch (fast-forward-only by default). |
+| FR-RG-R4.6 | Updates the reverse-link metadata with the new commit SHA, tree SHA, and blob snapshot. |
+| FR-RG-R4.7 | `--dry-run` flag previews changes without pushing; exits 0 if no changes, 1 if changes would be pushed. |
+| FR-RG-R4.8 | `--force` flag re-classifies every file as `modified` (recovery use case). |
+
+### R5 — Path-mapping rules
+
+| ID | Requirement |
+|---|---|
+| FR-RG-R5.1 | Container scope: blob `foo/bar.txt` → repo path `foo/bar.txt` at configured `repoSubPath`. |
+| FR-RG-R5.2 | Prefix scope: prefix is stripped (e.g. `docs/foo.txt` with prefix `docs/` → `foo.txt`). |
+| FR-RG-R5.3 | Storage-account scope: container name becomes the top-level folder (`cust-data/foo.txt`). |
+| FR-RG-R5.4 | Paths with characters illegal in Git (control chars, paths starting with `.git/`) are excluded with a warning. |
+| FR-RG-R5.5 | Path collisions (e.g. case-only differences) raise `PathCollisionError` by default and abort the push (configurable to skip). |
+
+### R6 — Exclusion / `.gitignore`-style filtering
+
+| ID | Requirement |
+|---|---|
+| FR-RG-R6.1 | Per-link exclusion pattern list stored in reverse-link metadata. |
+| FR-RG-R6.2 | Storage-side `.gitignore` honoured when `--respect-gitignore` true (default true), patterns evaluated relative to scope root. |
+| FR-RG-R6.3 | Forward-sync metadata blobs (`.repo-sync-meta.json`, `.repo-links.json`) always excluded from publication. |
+| FR-RG-R6.4 | Reverse-link's own metadata blob (`.reverse-git-links.json`) always excluded. |
+
+### R7 — Binary and large-file handling
+
+| ID | Requirement |
+|---|---|
+| FR-RG-R7.1 | All blobs treated as opaque byte sequences (no text/binary distinction at the publication stage). |
+| FR-RG-R7.2 | Large files pushed via provider's appropriate API (GitHub Git Data API blob endpoint; ADO `/pushes` with `base64encoded`). |
+| FR-RG-R7.3 | Files exceeding provider hard limits (GitHub 100 MB, ADO 100 MB per file / 5 GB per push) accumulate per-file errors in `PushResult.errors`; push of remaining files continues. |
+| FR-RG-R7.4 | Git LFS documented as known v1 limitation. |
+
+### R8 — Deletion semantics
+
+| ID | Requirement |
+|---|---|
+| FR-RG-R8.1 | Blob disappearing from storage between syncs → Git deletion on next push. |
+| FR-RG-R8.2 | Previously-excluded blob added back (removed from exclusion list) → Git add on next push. |
+| FR-RG-R8.3 | Previously-published blob added to exclusion list → Git delete on next push, with CLI/UI warning. |
+
+### R9 — Reverse-link metadata model
+
+| ID | Requirement |
+|---|---|
+| FR-RG-R9.1 | Container/prefix scope metadata persisted as `.reverse-git-links.json` at container root. Storage-account scope metadata persisted in the local `CredentialData` JSON keyed by account name (`reverseLinks` field). |
+| FR-RG-R9.2 | Per-link record stores: scope, provider, repoUrl, branch, repoSubPath, tokenName, exclusionPatterns, respectGitignore, lastPushedCommitSha, lastPushedTreeSha, blobSnapshot (path→ETag), author, createdAt, lastPushedAt, lastPushResult. |
+| FR-RG-R9.3 | Link IDs are UUID v4. |
+| FR-RG-R9.4 | Multiple reverse-links per container and per storage account are supported independently. |
+
+### R10 — CLI surface
+
+| ID | Requirement |
+|---|---|
+| FR-RG-R10.1 | `publish-github` — initialize reverse-link AND perform first push. |
+| FR-RG-R10.2 | `publish-devops` — same for Azure DevOps. |
+| FR-RG-R10.3 | `reverse-link-github` — create reverse-link metadata only, no push. |
+| FR-RG-R10.4 | `reverse-link-devops` — same for Azure DevOps. |
+| FR-RG-R10.5 | `push` — perform incremental update for a specific link or all links matching a source. |
+| FR-RG-R10.6 | `reverse-unlink` — remove reverse-link metadata; never touches the remote repo or storage source. |
+| FR-RG-R10.7 | `list-reverse-links` — enumerate reverse-links for storage account / container. |
+| FR-RG-R10.8 | All commands support `--storage`, `--account`, `--account-key`, `--sas-token`, `--token-name`, `--pat`. |
+| FR-RG-R10.9 | `push` supports `--dry-run`, `--force`, `--allow-overwrite-remote`, `--all`, `--link-id`, `--prefix`. |
+| FR-RG-R10.10 | `publish-*` supports `--branch`, `--commit-message`, `--exclude <pattern>` (repeatable), `--respect-gitignore`, `--repo-sub-path`, `--visibility public\|private`, `--create-repo`, `--author-name`, `--author-email`. |
+| FR-RG-R10.11 | Tri-state exit codes: 0=success/no-op, 1=changes pushed (or would be pushed in dry-run), 2=fatal error. |
+
+### R11 — Electron UI surface
+
+| ID | Requirement |
+|---|---|
+| FR-RG-R11.1 | Right-click "Publish to Git Repository…" on storage-account, container, and folder nodes. |
+| FR-RG-R11.2 | Publish modal: provider selector, repo input, branch, repoSubPath, exclusion textarea, respect-gitignore checkbox, visibility radio, token selector populated from `/api/tokens?provider=…`, commit message override, "Publish Only" / "Publish & Push Now" / "Cancel" buttons. |
+| FR-RG-R11.3 | Distinct visual indicator (`.reverse-link-badge`) on nodes with reverse-links; visually distinguishable from forward `.link-badge`. |
+| FR-RG-R11.4 | Reverse Links Panel modal showing all reverse-links for current scope, with per-link "Push Now", "Dry-Run Diff", "Unlink" actions. |
+| FR-RG-R11.5 | Push progress feedback (spinner / progress bar) and results summary (added/modified/deleted counts, errors). |
+| FR-RG-R11.6 | Errors surfaced inline (no `alert()`), consistent with existing UI conventions. |
+
+### R12 — Server API surface
+
+| ID | Requirement |
+|---|---|
+| FR-RG-R12.1 | `GET /api/reverse-links/:storage/:container?` — list reverse-links. |
+| FR-RG-R12.2 | `POST /api/reverse-links/:storage/:container?` — create a new reverse-link. |
+| FR-RG-R12.3 | `DELETE /api/reverse-links/:storage/:container?/:linkId` — remove a reverse-link. |
+| FR-RG-R12.4 | `POST /api/push/:storage/:container?/:linkId` — push a single reverse-link (query: `dryRun`, `force`). |
+| FR-RG-R12.5 | `POST /api/push-all/:storage/:container?` — push all reverse-links for the scope. |
+| FR-RG-R12.6 | `GET /api/reverse-diff/:storage/:container?/:linkId` — read-only diff between current storage state and last-pushed snapshot. |
+| FR-RG-R12.7 | All endpoints use a shared `buildWriteClientForLink()` factory (parallel to `buildProviderForLink`). |
+
+### Non-functional (FR-RG-NFR-*)
+
+| ID | Requirement |
+|---|---|
+| FR-RG-NFR1 | Zero new runtime dependencies. Reuse `fetch`, `@azure/storage-blob`, `crypto.randomUUID()`, existing `rateLimitedFetch` and `processInBatches`. |
+| FR-RG-NFR2 | Initial publish of 1,000 files ≤ 1 MB average completes in ≤ 5 minutes; incremental push of ≤ 50 changed files completes in ≤ 60 seconds. |
+| FR-RG-NFR3 | All HTTP calls via `rateLimitedFetch`; ADO 50 ms inter-request delay honoured. GitHub blob uploads capped at 10 concurrent with 100 ms inter-batch pause. |
+| FR-RG-NFR4 | Per-file failures accumulate in `PushResult.errors`; never abort the push. |
+| FR-RG-NFR5 | Idempotency: re-running push with no storage changes produces zero new commits and zero metadata mutations. |
+| FR-RG-NFR6 | Backward compatibility: all existing forward-sync commands, endpoints, and metadata blobs continue to function unchanged. |
+| FR-RG-NFR7 | Every push operation emits progress via `onProgress?: (msg: string) => void` callback. |
+| FR-RG-NFR8 | PATs never logged; auto-created repos default to `private`. |

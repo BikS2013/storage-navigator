@@ -2,7 +2,10 @@ import { CredentialStore } from "./credential-store.js";
 import { GitHubClient } from "./github-client.js";
 import { DevOpsClient } from "./devops-client.js";
 import { SshGitClient } from "./ssh-git-client.js";
+import { GitHubWriteClient } from "./github-write-client.js";
+import { DevOpsWriteClient } from "./devops-write-client.js";
 import type { RepoLink, RepoProvider } from "./types.js";
+import type { ReverseLink, RepoWriteClient } from "./reverse-git-types.js";
 
 /**
  * Construct a RepoProvider for the given link.
@@ -58,6 +61,50 @@ export async function buildProviderForLink(
       },
     };
   }
+}
+
+/**
+ * Construct a `RepoWriteClient` for a reverse-link, using the supplied PAT.
+ *
+ * Branches by `link.provider`:
+ *   - `"github"`        → `GitHubWriteClient` (Git Data API)
+ *   - `"azure-devops"`  → `DevOpsWriteClient` (POST /git/pushes)
+ *
+ * `link.repoUrl` is parsed via the write client's `fromRepoUrl` static
+ * factory, which accepts both the full URL form and the provider's
+ * native short form (`owner/repo` for GitHub).
+ *
+ * The PAT is supplied by the engine layer (`reverse-sync-engine.ts`)
+ * after resolving the chain `getReverseLinkPAT → link.tokenName →
+ * getTokenByProvider`. Per project rule, callers MUST raise a
+ * `ConfigurationError` when no PAT is available — this factory never
+ * substitutes a default.
+ *
+ * @param link  The reverse-link whose provider + repoUrl determines the client.
+ * @param pat   The personal access token (already resolved).
+ * @returns     A provider-agnostic `RepoWriteClient` ready for use.
+ */
+export function buildWriteClientForLink(
+  link: ReverseLink,
+  pat: string,
+): RepoWriteClient {
+  if (!pat) {
+    throw new Error(
+      `buildWriteClientForLink: missing PAT for link '${link.id}' (provider=${link.provider})`,
+    );
+  }
+  if (link.provider === "github") {
+    return GitHubWriteClient.fromRepoUrl(pat, link.repoUrl);
+  }
+  if (link.provider === "azure-devops") {
+    return DevOpsWriteClient.fromRepoUrl(pat, link.repoUrl);
+  }
+  // Exhaustiveness check — `link.provider` is `"github" | "azure-devops"`,
+  // so any other value indicates a corrupt link record.
+  const exhaustive: never = link.provider;
+  throw new Error(
+    `buildWriteClientForLink: unsupported provider '${String(exhaustive)}' for link '${link.id}'`,
+  );
 }
 
 const MAX_RATE_LIMIT_RETRIES = 5;

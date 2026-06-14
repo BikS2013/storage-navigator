@@ -85,6 +85,40 @@
   const linksDiffAll = document.getElementById("links-diff-all");
   const linksPanelClose = document.getElementById("links-panel-close");
 
+  // --- Reverse-Git: Publish Modal elements ---
+  const publishModal = document.getElementById("publish-modal");
+  const publishModalTitle = document.getElementById("publish-modal-title");
+  const publishScopeInfo = document.getElementById("publish-scope-info");
+  const publishProvider = document.getElementById("publish-provider");
+  const publishRepoUrl = document.getElementById("publish-repo-url");
+  const publishBranch = document.getElementById("publish-branch");
+  const publishRepoSubpath = document.getElementById("publish-repo-subpath");
+  const publishToken = document.getElementById("publish-token");
+  const publishAddToken = document.getElementById("publish-add-token");
+  const publishExclusions = document.getElementById("publish-exclusions");
+  const publishRespectGitignore = document.getElementById("publish-respect-gitignore");
+  const publishVisibility = document.getElementById("publish-visibility");
+  const publishCreateRepo = document.getElementById("publish-create-repo");
+  const publishCommitMsg = document.getElementById("publish-commit-msg");
+  const publishStatus = document.getElementById("publish-status");
+  const publishCancel = document.getElementById("publish-cancel");
+  const publishInit = document.getElementById("publish-init");
+  const publishInitPush = document.getElementById("publish-init-push");
+
+  // --- Reverse-Git: Reverse Links Panel elements ---
+  const reverseLinksPanelModal = document.getElementById("reverse-links-panel-modal");
+  const reverseLinksPanelBody = document.getElementById("reverse-links-panel-body");
+  const reverseLinksPushAll = document.getElementById("reverse-links-push-all");
+  const reverseLinksPanelClose = document.getElementById("reverse-links-panel-close");
+
+  // --- Reverse-Git: storage-account context menu ---
+  const storageAccountCtxMenu = document.getElementById("storage-account-context-menu");
+  const ctxPublishStorageAccount = document.getElementById("ctx-publish-storage-account");
+  const ctxViewReverseLinksAccount = document.getElementById("ctx-view-reverse-links-account");
+  const ctxPublishContainer = document.getElementById("ctx-publish-container");
+  const ctxViewReverseLinks = document.getElementById("ctx-view-reverse-links");
+  const ctxPublishFolder = document.getElementById("ctx-publish-folder");
+
   // --- Add Token Modal elements ---
   const addTokenModal = document.getElementById("add-token-modal");
   const addTokenMessage = document.getElementById("add-token-message");
@@ -104,6 +138,13 @@
   let linkTarget = null; // { container, targetPrefix }
   let linksPanelContainer = null; // container name for the currently open links panel
   let containerLinksCache = {}; // container -> RepoLinksRegistry
+
+  // --- Reverse-Git state ---
+  let storageAccountContextTarget = null; // { accountName, node } — for api-kind account-level menu
+  let publishContext = null;              // { scope: 'account'|'container'|'prefix', container?, prefix?, accountName? }
+  let reverseLinksPanelScope = null;      // same shape as publishContext — drives the panel
+  let containerReverseLinksCache = {};    // key (e.g. "<container>") -> ReverseLink[]
+  let accountReverseLinksCache = [];      // ReverseLink[] (account scope)
 
   // --- Theme ---
   let theme = localStorage.getItem("sn-theme") || "dark";
@@ -249,6 +290,13 @@
           const node = createTreeNode(a.name, "🔑", 0, true);
           node.dataset.account = a.name;
           node.querySelector(".tree-item").addEventListener("click", () => toggleAccount(node, a.name));
+          node.querySelector(".tree-item").addEventListener("contextmenu", (e) => {
+            e.preventDefault();
+            storageAccountContextTarget = { accountName: a.name, node };
+            storageAccountCtxMenu.style.left = e.clientX + "px";
+            storageAccountCtxMenu.style.top = e.clientY + "px";
+            storageAccountCtxMenu.classList.remove("hidden");
+          });
           treeContent.appendChild(node);
         }
         if (accounts.length === 1) {
@@ -579,6 +627,12 @@
           addLinkIndicators(children, containerName, registry.links);
         }
       } catch { /* no links */ }
+
+      // Reverse-link badge (Phase G — outbound storage→repo links).
+      // Runs independently from the forward-link fetch above; failure is silent.
+      if (typeof window.__addReverseLinkBadgesForContainer === "function") {
+        try { await window.__addReverseLinkBadgesForContainer(node, containerName); } catch {}
+      }
     } catch (e) {
       children.innerHTML = `<div style="padding:4px 24px;color:var(--expiry-expired);font-size:12px">Error: ${escapeHtml(e.message)}</div>`;
     }
@@ -1132,12 +1186,14 @@
     ctxMenu.classList.add("hidden");
     folderCtxMenu.classList.add("hidden");
     containerCtxMenu.classList.add("hidden");
+    storageAccountCtxMenu.classList.add("hidden");
   });
   document.addEventListener("contextmenu", (e) => {
     if (!e.target.closest(".tree-item")) {
       ctxMenu.classList.add("hidden");
       folderCtxMenu.classList.add("hidden");
       containerCtxMenu.classList.add("hidden");
+      storageAccountCtxMenu.classList.add("hidden");
     }
   });
 
@@ -2006,6 +2062,7 @@
 
   // --- Handle sync errors (detect missing PAT and offer to add) ---
   let pendingRetryAction = null; // async function to retry after token is added
+  let addTokenForPublish = false; // true when the add-token modal was opened from the Publish dialog
 
   function handleSyncError(e, context, retryAction) {
     if (e.code === "MISSING_PAT") {
@@ -2017,6 +2074,7 @@
   }
 
   function openAddTokenModal(provider, context) {
+    addTokenForPublish = false;
     const providerLabel = provider === "github" ? "GitHub" : "Azure DevOps";
     addTokenMessage.textContent = `A ${providerLabel} personal access token is required to sync. Please add one below.`;
     addTokenProvider.value = provider;
@@ -2029,6 +2087,7 @@
   addTokenCancel.addEventListener("click", () => {
     addTokenModal.classList.add("hidden");
     pendingRetryAction = null;
+    addTokenForPublish = false;
   });
 
   addTokenSave.addEventListener("click", async () => {
@@ -2050,8 +2109,16 @@
       });
       addTokenModal.classList.add("hidden");
 
-      // Automatically retry the sync that triggered the missing PAT error
-      if (pendingRetryAction) {
+      if (addTokenForPublish) {
+        // Opened from the Publish dialog (still open underneath): refresh its PAT
+        // dropdown and auto-select the token we just added.
+        addTokenForPublish = false;
+        publishProvider.value = provider;
+        await populatePublishTokens(provider);
+        publishToken.value = name;
+        setPublishStatus('Token "' + name + '" added and selected.', "info");
+      } else if (pendingRetryAction) {
+        // Automatically retry the sync that triggered the missing PAT error
         const retry = pendingRetryAction;
         pendingRetryAction = null;
         await retry();
@@ -2068,6 +2135,630 @@
     linksPanelModal.classList.add("hidden");
     linksPanelContainer = null;
   });
+
+  // ============================================================
+  // --- Reverse-Git Publication (Phase G) ---
+  // ============================================================
+  // All reverse-git UI logic. Mirrors the forward Links panel pattern but
+  // uses the Phase F endpoints under /api/reverse-links, /api/push,
+  // /api/push-all, and /api/reverse-diff. Errors from the API carry a
+  // `ReverseGitError` shape (`{ error, code, provider? }`) and are surfaced
+  // inline via the publish-status banner or the reverse-links panel.
+
+  // --- Status helpers (avoid alert() per design NFR; see plan-011 risk row) ---
+  function setPublishStatus(message, kind) {
+    publishStatus.className = "status-line status-" + (kind || "info");
+    publishStatus.textContent = message || "";
+  }
+  function classifyStatusKind(httpStatus) {
+    if (!httpStatus) return "error";
+    if (httpStatus >= 500) return "error";
+    if (httpStatus >= 400) return "warning";
+    return "info";
+  }
+  function buildReverseScopePath(scope) {
+    // scope = { scope: 'account'|'container'|'prefix', container?, prefix?, accountName? }
+    // Returns the URL suffix after `/api/<route>/<storage>` — i.e. `/<container>?` or empty.
+    if (scope.scope === "account") return "";
+    return "/" + encodeURIComponent(scope.container);
+  }
+  function buildReverseScopeLabel(scope) {
+    if (scope.scope === "account") {
+      return "Account: " + (scope.accountName || currentAccount || currentStorage);
+    }
+    if (scope.scope === "prefix") {
+      return "Prefix: " + scope.container + "/" + scope.prefix;
+    }
+    return "Container: " + scope.container;
+  }
+
+  // --- Token-selector population (called when publish modal opens) ---
+  async function populatePublishTokens(provider) {
+    publishToken.innerHTML = '<option value="">Loading tokens...</option>';
+    publishInit.disabled = true;
+    publishInitPush.disabled = true;
+    try {
+      const all = await apiJson("/api/tokens");
+      const matching = all.filter((t) => t.provider === provider);
+      if (matching.length === 0) {
+        publishToken.innerHTML = '<option value="">(no ' + provider + " tokens — add one first)</option>";
+        setPublishStatus(
+          "No " + provider + " PAT found. Use the token modal to add one, then re-open Publish.",
+          "warning",
+        );
+        return;
+      }
+      publishToken.innerHTML = matching
+        .map(
+          (t) =>
+            '<option value="' + escapeHtml(t.name) + '">' +
+            escapeHtml(t.name) +
+            (t.isExpired ? " [EXPIRED]" : "") +
+            "</option>",
+        )
+        .join("");
+      publishInit.disabled = false;
+      publishInitPush.disabled = false;
+      setPublishStatus("", "info");
+    } catch (e) {
+      setPublishStatus("Failed to load tokens: " + e.message, "error");
+    }
+  }
+
+  publishProvider.addEventListener("change", () => {
+    populatePublishTokens(publishProvider.value);
+  });
+
+  // --- "+ Add" PAT button inside the Publish dialog ---
+  // Opens the existing add-token modal pre-set to the selected provider. The
+  // Publish modal stays open underneath; on save we refresh + select the token.
+  publishAddToken.addEventListener("click", () => {
+    const provider = publishProvider.value;
+    const providerLabel = provider === "github" ? "GitHub" : "Azure DevOps";
+    addTokenForPublish = true;
+    pendingRetryAction = null;
+    addTokenMessage.textContent =
+      "Add a " + providerLabel + " personal access token. It will be selected for this publish.";
+    addTokenProvider.value = provider;
+    addTokenName.value = "";
+    addTokenValue.value = "";
+    addTokenModal.classList.remove("hidden");
+    addTokenName.focus();
+  });
+
+  // --- Open publish modal (entry point for all 3 scope variants) ---
+  function openPublishModal(ctx) {
+    // ctx = { scope, container?, prefix?, accountName? }
+    publishContext = ctx;
+    publishModalTitle.textContent = "Publish to Git Repository";
+    publishScopeInfo.textContent = buildReverseScopeLabel(ctx);
+    publishProvider.value = "github";
+    publishRepoUrl.value = "";
+    publishBranch.value = "main";
+    publishRepoSubpath.value = "";
+    publishExclusions.value = "";
+    publishRespectGitignore.checked = true;
+    publishVisibility.value = "private";
+    publishCreateRepo.checked = false;
+    publishCommitMsg.value = "";
+    setPublishStatus("", "info");
+    publishModal.classList.remove("hidden");
+    populatePublishTokens("github");
+    publishRepoUrl.focus();
+  }
+
+  // --- Wire each "Publish to Git Repository" menu entry ---
+  ctxPublishContainer.addEventListener("click", () => {
+    containerCtxMenu.classList.add("hidden");
+    if (!containerContextTarget) return;
+    openPublishModal({
+      scope: "container",
+      container: containerContextTarget.containerName,
+    });
+  });
+
+  ctxPublishFolder.addEventListener("click", () => {
+    folderCtxMenu.classList.add("hidden");
+    if (!folderContextTarget) return;
+    // folderPrefix ends with `/`; the server's scopeFromRequest accepts the
+    // exact string. Strip trailing slash for visual label parity.
+    const prefix = folderContextTarget.folderPrefix.replace(/\/$/, "");
+    openPublishModal({
+      scope: "prefix",
+      container: folderContextTarget.container,
+      prefix,
+    });
+  });
+
+  ctxPublishStorageAccount.addEventListener("click", () => {
+    storageAccountCtxMenu.classList.add("hidden");
+    if (!storageAccountContextTarget) return;
+    openPublishModal({
+      scope: "account",
+      accountName: storageAccountContextTarget.accountName,
+    });
+  });
+
+  publishCancel.addEventListener("click", () => {
+    publishModal.classList.add("hidden");
+    publishContext = null;
+  });
+
+  // Look up an existing reverse-link in the given scope by repo URL. Used to
+  // recover from a 409 "already exists" on create (e.g. when a prior push
+  // failed after the link was already created).
+  async function findExistingLink(scopePath, repoUrl) {
+    try {
+      const url = "/api/reverse-links/" + encodeURIComponent(currentStorage) + scopePath;
+      const data = await apiJson(url);
+      const links = (data && data.links) || [];
+      return links.find((l) => l.repoUrl === repoUrl) || null;
+    } catch {
+      return null;
+    }
+  }
+
+  // --- Submit publish — init only OR init + immediate push ---
+  async function submitPublish(pushImmediately) {
+    if (!publishContext) return;
+    const provider = publishProvider.value;
+    const repoUrl = publishRepoUrl.value.trim();
+    const branch = publishBranch.value.trim() || "main";
+    const repoSubPath = publishRepoSubpath.value.trim();
+    const tokenName = publishToken.value;
+    const exclusionRaw = publishExclusions.value.trim();
+    const exclusionPatterns = exclusionRaw
+      ? exclusionRaw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
+      : [];
+    const respectGitignore = publishRespectGitignore.checked;
+    const visibility = publishVisibility.value;
+    const createRepo = publishCreateRepo.checked;
+    const commitMsg = publishCommitMsg.value.trim();
+
+    if (!repoUrl) { setPublishStatus("Repository URL is required.", "warning"); return; }
+    if (!tokenName) { setPublishStatus("A PAT token must be selected.", "warning"); return; }
+
+    publishInit.disabled = true;
+    publishInitPush.disabled = true;
+    setPublishStatus("Creating reverse-link...", "info");
+
+    const body = {
+      scope: { kind: publishContext.scope }, // engine layer recomputes from URL — informational
+      provider,
+      repoUrl,
+      branch,
+      tokenName,
+      exclusionPatterns,
+      respectGitignore,
+      createRepo,
+      visibility,
+    };
+    if (repoSubPath) body.repoSubPath = repoSubPath;
+    if (publishContext.scope === "prefix") body.prefix = publishContext.prefix;
+
+    const scopePath = buildReverseScopePath(publishContext);
+    const createUrl = "/api/reverse-links/" + encodeURIComponent(currentStorage) + scopePath;
+
+    let createdLink;
+    try {
+      const res = await fetch(createUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        // 409 = a reverse-link for this repo already exists in this scope —
+        // commonly because a previous push failed *after* the link was
+        // created. Recover instead of dead-ending: for "Publish & Push Now"
+        // push the existing link; otherwise tell the user it already exists.
+        if (res.status === 409) {
+          const existing = await findExistingLink(scopePath, repoUrl);
+          if (existing && pushImmediately) {
+            createdLink = existing;
+            setPublishStatus(
+              "Link already exists — pushing existing link (id " +
+                existing.id.slice(0, 8) + ")…",
+              "info",
+            );
+          } else {
+            setPublishStatus(
+              existing
+                ? 'A reverse-link for this repo already exists (id ' +
+                    existing.id.slice(0, 8) +
+                    '). Click "Publish & Push Now" to push it, or use the ' +
+                    "Reverse Links panel to manage it."
+                : "Create failed: " + ((data && data.error) || "link already exists"),
+              "warning",
+            );
+            publishInit.disabled = false;
+            publishInitPush.disabled = false;
+            return;
+          }
+        } else {
+          setPublishStatus(
+            "Create failed: " + ((data && data.error) || "HTTP " + res.status),
+            classifyStatusKind(res.status),
+          );
+          publishInit.disabled = false;
+          publishInitPush.disabled = false;
+          return;
+        }
+      } else {
+        createdLink = data.link;
+        setPublishStatus("Reverse-link created (id " + createdLink.id.slice(0, 8) + ")", "success");
+      }
+    } catch (e) {
+      setPublishStatus("Create failed: " + e.message, "error");
+      publishInit.disabled = false;
+      publishInitPush.disabled = false;
+      return;
+    }
+
+    if (!pushImmediately) {
+      publishModal.classList.add("hidden");
+      publishContext = null;
+      return;
+    }
+
+    // Immediate push of the new link
+    setPublishStatus("Pushing...", "info");
+    try {
+      const pushUrl =
+        "/api/push/" + encodeURIComponent(currentStorage) + scopePath +
+        "/" + encodeURIComponent(createdLink.id);
+      const res = await fetch(pushUrl, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const msg = (data && data.error) || ("HTTP " + res.status);
+        setPublishStatus("Push failed: " + msg + " (link was still created)", classifyStatusKind(res.status));
+        publishInit.disabled = false;
+        publishInitPush.disabled = false;
+        return;
+      }
+      const r = data.result || {};
+      const summary =
+        "Push complete — added " + (r.added?.length || 0) +
+        ", modified " + (r.modified?.length || 0) +
+        ", deleted " + (r.deleted?.length || 0) +
+        ", errors " + (r.errors?.length || 0);
+      setPublishStatus(summary, r.errors?.length ? "warning" : "success");
+      publishModal.classList.add("hidden");
+      publishContext = null;
+    } catch (e) {
+      setPublishStatus("Push failed: " + e.message + " (link was still created)", "error");
+      publishInit.disabled = false;
+      publishInitPush.disabled = false;
+    }
+  }
+  publishInit.addEventListener("click", () => submitPublish(false));
+  publishInitPush.addEventListener("click", () => submitPublish(true));
+
+  // --- Open Reverse Links panel (entry point for all 3 scope variants) ---
+  async function openReverseLinksPanel(scope) {
+    reverseLinksPanelScope = scope;
+    reverseLinksPanelBody.innerHTML = '<p class="placeholder">Loading reverse-links...</p>';
+    reverseLinksPanelModal.classList.remove("hidden");
+    try {
+      const scopePath = buildReverseScopePath(scope);
+      const url = "/api/reverse-links/" + encodeURIComponent(currentStorage) + scopePath;
+      const data = await apiJson(url);
+      const links = (data && data.links) || [];
+      if (scope.scope === "account") accountReverseLinksCache = links;
+      else containerReverseLinksCache[scope.container] = links;
+      renderReverseLinksPanel(links, scope);
+    } catch (e) {
+      reverseLinksPanelBody.innerHTML =
+        '<p class="placeholder">Error: ' + escapeHtml(e.message) + "</p>";
+    }
+  }
+
+  ctxViewReverseLinks.addEventListener("click", () => {
+    containerCtxMenu.classList.add("hidden");
+    if (!containerContextTarget) return;
+    openReverseLinksPanel({
+      scope: "container",
+      container: containerContextTarget.containerName,
+    });
+  });
+  ctxViewReverseLinksAccount.addEventListener("click", () => {
+    storageAccountCtxMenu.classList.add("hidden");
+    if (!storageAccountContextTarget) return;
+    openReverseLinksPanel({
+      scope: "account",
+      accountName: storageAccountContextTarget.accountName,
+    });
+  });
+  reverseLinksPanelClose.addEventListener("click", () => {
+    reverseLinksPanelModal.classList.add("hidden");
+    reverseLinksPanelScope = null;
+  });
+
+  // --- Render reverse-links table ---
+  function renderReverseLinksPanel(links, scope) {
+    if (!links || links.length === 0) {
+      reverseLinksPanelBody.innerHTML =
+        '<p class="placeholder">No reverse-links configured for ' +
+        escapeHtml(buildReverseScopeLabel(scope)) + ".</p>";
+      return;
+    }
+    const providerIcon = (p) => (p === "github" ? "\u{1F4BB}" : "\u{2601}️");
+    let html = '<table class="reverse-links-table"><thead><tr>';
+    html += "<th></th><th>Repository</th><th>Branch</th><th>Scope</th><th>Last Push</th><th>Actions</th>";
+    html += "</tr></thead><tbody>";
+    for (const link of links) {
+      const shortUrl = link.repoUrl.replace(/^https?:\/\//, "").replace(/\.git$/, "");
+      const lastPush = link.lastPushedAt
+        ? new Date(link.lastPushedAt).toLocaleString()
+        : "never";
+      let scopeLabel = link.scope?.kind || "?";
+      if (link.scope?.kind === "container") scopeLabel += " (" + link.scope.container + ")";
+      else if (link.scope?.kind === "prefix") scopeLabel += " (" + link.scope.container + "/" + link.scope.prefix + ")";
+      else if (link.scope?.kind === "account") scopeLabel += " (" + link.scope.account + ")";
+      html += "<tr>";
+      html += "<td><span class=\"link-provider-icon\">" + providerIcon(link.provider) + "</span></td>";
+      html += '<td class="link-url" title="' + escapeHtml(link.repoUrl) + '">' + escapeHtml(shortUrl) + "</td>";
+      html += "<td>" + escapeHtml(link.branch) + "</td>";
+      html += "<td>" + escapeHtml(scopeLabel) + "</td>";
+      html += "<td>" + escapeHtml(lastPush) + "</td>";
+      html += '<td class="link-actions">';
+      html += '<button class="reverse-diff-btn" data-link-id="' + escapeHtml(link.id) + '">Dry-Run Diff</button>';
+      html += '<button class="reverse-push-btn" data-link-id="' + escapeHtml(link.id) + '">Push Now</button>';
+      html += '<button class="reverse-unlink-btn" data-link-id="' + escapeHtml(link.id) + '">Unlink</button>';
+      html += "</td>";
+      html += "</tr>";
+    }
+    html += "</tbody></table>";
+    html += '<div id="reverse-diff-result-panel" style="display:none;"></div>';
+    html += '<div id="reverse-push-status" class="status-line" style="font-size:12px;margin-top:8px;"></div>';
+    reverseLinksPanelBody.innerHTML = html;
+
+    reverseLinksPanelBody.querySelectorAll(".reverse-diff-btn").forEach((btn) => {
+      btn.addEventListener("click", () => reverseDiffSingle(scope, btn.dataset.linkId, btn));
+    });
+    reverseLinksPanelBody.querySelectorAll(".reverse-push-btn").forEach((btn) => {
+      btn.addEventListener("click", () => reversePushSingle(scope, btn.dataset.linkId, btn));
+    });
+    reverseLinksPanelBody.querySelectorAll(".reverse-unlink-btn").forEach((btn) => {
+      btn.addEventListener("click", () => reverseUnlinkSingle(scope, btn.dataset.linkId));
+    });
+  }
+
+  function setReversePushStatus(message, kind) {
+    const el = document.getElementById("reverse-push-status");
+    if (!el) return;
+    el.className = "status-line status-" + (kind || "info");
+    el.textContent = message || "";
+  }
+
+  // --- Dry-Run Diff for a single link ---
+  async function reverseDiffSingle(scope, linkId, btn) {
+    const origText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Diffing...";
+    try {
+      const scopePath = buildReverseScopePath(scope);
+      const url =
+        "/api/reverse-diff/" + encodeURIComponent(currentStorage) + scopePath +
+        "/" + encodeURIComponent(linkId);
+      const res = await fetch(url);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setReversePushStatus(
+          "Diff failed: " + ((data && data.error) || ("HTTP " + res.status)),
+          classifyStatusKind(res.status),
+        );
+        return;
+      }
+      renderReverseDiffResult(data.diff);
+    } catch (e) {
+      setReversePushStatus("Diff failed: " + e.message, "error");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = origText;
+    }
+  }
+
+  function renderReverseDiffResult(diff) {
+    const panel = document.getElementById("reverse-diff-result-panel");
+    if (!panel) return;
+    const c = diff.counts || { added: 0, modified: 0, deleted: 0, unchanged: 0 };
+    let html = '<div class="reverse-diff-result">';
+    html += '<div class="reverse-diff-summary">Diff: +' + c.added + " ~" + c.modified +
+            " -" + c.deleted + " =" + c.unchanged + "</div>";
+    const section = (title, prefixCls, prefix, items) => {
+      if (!items || items.length === 0) return "";
+      let s = '<details class="reverse-diff-section" open>';
+      s += "<summary>" + escapeHtml(title) + " (" + items.length + ")</summary>";
+      for (const path of items) {
+        s += '<div class="reverse-diff-file"><span class="' + prefixCls +
+             '">' + prefix + "</span> " + escapeHtml(path) + "</div>";
+      }
+      s += "</details>";
+      return s;
+    };
+    html += section("Added", "reverse-diff-prefix-add", "+", diff.added);
+    html += section("Modified", "reverse-diff-prefix-mod", "~", diff.modified);
+    html += section("Deleted", "reverse-diff-prefix-del", "-", diff.deleted);
+    html += "</div>";
+    panel.innerHTML = html;
+    panel.style.display = "";
+  }
+
+  // --- Push a single reverse-link ---
+  async function reversePushSingle(scope, linkId, btn) {
+    if (!confirm("Push this reverse-link now? Storage state will be written to the remote repository.")) return;
+    const origText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Pushing...";
+    try {
+      const scopePath = buildReverseScopePath(scope);
+      const url =
+        "/api/push/" + encodeURIComponent(currentStorage) + scopePath +
+        "/" + encodeURIComponent(linkId);
+      const res = await fetch(url, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 409) {
+        // Diverged — confirm before retrying with allowOverwriteRemote.
+        const msg = (data && data.error) || "Remote diverged from local snapshot.";
+        if (
+          confirm(
+            msg +
+              "\n\nForce-push (overwrite remote)? This rewrites the remote branch and may discard upstream commits.",
+          )
+        ) {
+          const force = await fetch(url + "?allowOverwriteRemote=true", { method: "POST" });
+          const forceData = await force.json().catch(() => ({}));
+          if (!force.ok) {
+            setReversePushStatus(
+              "Force-push failed: " + ((forceData && forceData.error) || ("HTTP " + force.status)),
+              classifyStatusKind(force.status),
+            );
+            return;
+          }
+          summarizePushResult(forceData.result);
+        } else {
+          setReversePushStatus("Push aborted (remote diverged, force not confirmed).", "warning");
+        }
+        return;
+      }
+      if (!res.ok) {
+        setReversePushStatus(
+          "Push failed: " + ((data && data.error) || ("HTTP " + res.status)),
+          classifyStatusKind(res.status),
+        );
+        return;
+      }
+      summarizePushResult(data.result);
+      // Refresh the panel to show new lastPushedAt.
+      await openReverseLinksPanel(scope);
+    } catch (e) {
+      setReversePushStatus("Push failed: " + e.message, "error");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = origText;
+    }
+  }
+
+  function summarizePushResult(r) {
+    if (!r) { setReversePushStatus("Push complete.", "success"); return; }
+    const msg =
+      "Push complete — added " + (r.added?.length || 0) +
+      ", modified " + (r.modified?.length || 0) +
+      ", deleted " + (r.deleted?.length || 0) +
+      ", skipped " + (r.skipped?.length || 0) +
+      ", errors " + (r.errors?.length || 0);
+    setReversePushStatus(msg, r.errors?.length ? "warning" : "success");
+  }
+
+  // --- Unlink (delete) a reverse-link ---
+  async function reverseUnlinkSingle(scope, linkId) {
+    if (
+      !confirm(
+        "Remove this reverse-link? The remote repository is NOT deleted; only the local link record (and its snapshot) are dropped.",
+      )
+    ) return;
+    try {
+      const scopePath = buildReverseScopePath(scope);
+      const url =
+        "/api/reverse-links/" + encodeURIComponent(currentStorage) + scopePath +
+        "/" + encodeURIComponent(linkId);
+      const res = await fetch(url, { method: "DELETE" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setReversePushStatus(
+          "Unlink failed: " + ((data && data.error) || ("HTTP " + res.status)),
+          classifyStatusKind(res.status),
+        );
+        return;
+      }
+      await openReverseLinksPanel(scope);
+    } catch (e) {
+      setReversePushStatus("Unlink failed: " + e.message, "error");
+    }
+  }
+
+  // --- Push All reverse-links in scope ---
+  reverseLinksPushAll.addEventListener("click", async () => {
+    if (!reverseLinksPanelScope) return;
+    if (!confirm("Push ALL reverse-links in this scope?")) return;
+    const origText = reverseLinksPushAll.textContent;
+    reverseLinksPushAll.disabled = true;
+    reverseLinksPushAll.textContent = "Pushing...";
+    try {
+      const scopePath = buildReverseScopePath(reverseLinksPanelScope);
+      const url = "/api/push-all/" + encodeURIComponent(currentStorage) + scopePath;
+      const res = await fetch(url, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      // 502 = partial failure with per-link results — render the table anyway.
+      if (!res.ok && res.status !== 502) {
+        setReversePushStatus(
+          "Push-all failed: " + ((data && data.error) || ("HTTP " + res.status)),
+          classifyStatusKind(res.status),
+        );
+        return;
+      }
+      const results = (data && data.results) || [];
+      let ok = 0;
+      let failed = 0;
+      let added = 0;
+      let modified = 0;
+      let deleted = 0;
+      for (const r of results) {
+        if (r.ok) {
+          ok++;
+          added += r.result?.added?.length || 0;
+          modified += r.result?.modified?.length || 0;
+          deleted += r.result?.deleted?.length || 0;
+        } else {
+          failed++;
+        }
+      }
+      setReversePushStatus(
+        "Push-all: " + ok + " ok / " + failed + " failed — totals: +" + added + " ~" + modified + " -" + deleted,
+        failed ? "warning" : "success",
+      );
+      await openReverseLinksPanel(reverseLinksPanelScope);
+    } catch (e) {
+      setReversePushStatus("Push-all failed: " + e.message, "error");
+    } finally {
+      reverseLinksPushAll.disabled = false;
+      reverseLinksPushAll.textContent = origText;
+    }
+  });
+
+  // --- Reverse-link badge rendering ---
+  // Called after the forward-link badge logic in toggleContainer (where we
+  // already fetched `/api/links/...`). For reverse-links we issue a parallel
+  // fetch to `/api/reverse-links/...` and decorate the same container node
+  // with a distinct badge.
+  async function addReverseLinkBadgesForContainer(node, containerName) {
+    try {
+      const url =
+        "/api/reverse-links/" + encodeURIComponent(currentStorage) +
+        "/" + encodeURIComponent(containerName);
+      const data = await apiJson(url);
+      const links = (data && data.links) || [];
+      containerReverseLinksCache[containerName] = links;
+      if (links.length === 0) return;
+      const containerItem = node.querySelector(".tree-item");
+      if (containerItem && !containerItem.querySelector(".reverse-link-badge")) {
+        const badge = document.createElement("span");
+        badge.className = "reverse-link-badge";
+        badge.textContent = "↗"; // north-east arrow → outbound (storage → repo)
+        badge.title = links.length + " reverse-link(s) — storage publishes to repo";
+        badge.addEventListener("click", (e) => {
+          e.stopPropagation();
+          openReverseLinksPanel({ scope: "container", container: containerName });
+        });
+        containerItem.appendChild(badge);
+      }
+    } catch {
+      /* no reverse-links or endpoint failed — silent like the forward badge */
+    }
+  }
+  // Expose for the existing toggleContainer flow.
+  window.__addReverseLinkBadgesForContainer = addReverseLinkBadgesForContainer;
 
   // --- Init ---
   loadStorages();

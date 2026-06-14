@@ -12,6 +12,15 @@ import { cloneGitHub, cloneDevOps, cloneSsh, syncContainer } from "./commands/re
 import { linkGitHub, linkDevOps, linkSsh, unlinkContainer, listLinks } from "./commands/link-ops.js";
 import { diffContainer } from "./commands/diff-ops.js";
 import {
+  publishGitHub,
+  publishDevOps,
+  reverseLinkGitHub,
+  reverseLinkDevOps,
+  pushReverseLinkCmd,
+  reverseUnlink,
+  listReverseLinksCmd,
+} from "./commands/reverse-git.js";
+import {
   listShares, createShare, deleteShareCmd,
   listDir, viewFile, uploadFileCmd, renameFileCmd, deleteFileCmd, deleteFileFolderCmd,
 } from "./commands/shares-ops.js";
@@ -447,6 +456,259 @@ program
         physicalCheck: opts.physicalCheck,
         output: opts.output,
       }
+    );
+  });
+
+// ---------------------------------------------------------------------------
+// Reverse-Git Publication subcommands (plan-011)
+// ---------------------------------------------------------------------------
+//
+// Seven commands implementing the design's CLI subcommand matrix
+// (project-design.md §4.1):
+//
+//   publish-github / publish-devops      — create link + push immediately
+//   reverse-link-github / reverse-link-devops — create link, do NOT push
+//   push                                  — push existing link(s) (with --dry-run, --force)
+//   reverse-unlink                        — remove a link (does NOT touch remote)
+//   list-reverse-links                    — enumerate persisted links
+//
+// Tri-state exit codes (per plan-005 / R10.11):
+//   0 = success / no-op       1 = changes pushed / would push (dry-run)
+//   2 = fatal error           3 = configuration error
+// ---------------------------------------------------------------------------
+
+const accumulateExclude = (value: string, prev: string[]): string[] => [...prev, value];
+
+program
+  .command("publish-github")
+  .description("Publish (push) the current storage scope to a GitHub repository")
+  .requiredOption("--repo <owner/repo>", "GitHub repository (owner/repo or full URL)")
+  .option("--container <name>", "Source container name (scope: container)")
+  .option("--prefix <path>", "Source blob prefix (scope: prefix, requires --container)")
+  .option("--branch <name>", "Target branch (default: main)")
+  .option("--commit-message <msg>", "Override the default commit message")
+  .option("--exclude <pattern>", "Glob-style exclusion pattern (repeatable)", accumulateExclude, [] as string[])
+  .option("--no-respect-gitignore", "Ignore any .gitignore at the scope root")
+  .option("--repo-sub-path <path>", "Sub-folder inside the target repo")
+  .option("--visibility <v>", "public | private (default: private) — used only when --create-repo")
+  .option("--create-repo", "Auto-create the remote repository if it does not exist")
+  .option("--author-name <name>", "Commit author name (default: Storage Navigator)")
+  .option("--author-email <email>", "Commit author email (default: storage-nav@local)")
+  .option("--storage <name>", "Storage account name (uses first if omitted)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token)")
+  .option("--account-key <key>", "Account key (inline)")
+  .option("--sas-token <token>", "SAS token (inline)")
+  .option("--token-name <name>", "PAT token name (uses first GitHub token if omitted)")
+  .option("--pat <token>", "GitHub PAT (inline, overrides stored token)")
+  .action(async (opts) => {
+    await publishGitHub(
+      { container: opts.container, prefix: opts.prefix },
+      {
+        repo: opts.repo,
+        branch: opts.branch,
+        commitMessage: opts.commitMessage,
+        exclude: opts.exclude,
+        respectGitignore: opts.respectGitignore,
+        repoSubPath: opts.repoSubPath,
+        visibility: opts.visibility,
+        createRepo: opts.createRepo,
+        authorName: opts.authorName,
+        authorEmail: opts.authorEmail,
+      },
+      { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account },
+      { pat: opts.pat, tokenName: opts.tokenName },
+    );
+  });
+
+program
+  .command("publish-devops")
+  .description("Publish (push) the current storage scope to an Azure DevOps repository")
+  .requiredOption("--repo <name|url>", "ADO repo name (with --org/--project) or full repo URL")
+  .option("--org <name>", "Azure DevOps organisation name (required when --repo is a bare name)")
+  .option("--project <name>", "Azure DevOps project name (required when --repo is a bare name)")
+  .option("--container <name>", "Source container name (scope: container)")
+  .option("--prefix <path>", "Source blob prefix (scope: prefix, requires --container)")
+  .option("--branch <name>", "Target branch (default: main)")
+  .option("--commit-message <msg>", "Override the default commit message")
+  .option("--exclude <pattern>", "Glob-style exclusion pattern (repeatable)", accumulateExclude, [] as string[])
+  .option("--no-respect-gitignore", "Ignore any .gitignore at the scope root")
+  .option("--repo-sub-path <path>", "Sub-folder inside the target repo")
+  .option("--visibility <v>", "Accepted but ignored for Azure DevOps (project visibility wins)")
+  .option("--create-repo", "Auto-create the remote repository if it does not exist")
+  .option("--author-name <name>", "Commit author name (default: Storage Navigator)")
+  .option("--author-email <email>", "Commit author email (default: storage-nav@local)")
+  .option("--storage <name>", "Storage account name (uses first if omitted)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token)")
+  .option("--account-key <key>", "Account key (inline)")
+  .option("--sas-token <token>", "SAS token (inline)")
+  .option("--token-name <name>", "PAT token name (uses first Azure DevOps token if omitted)")
+  .option("--pat <token>", "Azure DevOps PAT (inline, overrides stored token)")
+  .action(async (opts) => {
+    await publishDevOps(
+      { container: opts.container, prefix: opts.prefix },
+      {
+        repo: opts.repo,
+        org: opts.org,
+        project: opts.project,
+        branch: opts.branch,
+        commitMessage: opts.commitMessage,
+        exclude: opts.exclude,
+        respectGitignore: opts.respectGitignore,
+        repoSubPath: opts.repoSubPath,
+        visibility: opts.visibility,
+        createRepo: opts.createRepo,
+        authorName: opts.authorName,
+        authorEmail: opts.authorEmail,
+      },
+      { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account },
+      { pat: opts.pat, tokenName: opts.tokenName },
+    );
+  });
+
+program
+  .command("reverse-link-github")
+  .description("Create a reverse-link to a GitHub repository (does NOT push)")
+  .requiredOption("--repo <owner/repo>", "GitHub repository (owner/repo or full URL)")
+  .option("--container <name>", "Source container name (scope: container)")
+  .option("--prefix <path>", "Source blob prefix (scope: prefix, requires --container)")
+  .option("--branch <name>", "Target branch (default: main)")
+  .option("--exclude <pattern>", "Glob-style exclusion pattern (repeatable)", accumulateExclude, [] as string[])
+  .option("--no-respect-gitignore", "Ignore any .gitignore at the scope root")
+  .option("--repo-sub-path <path>", "Sub-folder inside the target repo")
+  .option("--visibility <v>", "public | private (default: private) — used only when --create-repo")
+  .option("--create-repo", "Auto-create the remote repository if it does not exist")
+  .option("--author-name <name>", "Commit author name (default: Storage Navigator)")
+  .option("--author-email <email>", "Commit author email (default: storage-nav@local)")
+  .option("--storage <name>", "Storage account name (uses first if omitted)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token)")
+  .option("--account-key <key>", "Account key (inline)")
+  .option("--sas-token <token>", "SAS token (inline)")
+  .option("--token-name <name>", "PAT token name (uses first GitHub token if omitted)")
+  .option("--pat <token>", "GitHub PAT (inline, overrides stored token)")
+  .action(async (opts) => {
+    await reverseLinkGitHub(
+      { container: opts.container, prefix: opts.prefix },
+      {
+        repo: opts.repo,
+        branch: opts.branch,
+        exclude: opts.exclude,
+        respectGitignore: opts.respectGitignore,
+        repoSubPath: opts.repoSubPath,
+        visibility: opts.visibility,
+        createRepo: opts.createRepo,
+        authorName: opts.authorName,
+        authorEmail: opts.authorEmail,
+      },
+      { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account },
+      { pat: opts.pat, tokenName: opts.tokenName },
+    );
+  });
+
+program
+  .command("reverse-link-devops")
+  .description("Create a reverse-link to an Azure DevOps repository (does NOT push)")
+  .requiredOption("--repo <name|url>", "ADO repo name (with --org/--project) or full repo URL")
+  .option("--org <name>", "Azure DevOps organisation name (required when --repo is a bare name)")
+  .option("--project <name>", "Azure DevOps project name (required when --repo is a bare name)")
+  .option("--container <name>", "Source container name (scope: container)")
+  .option("--prefix <path>", "Source blob prefix (scope: prefix, requires --container)")
+  .option("--branch <name>", "Target branch (default: main)")
+  .option("--exclude <pattern>", "Glob-style exclusion pattern (repeatable)", accumulateExclude, [] as string[])
+  .option("--no-respect-gitignore", "Ignore any .gitignore at the scope root")
+  .option("--repo-sub-path <path>", "Sub-folder inside the target repo")
+  .option("--create-repo", "Auto-create the remote repository if it does not exist")
+  .option("--author-name <name>", "Commit author name (default: Storage Navigator)")
+  .option("--author-email <email>", "Commit author email (default: storage-nav@local)")
+  .option("--storage <name>", "Storage account name (uses first if omitted)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token)")
+  .option("--account-key <key>", "Account key (inline)")
+  .option("--sas-token <token>", "SAS token (inline)")
+  .option("--token-name <name>", "PAT token name (uses first Azure DevOps token if omitted)")
+  .option("--pat <token>", "Azure DevOps PAT (inline, overrides stored token)")
+  .action(async (opts) => {
+    await reverseLinkDevOps(
+      { container: opts.container, prefix: opts.prefix },
+      {
+        repo: opts.repo,
+        org: opts.org,
+        project: opts.project,
+        branch: opts.branch,
+        exclude: opts.exclude,
+        respectGitignore: opts.respectGitignore,
+        repoSubPath: opts.repoSubPath,
+        createRepo: opts.createRepo,
+        authorName: opts.authorName,
+        authorEmail: opts.authorEmail,
+      },
+      { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account },
+      { pat: opts.pat, tokenName: opts.tokenName },
+    );
+  });
+
+program
+  .command("push")
+  .description("Push pending changes for one or more existing reverse-links")
+  .option("--container <name>", "Container scope")
+  .option("--prefix <path>", "Prefix scope (requires --container)")
+  .option("--link-id <uuid>", "Push a specific link by ID")
+  .option("--all", "Push every reverse-link in the resolved scope")
+  .option("--dry-run", "Compute the diff but do NOT push")
+  .option("--force", "Re-push every tracked file (ignores diff classification)")
+  .option("--allow-overwrite-remote", "Force-update the remote ref when the branch has diverged")
+  .option("--storage <name>", "Storage account name (uses first if omitted)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token)")
+  .option("--account-key <key>", "Account key (inline)")
+  .option("--sas-token <token>", "SAS token (inline)")
+  .option("--token-name <name>", "PAT token name")
+  .option("--pat <token>", "PAT (inline, overrides stored token)")
+  .action(async (opts) => {
+    await pushReverseLinkCmd(
+      { container: opts.container, prefix: opts.prefix },
+      {
+        dryRun: opts.dryRun,
+        force: opts.force,
+        allowOverwriteRemote: opts.allowOverwriteRemote,
+        all: opts.all,
+        linkId: opts.linkId,
+      },
+      { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account },
+      { pat: opts.pat, tokenName: opts.tokenName },
+    );
+  });
+
+program
+  .command("reverse-unlink")
+  .description("Remove a reverse-link record (does NOT touch the remote repository)")
+  .requiredOption("--link-id <uuid>", "ID of the reverse-link to remove")
+  .option("--container <name>", "Container scope (for container/prefix links)")
+  .option("--prefix <path>", "Prefix scope (requires --container)")
+  .option("--storage <name>", "Storage account name (uses first if omitted)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token)")
+  .option("--account-key <key>", "Account key (inline)")
+  .option("--sas-token <token>", "SAS token (inline)")
+  .option("--yes", "Skip the confirmation prompt")
+  .action(async (opts) => {
+    await reverseUnlink(
+      { container: opts.container, prefix: opts.prefix },
+      opts.linkId,
+      { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account },
+      opts.yes ?? false,
+    );
+  });
+
+program
+  .command("list-reverse-links")
+  .description("List every reverse-link rooted at the resolved scope")
+  .option("--container <name>", "Container scope")
+  .option("--prefix <path>", "Prefix scope (requires --container)")
+  .option("--storage <name>", "Storage account name (uses first if omitted)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token)")
+  .option("--account-key <key>", "Account key (inline)")
+  .option("--sas-token <token>", "SAS token (inline)")
+  .action(async (opts) => {
+    await listReverseLinksCmd(
+      { container: opts.container, prefix: opts.prefix },
+      { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account },
     );
   });
 

@@ -1,3 +1,13 @@
+// ---------------------------------------------------------------------------
+// Re-export reverse-git types so legacy single-import call sites continue to
+// compile. See `src/core/reverse-git-types.ts` for the canonical definitions.
+// ---------------------------------------------------------------------------
+export * from "./reverse-git-types.js";
+import type {
+  AccountScopeReverseLinksRegistry,
+  ReverseGitLinkPATBinding,
+} from "./reverse-git-types.js";
+
 export type DirectStorageEntry = {
   kind: 'direct';
   name: string;
@@ -109,6 +119,20 @@ export interface SyncResult {
 export interface CredentialData {
   storages: StorageEntry[];
   tokens?: TokenEntry[];
+  /**
+   * Storage-account-scope reverse-link registry. Optional for backward
+   * compatibility — older config files lack this field and `CredentialStore`
+   * treats a missing value as an empty registry (no migration write).
+   * See `src/core/reverse-git-types.ts`.
+   */
+  reverseLinks?: AccountScopeReverseLinksRegistry;
+  /**
+   * Optional explicit `linkId → tokenName` bindings. When present, these
+   * supersede the `ReverseLink.tokenName` field. Phase C ships the type and
+   * the companion CRUD methods on `CredentialStore`; downstream phases may
+   * or may not honour the binding.
+   */
+  reverseLinkPatBindings?: ReverseGitLinkPATBinding[];
 }
 
 /** Encrypted payload stored on disk */

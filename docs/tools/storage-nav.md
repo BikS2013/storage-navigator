@@ -315,5 +315,179 @@
 
           # Detect untracked blobs (physical check)
           npx tsx src/cli/index.ts diff --container my-container --physical-check
+
+        ─────────────────────────────────────────────────────────────────────────
+        Reverse Git
+        ─────────────────────────────────────────────────────────────────────────
+
+        Publish (push) Azure Blob contents back to GitHub or Azure DevOps
+        repositories. Implemented as seven CLI subcommands plus six HTTP
+        endpoints (Phase F). See docs/design/plan-011-reverse-git.md and
+        docs/design/project-design.md §"Reverse-Git Publication" for the
+        full design.
+
+        Architecture:
+          - Pure REST. No local git clone, no git binary, no LFS support.
+          - Diff is ETag-based (Azure ETag — opaque per blob) — distinct
+            from the forward diff which uses Git SHA-1 blob hashes.
+          - Metadata persistence is hybrid:
+              container / prefix scope → .reverse-git-links.json blob
+                                          at the container root
+              account scope            → CredentialData.reverseLinks
+                                          inside the encrypted store
+          - One commit per push (batched). GitHub uses the Git Data API
+            (700-entry chunks); ADO uses POST /git/pushes (5 GB cap,
+            chunked at 500 changes when exceeded).
+
+        Subcommands:
+
+          publish-github
+            Initialise a reverse-link to GitHub AND push the current scope
+            contents in a single command.
+            --repo <owner/repo>       Required. GitHub repository.
+            --container <name>        Scope: container.
+            --prefix <path>           Scope: prefix (requires --container).
+            (no scope flags)          Scope: storage-account.
+            --branch <name>           Default: main.
+            --commit-message <msg>    Override default commit message.
+            --exclude <pattern>       Repeatable glob exclusion.
+            --no-respect-gitignore    Ignore the scope-root .gitignore.
+            --repo-sub-path <p>       Sub-folder inside the repo.
+            --visibility <v>          public | private (default: private).
+                                       Only used with --create-repo.
+            --create-repo             Auto-create the repo if it does not
+                                       exist (GitHub: auto_init=true).
+            --author-name <n>         Default: "Storage Navigator".
+            --author-email <e>        Default: "storage-nav@local".
+            Common credential / PAT flags: --storage, --account,
+            --account-key, --sas-token, --token-name, --pat.
+
+          publish-devops
+            Same as publish-github but targets Azure DevOps. Additional
+            flags:
+            --org <name>              ADO organisation (required when
+                                       --repo is a bare name).
+            --project <name>          ADO project (required when --repo
+                                       is a bare name).
+            --visibility              Accepted but ignored (ADO inherits
+                                       from the project).
+
+          reverse-link-github
+            Create the reverse-link record but do NOT push. Useful when
+            you want to inspect or tune exclusions before the first push.
+            Same target/scope flags as publish-github.
+
+          reverse-link-devops
+            Same as reverse-link-github but targets Azure DevOps.
+
+          push
+            Execute a push for one or more existing reverse-links.
+            Selection precedence: --link-id > --all > scope flags.
+            --link-id <uuid>          Push a specific link by ID.
+            --all                     Push every link in the resolved scope.
+            --container <name>        Scope: container.
+            --prefix <path>           Scope: prefix.
+            --dry-run                 Compute the diff but do NOT push.
+            --force                   Re-classify every tracked file as
+                                       modified — re-pushes everything.
+                                       Independent of --allow-overwrite-remote.
+            --allow-overwrite-remote  Force-update the remote ref when the
+                                       branch diverged. Default OFF.
+
+          reverse-unlink
+            Remove a reverse-link record. NEVER touches the remote.
+            --link-id <uuid>          Required. ID to remove.
+            --container / --prefix    Scope flags for lookup.
+            --yes                     Skip the confirmation prompt.
+
+          list-reverse-links
+            Tabular enumeration of every reverse-link rooted at the scope.
+            --container / --prefix    Scope flags. With no scope flags,
+                                       lists account-scope links for the
+                                       resolved storage entry.
+
+        Tri-state exit codes (per plan-005 / R10.11):
+          0   success / no-op
+          1   changes pushed (or would be pushed under --dry-run)
+          2   fatal error
+          3   configuration error (missing required value)
+
+        Error → exit-code mapping (per plan-011 §"Error type taxonomy"):
+          RepoNotFoundError        2 (HTTP 404)
+          RemoteDivergedError      2 (HTTP 409)
+          GitHubApiError           2 (HTTP 502)
+          GitHubEmptyRepoError     2 (HTTP 502)
+          GitHubBlobTooLargeError  per-file, NOT fatal (accumulated)
+          DevOpsApiError           2 (HTTP 502)
+          AuthenticationError /
+            InvalidPATError        2 (HTTP 401)
+          InsufficientScopesError  2 (HTTP 403)
+          RateLimitExceededError   2 (HTTP 503)
+          PayloadTooLargeError     2 (HTTP 413)
+          PathCollisionError       2 (HTTP 422)
+          ConfigurationError       3 (HTTP 400)
+
+        Path mapping (blob path → repo path):
+          container scope    foo/bar.txt           → <repoSubPath>/foo/bar.txt
+          prefix=docs/       docs/foo/bar.txt      → <repoSubPath>/foo/bar.txt  (prefix stripped)
+          account scope      cust-data/foo/bar.txt → <repoSubPath>/cust-data/foo/bar.txt
+        Path collisions (case-only or after prefix strip) abort the push
+        (PathCollisionError, exit 2) per R5.5 default policy.
+
+        Security stance:
+          PATs are stored encrypted in the credential store (AES-256-GCM).
+          --pat is accepted for one-shot use; --token-name retrieves a
+          named stored token; the engine falls back to the first matching
+          provider token. No fallback for required configuration — every
+          missing setting raises ConfigurationError (exit 3).
+
+        Account-scope: USE SPARINGLY
+          The engine streams every blob across every container in the
+          account through the diff for each push. For accounts with many
+          containers / large blob counts this can be slow. Prefer
+          container or prefix scope when possible.
+
+        Examples:
+
+          # Initial publish of a container to a new GitHub repo
+          npx tsx src/cli/index.ts publish-github \
+              --container my-docs --repo myorg/my-docs \
+              --create-repo --visibility private
+
+          # Initial publish of a prefix to ADO
+          npx tsx src/cli/index.ts publish-devops \
+              --container engineering --prefix specs/ \
+              --org myorg --project Platform --repo specs
+
+          # Create link only (no push), then dry-run before the first push
+          npx tsx src/cli/index.ts reverse-link-github \
+              --container my-docs --repo myorg/my-docs
+          npx tsx src/cli/index.ts push --container my-docs --dry-run
+
+          # Push every link in a container in one shot
+          npx tsx src/cli/index.ts push --container my-docs --all
+
+          # Recover from divergence with a force push
+          npx tsx src/cli/index.ts push --link-id 1234abcd-... \
+              --allow-overwrite-remote
+
+          # Re-push every tracked file (no diff)
+          npx tsx src/cli/index.ts push --container my-docs --force
+
+          # List every reverse-link in a container
+          npx tsx src/cli/index.ts list-reverse-links --container my-docs
+
+          # Remove a link without touching the remote
+          npx tsx src/cli/index.ts reverse-unlink \
+              --link-id 1234abcd-... --container my-docs --yes
+
+        Known limitations (v1):
+          - No Git LFS support — large binaries trigger
+            GitHubBlobTooLargeError per file.
+          - No conflict resolution — divergence requires manual
+            reconciliation (or --allow-overwrite-remote).
+          - No event-driven monitoring — push is on-demand only (CLI or
+            UI button).
+          - Account-scope iteration is "use sparingly" (see above).
     </info>
 </storage-nav>

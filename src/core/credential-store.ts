@@ -2,7 +2,15 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import type { CredentialData, EncryptedPayload, StorageEntry, TokenEntry } from "./types.js";
+import type {
+  AccountScopeReverseLinksRegistry,
+  CredentialData,
+  EncryptedPayload,
+  ReverseGitLinkPATBinding,
+  ReverseLink,
+  StorageEntry,
+  TokenEntry,
+} from "./types.js";
 
 function getStoreDir(): string {
   return process.env.STORAGE_NAVIGATOR_DIR ?? path.join(os.homedir(), ".storage-navigator");
@@ -339,6 +347,114 @@ export class CredentialStore {
     const before = this.data.tokens.length;
     this.data.tokens = this.data.tokens.filter((t) => t.name !== name);
     if (this.data.tokens.length < before) {
+      this.save();
+      return true;
+    }
+    return false;
+  }
+
+  // -------------------------------------------------------------------------
+  // Reverse-git (plan-011) — storage-account-scope reverse-link registry
+  //
+  // Backward compatibility: older `credentials.json` files lack the
+  // `reverseLinks` field entirely. `getAccountReverseLinks` returns `[]`
+  // when the field is missing; `setAccountReverseLinks` initialises it on
+  // first write. There is NO migration write on read.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Read the reverse-link list for a given storage account name.
+   * Returns `[]` when the account has no links recorded or when the
+   * `reverseLinks` field is absent on an older config file.
+   */
+  getAccountReverseLinks(account: string): ReverseLink[] {
+    const registry = this.data.reverseLinks;
+    if (!registry) return [];
+    const links = registry.byAccount[account];
+    return links ? [...links] : [];
+  }
+
+  /**
+   * Persist the reverse-link list for a given storage account name.
+   * Replaces the entire list — caller is responsible for merging. Empties
+   * are persisted as an empty array (not deleted) so explicit "no links"
+   * survives a round-trip.
+   */
+  async setAccountReverseLinks(
+    account: string,
+    links: ReverseLink[],
+  ): Promise<void> {
+    if (!this.data.reverseLinks) {
+      this.data.reverseLinks = {
+        schemaVersion: 1,
+        byAccount: {},
+      } satisfies AccountScopeReverseLinksRegistry;
+    }
+    this.data.reverseLinks.byAccount[account] = [...links];
+    this.save();
+  }
+
+  // -------------------------------------------------------------------------
+  // Reverse-git (plan-011) — optional explicit PAT bindings
+  //
+  // Informational mapping `linkId → tokenName`. When present, supersedes
+  // the `ReverseLink.tokenName` field on a per-link basis. Phase C exposes
+  // the CRUD surface; downstream phases choose whether to honour it.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Bind (or rebind) a `tokenName` to a `linkId`. Idempotent: re-binding
+   * the same `linkId` replaces the previous mapping rather than producing
+   * a duplicate. Persists immediately.
+   */
+  async addReverseLinkPATBinding(
+    linkId: string,
+    tokenName: string,
+  ): Promise<void> {
+    if (!this.data.reverseLinkPatBindings) {
+      this.data.reverseLinkPatBindings = [];
+    }
+    const existing = this.data.reverseLinkPatBindings.findIndex(
+      (b) => b.linkId === linkId,
+    );
+    const binding: ReverseGitLinkPATBinding = { linkId, tokenName };
+    if (existing >= 0) {
+      this.data.reverseLinkPatBindings[existing] = binding;
+    } else {
+      this.data.reverseLinkPatBindings.push(binding);
+    }
+    this.save();
+  }
+
+  /**
+   * Resolve the PAT (full secret) bound to a `linkId`, when the binding
+   * exists AND the bound `tokenName` resolves to a known token. Returns
+   * `undefined` when either lookup fails — callers should fall back to
+   * `getTokenByProvider()` or surface a configuration error.
+   *
+   * NOTE: this never substitutes a default PAT — per the project's
+   * no-fallback rule, missing configuration is an explicit `undefined` for
+   * the caller to handle, not a silent substitution.
+   */
+  getReverseLinkPAT(linkId: string): string | undefined {
+    const binding = this.data.reverseLinkPatBindings?.find(
+      (b) => b.linkId === linkId,
+    );
+    if (!binding) return undefined;
+    return this.getToken(binding.tokenName)?.token;
+  }
+
+  /**
+   * Remove the PAT binding for a `linkId`. Returns `true` when a binding
+   * was removed, `false` when none existed.
+   */
+  async removeReverseLinkPATBinding(linkId: string): Promise<boolean> {
+    if (!this.data.reverseLinkPatBindings) return false;
+    const before = this.data.reverseLinkPatBindings.length;
+    this.data.reverseLinkPatBindings = this.data.reverseLinkPatBindings.filter(
+      (b) => b.linkId !== linkId,
+    );
+    if (this.data.reverseLinkPatBindings.length < before) {
       this.save();
       return true;
     }
