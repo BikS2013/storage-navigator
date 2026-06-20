@@ -163,6 +163,39 @@ The **Open in browser** button opens the same URL in your OS default browser. **
 
 ---
 
+## Standalone macOS app (`/Applications`)
+
+Package the Desktop UI as a double-clickable `Storage Navigator.app` that installs into `/Applications` (and shows up in Launchpad / Spotlight) — no terminal, no `node_modules`, no `npx`. Built with the bundled `electron-builder` for **Apple Silicon (arm64)**.
+
+```bash
+# 1. Build the app + DMG  (tsc → electron-builder --mac --arm64)
+npm run dist:mac
+
+# 2. Ad-hoc sign so it runs on Apple Silicon
+#    (electron-builder skips signing with identity:null; arm64 won't launch a fully-unsigned bundle)
+codesign --force --deep --sign - "release/mac-arm64/Storage Navigator.app"
+
+# 3. Install
+cp -R "release/mac-arm64/Storage Navigator.app" /Applications/
+```
+
+Outputs land in `release/` (git-ignored):
+
+- `release/mac-arm64/Storage Navigator.app` — the app bundle
+- `release/Storage Navigator-<version>-arm64.dmg` — drag-to-Applications installer
+
+Then launch it from Launchpad/Spotlight or `open "/Applications/Storage Navigator.app"`. The app starts its own embedded server and opens the same UI as `storage-nav ui`; it shares the same encrypted credential store (`~/.storage-nav/`), so backends added via the CLI/dev UI are already available.
+
+**Notes & limitations** (personal-use scope — see `Issues - Pending Items.md`):
+
+- **Not notarized.** A locally-built copy launches fine. If you *send* the DMG to someone else, macOS Gatekeeper blocks first launch on their machine — they must right-click → **Open** once, or run `xattr -dr com.apple.quarantine "/Applications/Storage Navigator.app"`. Distributing cleanly would require a Developer ID certificate + Apple notarization.
+- **Fixed port 3100.** The packaged app's embedded server uses port 3100; if it's already in use the window won't load.
+- **Bundle ~145 MB.** All production dependencies (including the agent's LangChain stack) are bundled.
+
+Design and rationale: [`docs/design/plan-013-macos-standalone-app.md`](docs/design/plan-013-macos-standalone-app.md).
+
+---
+
 ## Quickstart — API (RBAC broker)
 
 The API is a separate Node/TypeScript service in `API/`. It brokers Azure Storage behind OIDC + three global roles (`StorageReader`, `StorageWriter`, `StorageAdmin`), with an optional perimeter static-header gate that runs **in front of** OIDC validation.
@@ -284,7 +317,7 @@ Type-check only:
 npx tsc --noEmit
 ```
 
-Packaging the Electron app uses `electron-builder`; see `package.json` for the build pipeline.
+Packaging the Electron app as a standalone macOS `.app` uses `electron-builder` (`npm run dist:mac`) — see [Standalone macOS app](#standalone-macos-app-applications) above and the `build` block in `package.json`.
 
 ---
 

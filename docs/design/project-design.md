@@ -7150,3 +7150,20 @@ All design decisions trace to:
 
 **End of GitHub App Authentication Design**
 
+---
+
+## Standalone macOS Desktop App Packaging (plan-013, 2026-06-20)
+
+**Goal:** ship the Electron UI as a double-clickable `Storage Navigator.app` installable in `/Applications` (Launchpad/Spotlight), for personal use on Apple Silicon (arm64), using the already-present `electron-builder`.
+
+**Design decisions:**
+- **Two launch models coexist.** The dev flow (`npm run ui` → `launchElectronApp()` in `src/electron/launch.ts`) is unchanged: runtime esbuild bundle + spawn `node_modules` electron + the macOS folder-rename branding hack. The *packaged* app runs `dist/electron/main.js` directly via `electron-builder`-bundled Electron — `launch.ts` is not involved, and electron-builder names the bundle `Storage Navigator.app` natively, so the rename hack is moot for the packaged artifact.
+- **Resource resolution is mode-aware** (`src/electron/main.ts`). A `RES_BASE`/`ASSET_BASE` pair switches on `app.isPackaged`: dev resolves `public`/`preload.cjs` from `src/electron` and `assets/` from cwd; packaged resolves all three from `process.resourcesPath`. The previous `process.cwd()`-relative paths broke when launched from `/Applications` (cwd = `/`).
+- **`extraResources`** copies `src/electron/public` → `public`, `src/electron/preload.cjs` → `preload.cjs`, and `assets` → `assets` into `Contents/Resources`, matching the packaged `RES_BASE`/`ASSET_BASE` layout. `files` ships `dist/**` + `package.json`; electron-builder auto-includes production `node_modules`.
+- **No code signing identity** (`mac.identity: null`) — personal/local scope. Because arm64 cannot run a fully-unsigned bundle, the build is finished with a **deep ad-hoc signature** (`codesign --force --deep --sign -`). Not notarized; Gatekeeper only blocks *quarantined* (downloaded) copies, not locally-built ones.
+- **Build entry point:** `package.json` `"main": "dist/electron/main.js"` (unchanged) + new `build` block + `dist:mac` script (`tsc && electron-builder --mac --arm64`). Output in `release/` (git-ignored).
+
+**Verified (2026-06-20):** `npm run dist:mac` → deep ad-hoc sign → install to `/Applications` → launch → embedded Express server returns HTTP 200 on `/` and `/api/storages`; helper processes named "Storage Navigator".
+
+**Trace:** plan `docs/design/plan-013-macos-standalone-app.md`. Known limitations recorded in `Issues - Pending Items.md` (fixed port 3100; unsigned/not-notarized; ~145 MB bundle).
+

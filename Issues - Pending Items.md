@@ -2,6 +2,12 @@
 
 ## Pending
 
+### Standalone macOS app (plan-013) follow-ups
+
+- **[Medium] Packaged `.app` uses a fixed port 3100**: The packaged Electron app (`dist/electron/main.js`) starts its embedded Express server on the default port 3100 (no `--port` is passed when launched by double-click). If 3100 is already in use, the server fails to bind and the window shows a blank/error page. The dev flow (`npm run ui`) is unaffected because the CLI selects the port. Fix: have `createServer` bind to an ephemeral port (`listen(0)`) when packaged and return the `http.Server` so `main.ts` can read `.address().port` and `loadURL` it. Requires changing `createServer` (`src/electron/server.ts:75`) to return the server instead of the Express app. Out of scope for the personal-use packaging task.
+- **[Low] Unsigned / not notarized**: The `.app` is deep ad-hoc signed (`codesign -s -`) so it runs on Apple Silicon, but it is NOT notarized. Locally-built copies launch fine (no quarantine), but if the DMG is *downloaded* by someone else, Gatekeeper blocks first launch — they must right-click→Open or run `xattr -dr com.apple.quarantine`. Proper distribution would need a Developer ID + Apple notarization (separate effort).
+- **[Low] Bundle size ~145 MB**: `dependencies` include LangChain packages used only by the `agent`/`tui`/CLI surfaces, not the Electron UI, yet electron-builder bundles all production deps. Acceptable for personal use; a future optimization could split UI-only deps or use `files` pruning.
+
 ### GitHub App auth (plan-012) follow-ups
 
 - **[R1] User-account (non-org) repo creation via installation token is empirically unverified**: `GitHubWriteClient.createRepo` issues `POST /user/repos` for non-org owners, but whether a GitHub App *installation token* may create repos on a personal account is provider-dependent and not confirmed in GitHub's docs. Org installations (`POST /orgs/{org}/repos` with Administration:write) are the verified path. Action: run a live smoke test with a real GitHub App + personal-account installation; if it 403s, document the limitation and require a PAT for personal-account creation. No silent fallback is implemented (explicit error surfaces).

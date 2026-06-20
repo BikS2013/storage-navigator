@@ -24,3 +24,6 @@ Thumbs.db
 
 # Icon build artifacts
 assets/icon.iconset/
+
+# electron-builder output
+release/

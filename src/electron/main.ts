@@ -158,15 +158,26 @@ if (portIdx !== -1 && process.argv[portIdx + 1]) {
   port = parseInt(process.argv[portIdx + 1], 10);
 }
 
-// Resolve the public directory from CWD (project root) since esbuild bundles
-// rewrite __dirname to point at the bundle location, not the source tree.
-const publicDir = path.join(process.cwd(), "src", "electron", "public");
+// Resolve runtime resources depending on whether we run packaged or in dev.
+//
+//  - Dev (`npm run ui`): esbuild bundles rewrite __dirname, and cwd is the
+//    project root, so files come from the source tree under src/electron and
+//    the project-root assets/ folder.
+//  - Packaged (.app from /Applications): cwd is "/". electron-builder copies
+//    `extraResources` into Contents/Resources (process.resourcesPath), so
+//    public/, preload.cjs and assets/ are resolved from there.
+const RES_BASE = app.isPackaged
+  ? process.resourcesPath
+  : path.join(process.cwd(), "src", "electron");
+const ASSET_BASE = app.isPackaged ? process.resourcesPath : process.cwd();
+
+const publicDir = path.join(RES_BASE, "public");
 
 // Start Express server
 createServer(port, publicDir);
 
 app.whenReady().then(() => {
-  const iconPath = path.join(process.cwd(), "assets", "icon.png");
+  const iconPath = path.join(ASSET_BASE, "assets", "icon.png");
 
   // Set macOS dock icon
   if (process.platform === "darwin" && app.dock) {
@@ -174,10 +185,9 @@ app.whenReady().then(() => {
   }
 
   // Preload script — exposes the allowlisted IPC surface on
-  // `window.electron`. Resolved from the project root the same way as
-  // publicDir, since the bundled main process runs from the project root
-  // (.electron-main.mjs in launch.ts).
-  const preloadPath = path.join(process.cwd(), "src", "electron", "preload.cjs");
+  // `window.electron`. Resolved from the same base as publicDir so it works
+  // both in dev (source tree) and packaged (Contents/Resources).
+  const preloadPath = path.join(RES_BASE, "preload.cjs");
 
   const win = new BrowserWindow({
     width: 1400,

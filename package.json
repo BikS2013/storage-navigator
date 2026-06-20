@@ -9,11 +9,38 @@
   },
   "scripts": {
     "build": "tsc",
+    "build:electron": "tsc",
+    "dist:mac": "npm run build:electron && electron-builder --mac --arm64",
     "cli": "npx tsx src/cli/index.ts",
     "ui": "npx tsx src/cli/index.ts ui",
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
     "test:watch": "vitest"
+  },
+  "build": {
+    "appId": "com.giorgosmarinos.storage-navigator",
+    "productName": "Storage Navigator",
+    "directories": {
+      "output": "release",
+      "buildResources": "assets"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      { "from": "src/electron/public", "to": "public" },
+      { "from": "src/electron/preload.cjs", "to": "preload.cjs" },
+      { "from": "assets", "to": "assets" }
+    ],
+    "mac": {
+      "target": [
+        { "target": "dmg", "arch": ["arm64"] }
+      ],
+      "category": "public.app-category.developer-tools",
+      "icon": "assets/icon.icns",
+      "identity": null
+    }
   },
   "keywords": [
     "azure",
