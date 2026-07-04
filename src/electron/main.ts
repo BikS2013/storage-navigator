@@ -194,6 +194,10 @@ app.whenReady().then(() => {
     height: 900,
     title: `Storage Navigator — port ${port}`,
     icon: iconPath,
+    // macOS: hide the stock title bar and inset the traffic lights so they sit
+    // inside the renderer's 52px toolbar row (which declares the drag region).
+    titleBarStyle: "hiddenInset",
+    trafficLightPosition: { x: 20, y: 18 },
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,

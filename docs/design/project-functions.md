@@ -504,3 +504,23 @@ GitHub App installation-token authentication is an **additional authentication m
 | FR-GHA-NFR5 | In-memory token cache auto-expires at process exit (CLI) or when user navigates away (Electron UI). |
 | FR-GHA-NFR6 | GitHub API rate limits honored via existing `rateLimitedFetch` (403/429 retry with exponential back-off). |
 
+
+---
+
+## Plan 014 — macOS Tahoe UI Redesign (registered 2026-07-04)
+
+Provenance: refined request `docs/reference/refined-request-macos-ui-redesign.md`; technical research `docs/research/macos-tahoe-design-for-electron.md`; codebase scan `docs/reference/codebase-scan-macos-ui-redesign.md`; plan `docs/design/plan-014-macos-ui-redesign.md`.
+
+### Functional Requirements (FR-UI14-*)
+
+| ID | Requirement |
+|---|---|
+| FR-UI14-1 | The Electron window uses a macOS hidden-inset title bar (`titleBarStyle: "hiddenInset"` + `trafficLightPosition`): traffic lights render inside the app's 52px toolbar, which is a window drag region with all interactive controls excluded (`-webkit-app-region: no-drag`). |
+| FR-UI14-2 | The renderer presents the macOS 26 (Tahoe / Golden-Gate-corrected) design language via CSS-emulated glass inside an opaque window (no native vibrancy, no transparent window): translucent toolbar/sidebar/menu/sheet materials, SF Pro system type stack, macOS-styled controls, all 13 modals as sheets, all 4 context menus as macOS-style menus. |
+| FR-UI14-3 | First launch with no stored `sn-theme` value follows the macOS system appearance via `matchMedia("(prefers-color-scheme: dark)")` and keeps following live system changes until the first manual toggle; the two-state theme toggle persists the choice to `localStorage["sn-theme"]` and it survives restart. |
+| FR-UI14-4 | All Unicode-glyph icon buttons are replaced by a hand-authored inline-SVG icon set (stroke-based, `currentColor`, stroke-width 1.5); tree icons map from the existing emoji keys inside `createTreeNode`; no new npm dependency. Documented exception: the emoji prefix inside a native `<select><option>` (app.js:2321) remains, as options cannot render SVG. |
+| FR-UI14-5 | The DOM contract is preserved: every element ID queried by `app.js`, `html-view.js`, and `zip-download-ui.js` resolves in `index.html` or is created at runtime; enforced by the automated check `test_scripts/check-dom-contract.mjs` (exit non-zero on unresolved IDs). |
+| FR-UI14-6 | Accessibility: body text and primary controls meet WCAG AA contrast (≥ 4.5:1) in both themes; visible focus rings on all interactive controls; opaque fallbacks under `prefers-reduced-transparency`; animations disabled under `prefers-reduced-motion`. |
+| FR-UI14-7 | Zero functional/behavioral change to any existing feature; `index.html` contains no inline `style="…"` attributes; scrollbars revert to native macOS overlay behavior (no `::-webkit-scrollbar` styling). |
+
+Status: implemented (2026-07-04, plan-014 executed; verified via `npm run build`, `test_scripts/check-dom-contract.mjs`, `npm test` (685 green), light+dark visual smoke, and computed WCAG contrast checks).

@@ -1,0 +1,73 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5cadff"/>
+      <stop offset="0.45" stop-color="#1e86f7"/>
+      <stop offset="1" stop-color="#0655d4"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.30"/>
+      <stop offset="0.85" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="cloud" gradientUnits="userSpaceOnUse" x1="0" y1="324" x2="0" y2="708">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#e2ecfb"/>
+    </linearGradient>
+    <linearGradient id="needleA" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4da9ff"/>
+      <stop offset="1" stop-color="#0a6cff"/>
+    </linearGradient>
+    <linearGradient id="needleB" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0b5ce0"/>
+      <stop offset="1" stop-color="#0a3f9e"/>
+    </linearGradient>
+    <clipPath id="squircle">
+      <rect x="100" y="100" width="824" height="824" rx="184"/>
+    </clipPath>
+    <filter id="dropShadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="14"/>
+      <feOffset dy="14"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.30"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="cloudShadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="16"/>
+      <feOffset dy="18"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.20"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="needleShadow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="7"/>
+      <feOffset dy="7"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.18"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Squircle with baked shadow -->
+  <g filter="url(#dropShadow)">
+    <rect x="100" y="100" width="824" height="824" rx="184" fill="url(#bg)"/>
+  </g>
+  <rect x="103" y="103" width="818" height="818" rx="181" fill="none" stroke="#ffffff" stroke-opacity="0.18" stroke-width="3"/>
+  <g clip-path="url(#squircle)">
+    <rect x="100" y="100" width="824" height="380" fill="url(#sheen)"/>
+  </g>
+
+  <!-- Cloud: canonical circle-union silhouette -->
+  <g filter="url(#cloudShadow)">
+    <g fill="url(#cloud)">
+      <rect x="272" y="560" width="480" height="148" rx="74"/>
+      <circle cx="375" cy="545" r="103"/>
+      <circle cx="520" cy="462" r="138"/>
+      <circle cx="648" cy="540" r="104"/>
+    </g>
+  </g>
+
+  <!-- Compass needle, NE heading, centered in the cloud mass -->
+  <g transform="translate(512 540) rotate(45)" filter="url(#needleShadow)">
+    <polygon points="0,-148 44,0 -44,0" fill="url(#needleA)"/>
+    <polygon points="0,148 44,0 -44,0" fill="url(#needleB)"/>
+    <circle cx="0" cy="0" r="36" fill="#ffffff"/>
+    <circle cx="0" cy="0" r="21" fill="#0a6cff"/>
+  </g>
+</svg>

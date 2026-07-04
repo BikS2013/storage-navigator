@@ -7167,3 +7167,32 @@ All design decisions trace to:
 
 **Trace:** plan `docs/design/plan-013-macos-standalone-app.md`. Known limitations recorded in `Issues - Pending Items.md` (fixed port 3100; unsigned/not-notarized; ~145 MB bundle).
 
+
+---
+
+## 2026-07-04 — Plan 014: macOS Tahoe UI Redesign (renderer visual rebuild)
+
+**Provenance chain:** refined request `docs/reference/refined-request-macos-ui-redesign.md` → technical research `docs/research/macos-tahoe-design-for-electron.md` → codebase scan `docs/reference/codebase-scan-macos-ui-redesign.md` → plan `docs/design/plan-014-macos-ui-redesign.md`. (Investigation phase skipped: single obvious approach — in-place restyle of the vanilla renderer.)
+
+**What changed:** the Electron renderer (`src/electron/public/`) was visually rebuilt to the macOS 26 (Tahoe / Golden-Gate-corrected) design language with zero functional change. `styles.css` was rewritten as a macOS design system; `index.html` was rebuilt with identical element IDs; `app.js` received three surgical patches; `main.ts` gained two window-chrome options.
+
+**Resolved open questions (from the refined request):**
+- **Q1 — CSS-emulated glass inside an opaque window.** No native `vibrancy`, no `transparent: true`, no `nativeTheme`/accent IPC; `preload.cjs` untouched. Glass materials are `backdrop-filter: blur() saturate()` tints over an ambient two-tone radial wash painted on `body`, with the content pane kept opaque for legibility.
+- **Q2 — System-appearance default.** With no stored `sn-theme`, the renderer follows `matchMedia("(prefers-color-scheme: dark)")` live; the first manual toggle persists an override (unchanged `localStorage["sn-theme"]` mechanism).
+- **Q3 — Two-state toggle** (unset preference = "follow system").
+
+**Design decisions:**
+- **Window chrome (`src/electron/main.ts`):** exactly two BrowserWindow additions — `titleBarStyle: "hiddenInset"`, `trafficLightPosition: { x: 20, y: 18 }`. The 52px renderer toolbar declares `-webkit-app-region: drag` with `no-drag` on every interactive child and an 84px traffic-light reserve. Known accepted asymmetry: the 84px reserve remains in native fullscreen (no IPC by decision).
+- **Token architecture:** macOS semantic tokens (`--label*`, `--separator`, `--content-bg`, `--window-bg`, `--*-tint`, `--accent`, `--destructive`, `--sys-*`) with dark in `:root` (default) + `[data-theme="dark"]`, light in `[data-theme="light"]` + a mirrored `@media (prefers-color-scheme: light) { :root:not([data-theme]) }` block for un-stamped first paint. **Every legacy custom-property name is preserved as an alias** (`--text`, `--text-dim`, `--border`, `--input-bg`, `--btn-primary`, `--expiry-*`, `--json-*`, …) so all `app.js`-generated inline `var()` references restyle automatically; the previously **undefined `--text-muted` and `--link`** are now defined (pre-existing defect closed).
+- **Contrast-verified palette (AC-6):** computed WCAG ratios drove three token choices — light `--label-2` at 0.56 alpha (4.95:1 on white), light accent `#0071e3` (4.70:1 with white text), and dedicated `--accent-fill` (dark `#0a6cff`, 4.56:1) / `--destructive-fill` (dark `#e0281c`, 4.69:1) for filled controls, because a dark-theme accent cannot simultaneously satisfy text-on-dark and white-on-fill at 4.5:1. `--accent` (dark `#0a84ff`) remains for accent-colored text/tints (4.57:1 on `#1e1e1e`).
+- **Iconography:** hand-authored inline SVGs (Lucide-style geometry, `stroke="currentColor"`, stroke-width 1.5, 24×24 viewBox) — no npm dependency. Toolbar buttons in `index.html`; tree icons via an emoji-keyed `TREE_ICON_SVG` map inside `app.js createTreeNode` (call sites untouched); `i-nav` icons tint with the accent (Finder-style), `i-doc` icons stay secondary. Documented exception: the `"🔑 "` prefix inside a native `<option>` (app.js ~2321) stays — options cannot render SVG.
+- **Disclosure chevrons:** pure CSS via `:has()` — `.tree-toggle` suppresses the ▶/▼ glyphs (`font-size: 0`) and draws a masked chevron keyed off `.tree-node:has(> .tree-children.expanded)`; all 20 `app.js` glyph-write sites untouched (each co-toggles `.expanded`).
+- **Surfaces:** 13 modals restyled as macOS sheets (radius 13, opaque body, layered shadow + hairline ring, 180ms `sheet-in`, primary action rightmost); 4 context menus as macOS menus (radius 12, `blur(40px) saturate(1.8)` material, snap accent hover, red destructive items with icons); segmented control for the Add-Storage tabs; capsule push buttons; popup-button selects with accent chevron squares; native overlay scrollbars (all scrollbar CSS removed).
+- **Accessibility:** global accent focus ring (`:focus-visible`), `accent-color` on native checkboxes, `[hidden] { display: none !important }`, and media fallbacks for `prefers-reduced-transparency` (opaque chrome), `prefers-reduced-motion` (no sheet/chevron animation), `prefers-contrast: more` (stronger separators/borders).
+- **Deliberate non-changes:** `html-view.js`, `zip-download-ui.js` (restyled via existing class hooks only), `preload.cjs`, all unit tests, CDN-loaded highlight.js/marked tags incl. the `#hljs-dark`/`#hljs-light` disabled-swap mechanism, `#resizer` drag logic, and plan-013 packaging (renderer ships verbatim via `extraResources`).
+
+**Verification:** `npm run build` (tsc) clean; `test_scripts/check-dom-contract.mjs` — 145 referenced IDs all resolve (AC-4); `npm test` 685/685 green; AC-7 greps clean (zero inline styles, zero glyph buttons, zero scrollbar rules); light+dark visual smoke with screenshots (toolbar/sidebar/content, Add-Storage + Publish sheets, folder/container context menus) via the embedded server and the real Electron window (traffic lights verified in-toolbar).
+
+### 2026-07-04 addendum — Application icon refresh
+
+The AI-raster app icon was replaced with hand-authored vector art matching the plan-014 design language: a macOS Big-Sur-grid squircle (824×824 on the 1024 canvas, baked drop shadow) with the app's azure gradient, carrying a unified white cloud silhouette (circle-union geometry, single userSpaceOnUse gradient) and a two-tone accent compass needle (NE heading, white hub) — the same cloud+navigation identity as the previous icon, redrawn cleanly. Source of truth: `assets/icon.svg`; rendered via QuickLook (`qlmanage`) to `assets/icon.png` (2048², alpha) and `assets/icon.icns` (full 16→1024 iconset via `iconutil`); `src/electron/public/favicon.png` regenerated at 64². Needle sized for 32–64 px dock legibility. Packaged app rebuilt (`npm run dist:mac`) so the .app/DMG embed the new `.icns`.

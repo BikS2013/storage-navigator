@@ -160,19 +160,33 @@
   let accountReverseLinksCache = [];      // ReverseLink[] (account scope)
 
   // --- Theme ---
-  let theme = localStorage.getItem("sn-theme") || "dark";
+  // No stored preference -> follow the macOS system appearance (live);
+  // the manual toggle persists an override under the same "sn-theme" key.
+  const THEME_BTN_SVG = {
+    // shown while dark (sun = "switch to light")
+    dark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>',
+    // shown while light (moon = "switch to dark")
+    light: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>',
+  };
+  const systemDark = window.matchMedia("(prefers-color-scheme: dark)");
+  let theme = localStorage.getItem("sn-theme") || (systemDark.matches ? "dark" : "light");
   applyTheme(theme);
 
-  function applyTheme(t) {
+  systemDark.addEventListener("change", (e) => {
+    if (localStorage.getItem("sn-theme")) return; // manual override wins
+    applyTheme(e.matches ? "dark" : "light");
+  });
+
+  function applyTheme(t, opts) {
     theme = t;
     document.documentElement.setAttribute("data-theme", t);
-    localStorage.setItem("sn-theme", t);
-    themeBtn.textContent = t === "dark" ? "\u2600" : "\u263E"; // sun / moon
+    if (opts && opts.persist) localStorage.setItem("sn-theme", t);
+    themeBtn.innerHTML = t === "dark" ? THEME_BTN_SVG.dark : THEME_BTN_SVG.light;
     document.getElementById("hljs-dark").disabled = t !== "dark";
     document.getElementById("hljs-light").disabled = t !== "light";
   }
 
-  themeBtn.addEventListener("click", () => applyTheme(theme === "dark" ? "light" : "dark"));
+  themeBtn.addEventListener("click", () => applyTheme(theme === "dark" ? "light" : "dark", { persist: true }));
 
   // --- Auth type toggle in modal ---
   modalAuthType.addEventListener("change", () => {
@@ -557,6 +571,35 @@
     }
   }
 
+  // Inline-SVG replacements for the emoji tree icons. Keyed by the emoji
+  // strings the call sites already pass, so no call site changes. i-nav
+  // icons tint with the accent (Finder-style); i-doc icons stay secondary.
+  const SVG_ATTRS = 'viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"';
+  const TREE_ICON_SVG = {
+    // key (storage account / API account root)
+    "🔑": `<svg class="i-nav" ${SVG_ATTRS}><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></svg>`,
+    // container (archive box)
+    "📦": `<svg class="i-nav" ${SVG_ATTRS}><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>`,
+    // folder
+    "📁": `<svg class="i-nav" ${SVG_ATTRS}><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>`,
+    // open folder (file share)
+    "📂": `<svg class="i-nav" ${SVG_ATTRS}><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/></svg>`,
+    // generic file / pdf
+    "📄": `<svg class="i-doc" ${SVG_ATTRS}><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></svg>`,
+    // json (braces)
+    "📋": `<svg class="i-doc" ${SVG_ATTRS}><path d="M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5c0 1.1.9 2 2 2h1"/><path d="M16 21h1a2 2 0 0 0 2-2v-5c0-1.1.9-2 2-2a2 2 0 0 1-2-2V5a2 2 0 0 0-2-2h-1"/></svg>`,
+    // markdown (file with text lines)
+    "📝": `<svg class="i-doc" ${SVG_ATTRS}><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>`,
+    // txt (file with text lines)
+    "📃": `<svg class="i-doc" ${SVG_ATTRS}><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>`,
+    // docx (book)
+    "📖": `<svg class="i-doc" ${SVG_ATTRS}><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>`,
+    // html (globe)
+    "🌐": `<svg class="i-doc" ${SVG_ATTRS}><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>`,
+    // other (paperclip)
+    "📎": `<svg class="i-doc" ${SVG_ATTRS}><path d="m16 6-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485L21 12.3"/></svg>`,
+  };
+
   function createTreeNode(name, icon, depth, hasChildren) {
     const wrapper = document.createElement("div");
     wrapper.className = "tree-node";
@@ -571,7 +614,11 @@
 
     const iconSpan = document.createElement("span");
     iconSpan.className = "tree-icon";
-    iconSpan.textContent = icon;
+    if (TREE_ICON_SVG[icon]) {
+      iconSpan.innerHTML = TREE_ICON_SVG[icon];
+    } else {
+      iconSpan.textContent = icon;
+    }
 
     const nameSpan = document.createElement("span");
     nameSpan.className = "tree-name";
@@ -627,7 +674,7 @@
           if (containerItem && !containerItem.querySelector(".sync-badge")) {
             const badge = document.createElement("span");
             badge.className = "sync-badge";
-            badge.textContent = "\u21BB"; // sync arrow
+            badge.innerHTML = `<svg ${SVG_ATTRS}><path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"/><path d="M21 3v5h-5"/></svg>`;
             badge.title = `${registry.links.length} repo link(s)`;
             badge.addEventListener("click", (e) => {
               e.stopPropagation();
