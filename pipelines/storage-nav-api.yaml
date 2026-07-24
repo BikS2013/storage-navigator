@@ -27,7 +27,7 @@ parameters:
 - name: dockerfilePath
   displayName: "[=] buildAndPushNewImage only. the path to the Dockerfile from the root of the project repo ( foo/bar/Dockerfile )"
   type: string
-  default: Dockerfile
+  default: API/Dockerfile
 - name: changeImageOnWebapp
   displayName: "[=] buildAndPushNewImage only. Check to also change the image on the webapp itself"
   type: boolean
