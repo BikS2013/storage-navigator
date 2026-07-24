@@ -1,0 +1,13 @@
+# Build context is the repo root but only API/ is needed by API/Dockerfile.
+# Ignore everything, then re-include API/ sources (excluding its build junk).
+*
+!API
+API/node_modules
+API/dist
+API/release
+API/.env
+API/.env.*
+!API/.env.example
+API/test
+**/*.log
+**/.DS_Store

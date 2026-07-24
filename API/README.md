@@ -97,8 +97,12 @@ curl -i -H "X-Storage-Nav-Auth: <secret>" https://<webapp>.azurewebsites.net/sto
 
 ## Docker
 
+The Dockerfile expects the **repository root** as its build context (COPY
+paths are prefixed with `API/`), matching the shared CI template. Build from
+the repo root:
+
 ```bash
-docker build -t storage-navigator-api:dev .
+docker build -f API/Dockerfile -t storage-navigator-api:dev ..
 docker run -p 3000:3000 --env-file .env storage-navigator-api:dev
 ```
 
