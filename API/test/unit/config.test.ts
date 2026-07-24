@@ -120,3 +120,39 @@ describe('loadConfig — staticAuth', () => {
     expect(cfg.staticAuth.headerName).toBe('X-Api-Key');
   });
 });
+
+describe('loadConfig — apiKeys', () => {
+  const validEnv = {
+    AUTH_ENABLED: 'false',
+    ANON_ROLE: 'Reader',
+  };
+
+  it('defaults to empty map + default header name when env unset', () => {
+    const cfg = loadConfig(validEnv);
+    expect(cfg.apiKeys.map).toEqual({});
+    expect(cfg.apiKeys.headerName).toBe('X-API-Key');
+  });
+
+  it('parses API_KEYS json into a key->role map', () => {
+    const cfg = loadConfig({
+      ...validEnv,
+      API_KEYS: '{"key-abc":"Reader","key-xyz":"Admin"}',
+    });
+    expect(cfg.apiKeys.map).toEqual({ 'key-abc': 'Reader', 'key-xyz': 'Admin' });
+  });
+
+  it('honours API_KEY_HEADER override', () => {
+    const cfg = loadConfig({ ...validEnv, API_KEY_HEADER: 'X-Custom-Key' });
+    expect(cfg.apiKeys.headerName).toBe('X-Custom-Key');
+  });
+
+  it('throws with friendly error when API_KEYS is malformed JSON', () => {
+    expect(() => loadConfig({ ...validEnv, API_KEYS: 'not-json' }))
+      .toThrow(/API_KEYS is not valid JSON/);
+  });
+
+  it('throws when an API_KEYS value is not a valid role', () => {
+    expect(() => loadConfig({ ...validEnv, API_KEYS: '{"k":"God"}' }))
+      .toThrow();
+  });
+});

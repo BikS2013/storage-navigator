@@ -43,6 +43,10 @@ const ConfigSchema = z.object({
     values: z.array(z.string().min(1)).default([]),
     headerName: z.string().min(1).default('X-Storage-Nav-Auth'),
   }),
+  apiKeys: z.object({
+    map: z.record(z.string().min(1), RoleEnum).default({}),
+    headerName: z.string().min(1).default('X-API-Key'),
+  }),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -141,6 +145,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     staticAuth: {
       values: csv(env.STATIC_AUTH_HEADER_VALUE),
       headerName: env.STATIC_AUTH_HEADER_NAME ?? 'X-Storage-Nav-Auth',
+    },
+    apiKeys: {
+      map:
+        env.API_KEYS === undefined || env.API_KEYS === ''
+          ? {}
+          : parseJsonObject('API_KEYS', env.API_KEYS),
+      headerName: env.API_KEY_HEADER ?? 'X-API-Key',
     },
   };
 
