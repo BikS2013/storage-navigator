@@ -1,6 +1,8 @@
 {
   "AUTH_ENABLED": "false",
-  "ANON_ROLE": "Admin",
+  "ANON_ROLE": "Reader",
+  "API_KEYS": "@Microsoft.KeyVault(SecretUri=https://aimlpoc-kv-we-01.vault.azure.net/secrets/storage-nav-api-keys/)",
+  "API_KEY_HEADER": "X-API-Key",
   "PORT": "3000",
   "LOG_LEVEL": "info",
   "AZURE_SUBSCRIPTIONS": "",
