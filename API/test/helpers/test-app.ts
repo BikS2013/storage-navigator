@@ -27,6 +27,7 @@ export function disabledModeConfig(anonRole: AppRole = 'Admin'): Config {
     swaggerUiEnabled: false,
     corsOrigins: [],
     staticAuth: { values: [], headerName: 'X-Storage-Nav-Auth' },
+    apiKeys: { map: {}, headerName: 'X-API-Key' },
   };
 }
 

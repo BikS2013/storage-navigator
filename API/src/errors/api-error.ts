@@ -8,7 +8,8 @@ export type ApiErrorCode =
   | 'BAD_REQUEST'
   | 'UPSTREAM_ERROR'
   | 'INTERNAL'
-  | 'STATIC_AUTH_FAILED';
+  | 'STATIC_AUTH_FAILED'
+  | 'API_KEY_FAILED';
 
 export class ApiError extends Error {
   readonly status: number;
