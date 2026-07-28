@@ -41,7 +41,6 @@ describe('E2E — auth on', () => {
       swaggerUiEnabled: false,
       corsOrigins: [],
       staticAuth: { values: [], headerName: 'X-Storage-Nav-Auth' },
-      apiKeys: { map: {}, headerName: 'X-API-Key' },
     };
     const cred = new StorageSharedKeyCredential(az.accountName, az.accountKey);
     const blobService = new BlobService(cred as unknown as never, () => az.blobUrl);
