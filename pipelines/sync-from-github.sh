@@ -25,9 +25,16 @@ GITHUB_URL="https://github.com/BikS2013/storage-navigator.git"
 ADO_URL="https://dev.azure.com/NBGIDP/DevOps_Private/_git/storage-navigator"
 BRANCH="main"
 # ADO-only paths that must survive every sync (relative to repo root):
+# The Dockerfile trio is ADO-only: the shared CI template builds with the repo
+# root as context, so COPY paths are API/-prefixed and .dockerignore trims the
+# context. GitHub carries the plain in-API/ variant. Without preserving these,
+# a sync resets them to the GitHub version and the QA image build breaks.
 PRESERVE_PATHS=(
   "configuration"
   "pipelines"
+  "API/Dockerfile"
+  "API/README.md"
+  ".dockerignore"
 )
 ADO_RESOURCE="499b84ac-1321-427f-aa17-267ca6975798"  # Azure DevOps AAD app id
 # -----------------------------------------------------------------------------
