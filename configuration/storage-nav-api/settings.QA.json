@@ -1,11 +1,9 @@
 {
   "AUTH_ENABLED": "false",
-  "ANON_ROLE": "Reader",
-  "API_KEYS": "@Microsoft.KeyVault(SecretUri=https://aimlpoc-kv-we-01.vault.azure.net/secrets/storage-nav-api-keys/)",
-  "API_KEY_HEADER": "X-API-Key",
+  "ANON_ROLE": "Admin",
   "PORT": "3000",
   "LOG_LEVEL": "info",
-  "AZURE_SUBSCRIPTIONS": "",
+  "AZURE_SUBSCRIPTIONS": "032f7e55-c709-4a51-a2c8-2fb2ffc25e4d",
   "ALLOWED_ACCOUNTS": "",
   "DISCOVERY_REFRESH_MIN": "15",
   "DEFAULT_PAGE_SIZE": "200",
@@ -15,5 +13,5 @@
   "SWAGGER_UI_ENABLED": "true",
   "CORS_ORIGINS": "",
   "STATIC_AUTH_HEADER_NAME": "X-Storage-Nav-Auth",
-  "STATIC_AUTH_HEADER_VALUE": ""
+  "STATIC_AUTH_HEADER_VALUE": "@Microsoft.KeyVault(SecretUri=https://aimlpoc-kv-we-01.vault.azure.net/secrets/storage-nav-static-auth/)"
 }
