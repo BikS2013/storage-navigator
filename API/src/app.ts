@@ -11,7 +11,6 @@ import { buildJwksGetter } from './auth/jwks-cache.js';
 import { oidcMiddleware } from './auth/oidc-middleware.js';
 import { anonymousPrincipalMiddleware } from './auth/auth-toggle.js';
 import { staticAuthMiddleware } from './auth/static-auth.js';
-import { apiKeyAuthMiddleware } from './auth/api-key-auth.js';
 import type { AppRole } from './auth/role-mapper.js';
 import type { AccountDiscovery } from './azure/account-discovery.js';
 import type { BlobService } from './azure/blob-service.js';
@@ -63,12 +62,8 @@ export function buildApp(opts: BuildAppOptions): Express {
 
   app.use(staticAuthMiddleware(opts.config.staticAuth.values, opts.config.staticAuth.headerName));
 
-  app.use(apiKeyAuthMiddleware(opts.config.apiKeys.map, opts.config.apiKeys.headerName));
-
   const auth = opts.authOverride ?? buildAuthMiddleware(opts.config);
-  // A valid API key already set the principal; skip OIDC/anon so callers can
-  // authenticate with a key OR a token, not both.
-  app.use((req, res, next) => (req.principal ? next() : auth(req, res, next)));
+  app.use(auth);
 
   app.use(storagesRouter(opts.discovery));
   app.use(containersRouter(opts.blobService, opts.discovery, opts.config));
