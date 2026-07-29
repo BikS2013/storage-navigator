@@ -1,12 +1,12 @@
 import { filterByRepoSubPath, mapToTargetPaths, type MappedFileEntry } from "./sync-engine.js";
-import { BlobClient } from "./blob-client.js";
+import type { IStorageBackend } from "./backend/backend.js";
 import type { RepoProvider, RepoLink, DiffEntry, DiffReport } from "./types.js";
 
 const META_BLOB = ".repo-sync-meta.json";
 const LINKS_BLOB = ".repo-links.json";
 
 export interface DiffOptions {
-  /** If true, calls listBlobsFlat to find untracked blobs. Requires blobClient and container. Default: false */
+  /** If true, enumerates the container's blobs to find untracked ones. Requires backend and container. Default: false */
   includePhysicalCheck?: boolean;
   /** If false, identical[] is emptied before returning (but summary.identicalCount is preserved). Default: true */
   showIdentical?: boolean;
@@ -23,14 +23,14 @@ export interface DiffOptions {
  *
  * @param provider       Repository provider (GitHub, Azure DevOps, or SSH)
  * @param link           The RepoLink describing the sync target
- * @param blobClient     Required only when options.includePhysicalCheck === true
+ * @param backend        Required only when options.includePhysicalCheck === true
  * @param container      Required only when options.includePhysicalCheck === true
  * @param options        Diff options
  */
 export async function diffLink(
   provider: RepoProvider,
   link: RepoLink,
-  blobClient?: BlobClient,
+  backend?: IStorageBackend,
   container?: string,
   options?: DiffOptions
 ): Promise<DiffReport> {
@@ -100,18 +100,20 @@ export async function diffLink(
   // ── Phase 2: Physical blob check (optional) ────────────────────────────────
 
   if (includePhysicalCheck) {
-    if (!blobClient) {
-      throw new Error("blobClient is required when includePhysicalCheck is true");
+    if (!backend) {
+      throw new Error("backend is required when includePhysicalCheck is true");
     }
     if (!container) {
       throw new Error("container is required when includePhysicalCheck is true");
     }
 
-    // 1. List all physical blobs in the container
-    const physicalBlobs = await blobClient.listBlobsFlat(container);
-
-    // 2. Build a set of physical blob paths
-    const physicalSet = new Set<string>(physicalBlobs.map((b) => b.name));
+    // 1-2. Build a set of every physical blob path in the container.
+    // iterateBlobsFlat (not listBlobs) is the only listing that is both flat
+    // and paginated across direct and api backends.
+    const physicalSet = new Set<string>();
+    for await (const b of backend.iterateBlobsFlat(container, "")) {
+      physicalSet.add(b.name);
+    }
 
     // 3. Build the full set of tracked blob paths
     const trackedSet = new Set<string>([

@@ -668,7 +668,7 @@
 
       // Fetch links for this container and add indicators
       try {
-        const registry = await apiJson(`/api/links/${currentStorage}/${containerName}`);
+        const registry = await apiJson(withAccount(`/api/links/${currentStorage}/${containerName}`));
         containerLinksCache[containerName] = registry;
         if (registry && registry.links && registry.links.length > 0) {
           // Add sync badge to container node (opens links panel on click)
@@ -2064,7 +2064,7 @@
     syncConfirm.textContent = "Syncing...";
 
     try {
-      const res = await apiJson(`/api/sync/${currentStorage}/${syncTarget.container}`, {
+      const res = await apiJson(withAccount(`/api/sync/${currentStorage}/${syncTarget.container}`), {
         method: "POST",
       });
       syncModal.classList.add("hidden");
@@ -2175,7 +2175,7 @@
       if (targetPrefix) body.targetPrefix = targetPrefix;
       if (repoSubPath) body.repoSubPath = repoSubPath;
 
-      const result = await apiJson(`/api/links/${currentStorage}/${linkTarget.container}`, {
+      const result = await apiJson(withAccount(`/api/links/${currentStorage}/${linkTarget.container}`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -2210,7 +2210,7 @@
     linksPanelModal.classList.remove("hidden");
 
     try {
-      const registry = await apiJson(`/api/links/${currentStorage}/${containerName}`);
+      const registry = await apiJson(withAccount(`/api/links/${currentStorage}/${containerName}`));
       containerLinksCache[containerName] = registry;
       renderLinksPanel(registry, containerName);
     } catch (e) {
@@ -2283,7 +2283,7 @@
     btn.textContent = "Syncing...";
 
     try {
-      const result = await apiJson(`/api/sync-link/${currentStorage}/${containerName}/${linkId}`, {
+      const result = await apiJson(withAccount(`/api/sync-link/${currentStorage}/${containerName}/${linkId}`), {
         method: "POST",
       });
       alert(
@@ -2307,7 +2307,7 @@
     if (!confirm("Remove this link? (Files will not be deleted.)")) return;
 
     try {
-      await apiJson(`/api/links/${currentStorage}/${containerName}/${linkId}`, {
+      await apiJson(withAccount(`/api/links/${currentStorage}/${containerName}/${linkId}`), {
         method: "DELETE",
       });
       // Refresh panel
@@ -2326,7 +2326,7 @@
     btn.textContent = "Diffing...";
 
     try {
-      const report = await apiJson(`/api/diff/${currentStorage}/${containerName}/${linkId}`);
+      const report = await apiJson(withAccount(`/api/diff/${currentStorage}/${containerName}/${linkId}`));
       renderDiffResult(report, containerName);
     } catch (e) {
       handleSyncError(e, "Diff failed", async () => {
@@ -2341,7 +2341,7 @@
   // --- Diff all links ---
   async function diffAllLinks(containerName) {
     try {
-      const data = await apiJson(`/api/diff-all/${currentStorage}/${containerName}`);
+      const data = await apiJson(withAccount(`/api/diff-all/${currentStorage}/${containerName}`));
       renderDiffAllResults(data, containerName);
     } catch (e) {
       handleSyncError(e, "Diff All failed", async () => {
@@ -2457,7 +2457,7 @@
         syncNowBtn.disabled = true;
         syncNowBtn.textContent = "Syncing...";
         try {
-          const result = await apiJson(`/api/sync-link/${currentStorage}/${containerName}/${linkId}`, { method: "POST" });
+          const result = await apiJson(withAccount(`/api/sync-link/${currentStorage}/${containerName}/${linkId}`), { method: "POST" });
           alert(`Sync complete!\nUploaded: ${result.uploaded.length}\nDeleted: ${result.deleted.length}\nSkipped: ${result.skipped.length}\nErrors: ${result.errors.length}`);
           await openLinksPanel(containerName);
           await buildTree();
@@ -2525,7 +2525,7 @@
     linksSyncAll.textContent = "Syncing...";
 
     try {
-      const data = await apiJson(`/api/sync-all/${currentStorage}/${linksPanelContainer}`, {
+      const data = await apiJson(withAccount(`/api/sync-all/${currentStorage}/${linksPanelContainer}`), {
         method: "POST",
       });
 

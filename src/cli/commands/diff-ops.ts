@@ -1,11 +1,10 @@
 import * as fs from "fs";
 import chalk from "chalk";
-import { BlobClient } from "../../core/blob-client.js";
 import { diffLink } from "../../core/diff-engine.js";
 import { resolveLinks, findLinkByPrefix } from "../../core/sync-engine.js";
 import { buildProviderForLink } from "../../core/repo-utils.js";
 import type { DiffReport } from "../../core/types.js";
-import { resolveStorageEntry, type StorageOpts, type PatOpts } from "./shared.js";
+import { resolveStorageBackend, type StorageOpts, type PatOpts } from "./shared.js";
 
 /**
  * Exit code conventions:
@@ -160,11 +159,10 @@ export async function diffContainer(
 ): Promise<void> {
   const { format, showIdentical = false, physicalCheck = false } = opts;
 
-  const { store, entry } = await resolveStorageEntry(storageOpts);
-  const blobClient = new BlobClient(entry);
+  const { store, backend } = await resolveStorageBackend(storageOpts, storageOpts.account);
 
   // Load links registry
-  const registry = await resolveLinks(blobClient, container);
+  const registry = await resolveLinks(backend, container);
   if (registry.links.length === 0) {
     console.error(`Container '${container}' has no repository links configured.`);
     process.exit(2);
@@ -242,7 +240,7 @@ export async function diffContainer(
 
     const { provider, cleanup } = result;
     try {
-      const report = await diffLink(provider, link, blobClient, container, {
+      const report = await diffLink(provider, link, backend, container, {
         includePhysicalCheck: physicalCheck,
         showIdentical,
       });

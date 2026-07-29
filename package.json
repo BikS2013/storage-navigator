@@ -29,13 +29,27 @@
       "package.json"
     ],
     "extraResources": [
-      { "from": "src/electron/public", "to": "public" },
-      { "from": "src/electron/preload.cjs", "to": "preload.cjs" },
-      { "from": "assets", "to": "assets" }
+      {
+        "from": "src/electron/public",
+        "to": "public"
+      },
+      {
+        "from": "src/electron/preload.cjs",
+        "to": "preload.cjs"
+      },
+      {
+        "from": "assets",
+        "to": "assets"
+      }
     ],
     "mac": {
       "target": [
-        { "target": "dmg", "arch": ["arm64"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
       ],
       "category": "public.app-category.developer-tools",
       "icon": "assets/icon.icns",
@@ -82,7 +96,7 @@
     "@types/express": "^5.0.6",
     "@types/node": "^25.5.0",
     "@types/supertest": "^7.2.0",
-    "electron": "^41.1.1",
+    "electron": "^41.10.3",
     "electron-builder": "^26.8.2",
     "esbuild": "^0.27.7",
     "happy-dom": "^20.9.0",
@@ -90,5 +104,9 @@
     "tsx": "^4.21.0",
     "typescript": "^6.0.2",
     "vitest": "^4.1.5"
+  },
+  "allowScripts": {
+    "electron@41.1.1": true,
+    "esbuild@0.27.7": true
   }
 }
