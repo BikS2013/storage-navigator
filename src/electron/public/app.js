@@ -2533,6 +2533,10 @@
       for (const r of data.results) {
         const shortUrl = r.repoUrl.replace(/^https?:\/\//, "").replace(/\.git$/, "");
         summary += `\n${shortUrl}: uploaded=${r.result.uploaded.length}, deleted=${r.result.deleted.length}, errors=${r.result.errors.length}`;
+        // A bare count leaves the user with no way to find out what went
+        // wrong, so include the messages themselves.
+        for (const err of r.result.errors.slice(0, 5)) summary += `\n    ${err}`;
+        if (r.result.errors.length > 5) summary += `\n    ...and ${r.result.errors.length - 5} more`;
       }
       alert(summary);
 
