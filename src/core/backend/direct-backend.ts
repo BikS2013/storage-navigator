@@ -9,6 +9,7 @@ import type {
 } from './backend.js';
 import { BlobClient } from '../blob-client.js';
 import { FileShareClient } from '../file-share-client.js';
+import { streamToBuffer } from '../../util/stream.js';
 
 export class DirectBackend implements IStorageBackend {
   private readonly blob: BlobClient;
@@ -69,7 +70,7 @@ export class DirectBackend implements IStorageBackend {
     // discriminator. Same pattern as FileShareClient.uploadFile (T7).
     const buf: Buffer = body instanceof Buffer
       ? body
-      : await readStreamToBuffer(body as NodeJS.ReadableStream, sizeBytes);
+      : await streamToBuffer(body as NodeJS.ReadableStream);
     return this.blob.uploadBlob(container, path, buf, contentType);
   }
   async deleteBlob(container: string, path: string): Promise<void> {
@@ -123,12 +124,4 @@ export class DirectBackend implements IStorageBackend {
   async deleteFileFolder(share: string, path: string) {
     return this.file.deleteFileFolder(share, path);
   }
-}
-
-async function readStreamToBuffer(stream: NodeJS.ReadableStream, _hintSize: number): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of stream) {
-    chunks.push(chunk instanceof Buffer ? chunk : Buffer.from(chunk));
-  }
-  return Buffer.concat(chunks);
 }

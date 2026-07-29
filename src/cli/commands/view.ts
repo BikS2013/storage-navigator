@@ -1,14 +1,7 @@
 import mammoth from "mammoth";
 import { resolveStorageBackend, type StorageOpts } from "./shared.js";
 import type { BlobReadHandle } from "../../core/backend/backend.js";
-
-async function streamToBuffer(stream: NodeJS.ReadableStream): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of stream) {
-    chunks.push(chunk instanceof Buffer ? chunk : Buffer.from(chunk));
-  }
-  return Buffer.concat(chunks);
-}
+import { streamToBuffer } from "../../util/stream.js";
 
 export async function viewBlob(
   storageOpts: StorageOpts,

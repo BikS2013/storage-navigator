@@ -12,9 +12,8 @@ import { confirmDestructive } from "./confirm.js";
 import { cloneGitHub, cloneDevOps, syncContainer } from "../../cli/commands/repo-sync.js";
 import { linkGitHub, linkDevOps, unlinkContainer, listLinks } from "../../cli/commands/link-ops.js";
 import { diffContainer } from "../../cli/commands/diff-ops.js";
-import { resolveStorageEntry } from "../../cli/commands/shared.js";
+import { resolveStorageBackend } from "../../cli/commands/shared.js";
 import { resolveLinks, findLinkByPrefix } from "../../core/sync-engine.js";
-import { BlobClient } from "../../core/blob-client.js";
 import type { StorageOpts } from "../../cli/commands/shared.js";
 
 const storageSchema = {
@@ -36,9 +35,8 @@ export function createListLinksTool(cfg: AgentConfig): StructuredToolInterface {
     async (input) => {
       try {
         const opts: StorageOpts = { storage: input.storage, account: input.account, accountKey: input.accountKey, sasToken: input.sasToken };
-        const { entry } = await resolveStorageEntry(opts);
-        const blobClient = new BlobClient(entry);
-        const registry = await resolveLinks(blobClient, input.container);
+        const { backend } = await resolveStorageBackend(opts, opts.account);
+        const registry = await resolveLinks(backend, input.container);
         return truncateToolResult(registry.links, cfg.perToolBudgetBytes);
       } catch (err) {
         return handleToolError(err);
@@ -251,9 +249,8 @@ export function createDiffTool(cfg: AgentConfig): StructuredToolInterface {
         // Redirect stdout to capture output since diffContainer writes to console
         // For agent use, we return structured JSON from the diff engine directly
         const opts: StorageOpts = { storage: input.storage, account: input.account, accountKey: input.accountKey, sasToken: input.sasToken };
-        const { entry } = await resolveStorageEntry(opts);
-        const blobClient = new BlobClient(entry);
-        const registry = await resolveLinks(blobClient, input.container);
+        const { backend } = await resolveStorageBackend(opts, opts.account);
+        const registry = await resolveLinks(backend, input.container);
 
         if (registry.links.length === 0) {
           return JSON.stringify({ error: { code: "NO_LINKS", message: `Container '${input.container}' has no repository links.` } });

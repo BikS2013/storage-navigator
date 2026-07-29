@@ -57,10 +57,11 @@ function backendFor(req: express.Request, store: CredentialStore): IStorageBacke
 }
 
 /**
- * Narrow a StorageEntry to a DirectStorageEntry. The sync/links/diff
- * endpoints still depend on BlobClient + sync-engine, which only know how
- * to talk to direct backends. T21 leaves that surface alone — it will be
- * lifted in a later task once sync-engine itself moves to IStorageBackend.
+ * Narrow a StorageEntry to a DirectStorageEntry. Only the reverse-git
+ * (publish/push) endpoints still need this: `reverse-sync-engine` and
+ * `blob-enumerator` take a concrete BlobClient, and the enumerator's
+ * per-blob ETag HEAD would become one HTTP round-trip per blob over an api
+ * backend. Forward sync/links/diff now go through `backendFor`.
  */
 function requireDirect(entry: StorageEntry, res: express.Response): DirectStorageEntry | null {
   if (entry.kind === 'direct') return entry;
@@ -68,6 +69,16 @@ function requireDirect(entry: StorageEntry, res: express.Response): DirectStorag
     error: "This endpoint currently only supports direct storage backends.",
   });
   return null;
+}
+
+/**
+ * Send an error thrown by a storage backend, preserving its HTTP status so
+ * an api backend's 401/403 reaches the UI as-is instead of collapsing to 500.
+ */
+function sendBackendError(res: express.Response, err: unknown): void {
+  const s = (err as { status?: unknown }).status;
+  const status = typeof s === "number" && s >= 400 && s <= 599 ? s : 500;
+  res.status(status).json({ error: err instanceof Error ? err.message : String(err) });
 }
 
 const __filename = fileURLToPath(import.meta.url);
@@ -734,7 +745,7 @@ export function buildApp(publicDirOverride?: string): express.Express {
   });
 
   // ============================================================
-  // Sync / Links / Diff (still direct-only — see requireDirect note)
+  // Sync / Links / Diff — works against direct and api backends
   // ============================================================
 
   // API: Get sync metadata for a container (backward compatible)
@@ -744,16 +755,14 @@ export function buildApp(publicDirOverride?: string): express.Express {
       const store = new CredentialStore();
       const entry = store.getStorage(req.params.storage);
       if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
-      const direct = requireDirect(entry, res);
-      if (!direct) return;
-      const client = new BlobClient(direct);
+      const backend = backendFor(req, store);
 
       // Try the legacy .repo-sync-meta.json first
-      const meta = await readSyncMeta(client, req.params.container);
+      const meta = await readSyncMeta(backend, req.params.container);
       if (meta) { res.json(meta); return; }
 
       // Fall back to .repo-links.json — convert first link to old format
-      const registry = await resolveLinks(client, req.params.container);
+      const registry = await resolveLinks(backend, req.params.container);
       if (registry.links.length > 0) {
         const link = registry.links[0];
         const legacyMeta = {
@@ -770,8 +779,7 @@ export function buildApp(publicDirOverride?: string): express.Express {
 
       res.json(null);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      res.status(500).json({ error: msg });
+      sendBackendError(res, err);
     }
   });
 
@@ -781,12 +789,10 @@ export function buildApp(publicDirOverride?: string): express.Express {
       const store = new CredentialStore();
       const entry = store.getStorage(req.params.storage);
       if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
-      const direct = requireDirect(entry, res);
-      if (!direct) return;
-      const blobClient = new BlobClient(direct);
+      const backend = backendFor(req, store);
 
       // Resolve links (auto-migrates from old .repo-sync-meta.json if needed)
-      const registry = await resolveLinks(blobClient, req.params.container);
+      const registry = await resolveLinks(backend, req.params.container);
       if (registry.links.length === 0) {
         res.status(400).json({ error: "Container is not a synced repository" });
         return;
@@ -808,7 +814,7 @@ export function buildApp(publicDirOverride?: string): express.Express {
       const dryRun = req.query.dryRun === "true";
       let result: SyncResult;
       try {
-        result = await syncRepo(blobClient, req.params.container, built.provider, link, dryRun);
+        result = await syncRepo(backend, req.params.container, built.provider, link, dryRun);
       } finally {
         built.cleanup?.();
       }
@@ -817,13 +823,12 @@ export function buildApp(publicDirOverride?: string): express.Express {
       if (!dryRun) {
         const idx = registry.links.findIndex((l) => l.id === link.id);
         if (idx >= 0) registry.links[idx] = link;
-        await writeLinks(blobClient, req.params.container, registry);
+        await writeLinks(backend, req.params.container, registry);
       }
 
       res.json(result);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      res.status(500).json({ error: msg });
+      sendBackendError(res, err);
     }
   });
 
@@ -837,14 +842,11 @@ export function buildApp(publicDirOverride?: string): express.Express {
       const store = new CredentialStore();
       const entry = store.getStorage(req.params.storage);
       if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
-      const direct = requireDirect(entry, res);
-      if (!direct) return;
-      const client = new BlobClient(direct);
-      const registry = await resolveLinks(client, req.params.container);
+      const backend = backendFor(req, store);
+      const registry = await resolveLinks(backend, req.params.container);
       res.json(registry);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      res.status(500).json({ error: msg });
+      sendBackendError(res, err);
     }
   });
 
@@ -865,10 +867,8 @@ export function buildApp(publicDirOverride?: string): express.Express {
         return;
       }
 
-      const direct = requireDirect(entry, res);
-      if (!direct) return;
-      const client = new BlobClient(direct);
-      const result = await createLink(client, req.params.container, {
+      const backend = backendFor(req, store);
+      const result = await createLink(backend, req.params.container, {
         provider,
         repoUrl,
         branch,
@@ -883,7 +883,7 @@ export function buildApp(publicDirOverride?: string): express.Express {
       if (msg.includes("A link already exists for prefix")) {
         res.status(409).json({ error: msg });
       } else {
-        res.status(500).json({ error: msg });
+        sendBackendError(res, err);
       }
     }
   });
@@ -895,18 +895,15 @@ export function buildApp(publicDirOverride?: string): express.Express {
       const entry = store.getStorage(req.params.storage);
       if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
 
-      const direct = requireDirect(entry, res);
-      if (!direct) return;
-      const client = new BlobClient(direct);
-      const removed = await removeLink(client, req.params.container, req.params.linkId);
+      const backend = backendFor(req, store);
+      const removed = await removeLink(backend, req.params.container, req.params.linkId);
       if (!removed) {
         res.status(404).json({ error: "Link not found" });
         return;
       }
       res.json({ success: true });
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      res.status(500).json({ error: msg });
+      sendBackendError(res, err);
     }
   });
 
@@ -917,10 +914,8 @@ export function buildApp(publicDirOverride?: string): express.Express {
       const entry = store.getStorage(req.params.storage);
       if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
 
-      const direct = requireDirect(entry, res);
-      if (!direct) return;
-      const blobClient = new BlobClient(direct);
-      const registry = await resolveLinks(blobClient, req.params.container);
+      const backend = backendFor(req, store);
+      const registry = await resolveLinks(backend, req.params.container);
       const link = registry.links.find((l) => l.id === req.params.linkId);
       if (!link) {
         res.status(404).json({ error: "Link not found" });
@@ -936,7 +931,7 @@ export function buildApp(publicDirOverride?: string): express.Express {
       const dryRun = req.query.dryRun === "true";
       let result: SyncResult;
       try {
-        result = await syncRepo(blobClient, req.params.container, built.provider, link, dryRun);
+        result = await syncRepo(backend, req.params.container, built.provider, link, dryRun);
       } finally {
         built.cleanup?.();
       }
@@ -944,13 +939,12 @@ export function buildApp(publicDirOverride?: string): express.Express {
       if (!dryRun) {
         const idx = registry.links.findIndex((l) => l.id === link.id);
         if (idx >= 0) registry.links[idx] = link;
-        await writeLinks(blobClient, req.params.container, registry);
+        await writeLinks(backend, req.params.container, registry);
       }
 
       res.json(result);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      res.status(500).json({ error: msg });
+      sendBackendError(res, err);
     }
   });
 
@@ -961,10 +955,8 @@ export function buildApp(publicDirOverride?: string): express.Express {
       const entry = store.getStorage(req.params.storage);
       if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
 
-      const direct = requireDirect(entry, res);
-      if (!direct) return;
-      const blobClient = new BlobClient(direct);
-      const registry = await resolveLinks(blobClient, req.params.container);
+      const backend = backendFor(req, store);
+      const registry = await resolveLinks(backend, req.params.container);
 
       if (registry.links.length === 0) {
         res.status(400).json({ error: "No links configured in this container" });
@@ -988,7 +980,7 @@ export function buildApp(publicDirOverride?: string): express.Express {
             continue;
           }
 
-          const result = await syncRepo(blobClient, req.params.container, built.provider, link, dryRun);
+          const result = await syncRepo(backend, req.params.container, built.provider, link, dryRun);
 
           if (!dryRun) {
             const idx = registry.links.findIndex((l) => l.id === link.id);
@@ -1011,13 +1003,12 @@ export function buildApp(publicDirOverride?: string): express.Express {
 
       // Write updated registry once at the end (unless dry run)
       if (!dryRun) {
-        await writeLinks(blobClient, req.params.container, registry);
+        await writeLinks(backend, req.params.container, registry);
       }
 
       res.json({ results });
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      res.status(500).json({ error: msg });
+      sendBackendError(res, err);
     }
   });
 
@@ -1028,10 +1019,8 @@ export function buildApp(publicDirOverride?: string): express.Express {
       const entry = store.getStorage(req.params.storage);
       if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
 
-      const direct = requireDirect(entry, res);
-      if (!direct) return;
-      const blobClient = new BlobClient(direct);
-      const registry = await resolveLinks(blobClient, req.params.container);
+      const backend = backendFor(req, store);
+      const registry = await resolveLinks(backend, req.params.container);
       const link = registry.links.find((l) => l.id === req.params.linkId);
       if (!link) {
         res.status(404).json({ error: "Link not found" });
@@ -1049,15 +1038,14 @@ export function buildApp(publicDirOverride?: string): express.Express {
 
       let report: DiffReport;
       try {
-        report = await diffLink(built.provider, link, blobClient, req.params.container, { includePhysicalCheck, showIdentical });
+        report = await diffLink(built.provider, link, backend, req.params.container, { includePhysicalCheck, showIdentical });
       } finally {
         built.cleanup?.();
       }
 
       res.json(report);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      res.status(500).json({ error: msg });
+      sendBackendError(res, err);
     }
   });
 
@@ -1068,10 +1056,8 @@ export function buildApp(publicDirOverride?: string): express.Express {
       const entry = store.getStorage(req.params.storage);
       if (!entry) { res.status(404).json({ error: "Storage not found" }); return; }
 
-      const direct = requireDirect(entry, res);
-      if (!direct) return;
-      const blobClient = new BlobClient(direct);
-      const registry = await resolveLinks(blobClient, req.params.container);
+      const backend = backendFor(req, store);
+      const registry = await resolveLinks(backend, req.params.container);
 
       if (registry.links.length === 0) {
         res.status(400).json({ error: "No links configured in this container" });
@@ -1092,7 +1078,7 @@ export function buildApp(publicDirOverride?: string): express.Express {
             return;
           }
 
-          const report = await diffLink(built.provider, link, blobClient, req.params.container, { includePhysicalCheck, showIdentical });
+          const report = await diffLink(built.provider, link, backend, req.params.container, { includePhysicalCheck, showIdentical });
           results.push({ linkId: link.id, provider: link.provider, repoUrl: link.repoUrl, report });
         } finally {
           built?.cleanup?.();
@@ -1101,8 +1087,7 @@ export function buildApp(publicDirOverride?: string): express.Express {
 
       res.json({ results });
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      res.status(500).json({ error: msg });
+      sendBackendError(res, err);
     }
   });
 

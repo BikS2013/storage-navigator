@@ -199,11 +199,11 @@ export async function resolveGitHubCredential(
 export async function resolveStorageBackend(
   opts: StorageOpts,
   accountName?: string,
-): Promise<{ entry: StorageEntry; backend: IStorageBackend }> {
-  const { entry } = await resolveStorageEntry(opts);
+): Promise<{ store: CredentialStore; entry: StorageEntry; backend: IStorageBackend }> {
+  const { store, entry } = await resolveStorageEntry(opts);
   if (entry.kind === 'api') {
     if (!accountName) throw new Error('--account is required when using an api backend');
-    return { entry, backend: makeBackend(entry, accountName) };
+    return { store, entry, backend: makeBackend(entry, accountName) };
   }
-  return { entry, backend: makeBackend(entry) };
+  return { store, entry, backend: makeBackend(entry) };
 }

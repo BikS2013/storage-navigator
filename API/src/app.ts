@@ -37,7 +37,11 @@ export type BuildAppOptions = {
 export function buildApp(opts: BuildAppOptions): Express {
   const app = express();
   app.disable('x-powered-by');
-  app.use(express.json({ limit: '1mb' }));
+  // PUT is upload-only (blobs and files) and the handler streams `req`
+  // straight into Azure. Letting the JSON parser run would drain that stream
+  // first, so an `application/json` upload would hang until the client gave
+  // up. Every route that actually wants a parsed JSON body is a POST.
+  app.use(express.json({ limit: '1mb', type: (req) => req.method !== 'PUT' && isJsonContentType(req.headers['content-type']) }));
   app.use(requestIdMiddleware());
 
   app.use(
@@ -89,4 +93,11 @@ function buildAuthMiddleware(config: Config): RequestHandler {
     });
   }
   return anonymousPrincipalMiddleware(config.oidc.anonRole);
+}
+
+/** Mirrors the default `express.json()` type test: any JSON or `+json` media type. */
+function isJsonContentType(header: string | undefined): boolean {
+  if (!header) return false;
+  const mediaType = (header.split(';')[0] ?? '').trim().toLowerCase();
+  return mediaType === 'application/json' || mediaType.endsWith('+json');
 }

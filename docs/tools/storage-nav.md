@@ -151,6 +151,11 @@
           All repo commands (clone-github, clone-devops, sync, link-github, link-devops, unlink, list-links) also accept:
             --account-key, --sas-token, --account for inline storage credentials
 
+          Repo commands (clone-*, link-*, sync, unlink, list-links, diff) work against
+          api backends too, via `--storage <api-backend-name> --account <azure-account>`.
+          The api backend enforces RBAC: linking and syncing write blobs, so the token
+          needs the StorageWriter role. A StorageReader token is rejected with 403.
+
           diff         Compare container blobs against linked remote repository (read-only)
             --container <name>    Container name (required)
             --storage <name>      Storage account (optional)
@@ -255,8 +260,9 @@
             --share <name>        Share name
             --path <dir>          Directory path
 
-          All blob commands (containers, ls, view, etc.) accept api backends
-          via `--storage <api-backend-name> --account <azure-account>`.
+          All blob and repo commands (containers, ls, view, link-*, sync, diff, etc.)
+          accept api backends via `--storage <api-backend-name> --account <azure-account>`.
+          Reverse-git commands (publish-*, push, reverse-*) remain direct-only.
 
         Examples:
 

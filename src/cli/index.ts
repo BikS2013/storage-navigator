@@ -330,7 +330,7 @@ program
   .option("--pat <token>", "GitHub PAT (inline, overrides stored token)")
   .option("--account-key <key>", "Account key (inline)")
   .option("--sas-token <token>", "SAS token (inline)")
-  .option("--account <account>", "Azure Storage account name (with inline key/token)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token; required for api backends)")
   .action(async (opts) => {
     await cloneGitHub(opts.repo, opts.container, { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.branch, { pat: opts.pat, tokenName: opts.tokenName }, opts.prefix, opts.repoPath);
   });
@@ -349,7 +349,7 @@ program
   .option("--pat <token>", "Azure DevOps PAT (inline, overrides stored token)")
   .option("--account-key <key>", "Account key (inline)")
   .option("--sas-token <token>", "SAS token (inline)")
-  .option("--account <account>", "Azure Storage account name (with inline key/token)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token; required for api backends)")
   .action(async (opts) => {
     await cloneDevOps(opts.repo, opts.container, { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.branch, { pat: opts.pat, tokenName: opts.tokenName }, opts.prefix, opts.repoPath);
   });
@@ -366,7 +366,7 @@ program
   .option("--repo-path <path>", "Sub-path within the repo to sync")
   .option("--account-key <key>", "Account key (inline)")
   .option("--sas-token <token>", "SAS token (inline)")
-  .option("--account <account>", "Azure Storage account name (with inline key/token)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token; required for api backends)")
   .action(async (opts) => {
     await cloneSsh(opts.repo, opts.container, { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.branch, opts.prefix, opts.repoPath);
   });
@@ -385,7 +385,7 @@ program
   .option("--token-name <name>", "PAT token name")
   .option("--account-key <key>", "Account key (inline)")
   .option("--sas-token <token>", "SAS token (inline)")
-  .option("--account <account>", "Azure Storage account name (with inline key/token)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token; required for api backends)")
   .action(async (opts) => {
     await syncContainer(opts.container, { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.dryRun ?? false, { pat: opts.pat, tokenName: opts.tokenName }, opts.prefix, opts.linkId, opts.all ?? false);
   });
@@ -404,7 +404,7 @@ program
   .option("--pat <token>", "GitHub PAT (inline, overrides stored token)")
   .option("--account-key <key>", "Account key (inline)")
   .option("--sas-token <token>", "SAS token (inline)")
-  .option("--account <account>", "Azure Storage account name (with inline key/token)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token; required for api backends)")
   .action(async (opts) => {
     await linkGitHub(opts.repo, opts.container, { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.branch, opts.prefix, opts.repoPath, { pat: opts.pat, tokenName: opts.tokenName });
   });
@@ -423,7 +423,7 @@ program
   .option("--pat <token>", "Azure DevOps PAT (inline, overrides stored token)")
   .option("--account-key <key>", "Account key (inline)")
   .option("--sas-token <token>", "SAS token (inline)")
-  .option("--account <account>", "Azure Storage account name (with inline key/token)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token; required for api backends)")
   .action(async (opts) => {
     await linkDevOps(opts.repo, opts.container, { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.branch, opts.prefix, opts.repoPath, { pat: opts.pat, tokenName: opts.tokenName });
   });
@@ -440,7 +440,7 @@ program
   .option("--storage <name>", "Storage account name (uses first if omitted)")
   .option("--account-key <key>", "Account key (inline)")
   .option("--sas-token <token>", "SAS token (inline)")
-  .option("--account <account>", "Azure Storage account name (with inline key/token)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token; required for api backends)")
   .action(async (opts) => {
     await linkSsh(opts.repo, opts.container, { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.branch, opts.prefix, opts.repoPath);
   });
@@ -455,7 +455,7 @@ program
   .option("--storage <name>", "Storage account name (uses first if omitted)")
   .option("--account-key <key>", "Account key (inline)")
   .option("--sas-token <token>", "SAS token (inline)")
-  .option("--account <account>", "Azure Storage account name (with inline key/token)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token; required for api backends)")
   .action(async (opts) => {
     await unlinkContainer(opts.container, { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account }, opts.linkId, opts.prefix);
   });
@@ -468,7 +468,7 @@ program
   .option("--storage <name>", "Storage account name (uses first if omitted)")
   .option("--account-key <key>", "Account key (inline)")
   .option("--sas-token <token>", "SAS token (inline)")
-  .option("--account <account>", "Azure Storage account name (with inline key/token)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token; required for api backends)")
   .action(async (opts) => {
     await listLinks(opts.container, { storage: opts.storage, accountKey: opts.accountKey, sasToken: opts.sasToken, account: opts.account });
   });
@@ -481,7 +481,7 @@ program
   .option("--storage <name>", "Storage account name (uses first if omitted)")
   .option("--account-key <key>", "Inline account key")
   .option("--sas-token <token>", "Inline SAS token")
-  .option("--account <account>", "Azure Storage account name (required with inline key/token)")
+  .option("--account <account>", "Azure Storage account name (with inline key/token; required for api backends)")
   .option("--pat <token>", "Inline PAT (overrides stored token)")
   .option("--token-name <name>", "PAT token name to use")
   .option("--prefix <path>", "Diff only the link at this target prefix")

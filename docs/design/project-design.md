@@ -5694,9 +5694,11 @@ Storage Navigator client supports three backend kinds:
 |---|---|---|---|---|
 | `direct` (account-key) | Account key | yes | yes | Existing default |
 | `direct` (sas-token) | SAS token | yes | yes | Existing |
-| `api` | OIDC (Bearer JWT) or anonymous | yes | no (deferred) | Added in Plan 007; talks to the deployed Storage Navigator API |
+| `api` | OIDC (Bearer JWT) or anonymous | yes | yes (forward only, Plan 015) | Added in Plan 007; talks to the deployed Storage Navigator API |
 
 All consumers route through `IStorageBackend` (`src/core/backend/backend.ts`). The factory `makeBackend(entry, account?)` dispatches by `kind`.
+
+Forward repo sync (link / clone / sync / diff) works against both kinds as of Plan 015 — see `docs/design/plan-015-forward-sync-api-backend.md`. Reverse-git publication (`publish-*`, `push`, `reverse-*`) remains direct-only: `reverse-sync-engine.ts` and `blob-enumerator.ts` still take a concrete `BlobClient`, and the enumerator's per-blob ETag `HEAD` would become one HTTP round-trip per blob over an api backend. `requireDirect()` in `src/electron/server.ts` now guards only that surface.
 
 
 ## Agent Subcommand (Plan 009)
