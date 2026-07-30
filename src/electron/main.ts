@@ -6,7 +6,7 @@
  */
 import { app, BrowserWindow, ipcMain, shell, safeStorage, dialog, type IpcMainInvokeEvent } from "electron";
 import * as path from "path";
-import { createServer } from "./server.js";
+import { startServer } from "./server.js";
 import { generatePkce, buildAuthorizeUrl, exchangeCode } from "../core/backend/auth/oidc-client.js";
 import { startLoopback } from "./oidc-loopback.js";
 import { TokenStore } from "../core/backend/auth/token-store.js";
@@ -151,12 +151,27 @@ ipcMain.handle('shell:open-external', async (_event, rawUrl: string) => {
 // Set app name so macOS shows "Storage Navigator" in the app switcher/menu bar
 app.name = "Storage Navigator";
 
-// Parse port from command args (electron strips its own args, remaining are ours)
-let port = 3100;
-const portIdx = process.argv.indexOf("--port");
-if (portIdx !== -1 && process.argv[portIdx + 1]) {
-  port = parseInt(process.argv[portIdx + 1], 10);
-}
+// Parse port from command args (electron strips its own args, remaining are ours).
+//
+// A port is OPTIONAL. When one is given (`--port N`, i.e. the user configured
+// it) we bind exactly that port and fail loudly if it is taken — never
+// silently substituting a configured value. When none is given — which is
+// every Finder/dock launch of the packaged app, where nothing has been
+// configured — we ask the OS for a free port. The previous hardcoded 3100
+// default made the app unlaunchable from the OS whenever 3100 was in use: the
+// unhandled EADDRINUSE left the window pointing at a dead origin (blank page).
+const requestedPort: number | null = (() => {
+  const idx = process.argv.indexOf("--port");
+  if (idx === -1 || !process.argv[idx + 1]) return null;
+  const parsed = Number.parseInt(process.argv[idx + 1], 10);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65535) {
+    throw new Error(`Invalid --port value: ${process.argv[idx + 1]}`);
+  }
+  return parsed;
+})();
+
+/** The port actually bound; set once the server is listening. */
+let port = 0;
 
 // Resolve runtime resources depending on whether we run packaged or in dev.
 //
@@ -173,10 +188,26 @@ const ASSET_BASE = app.isPackaged ? process.resourcesPath : process.cwd();
 
 const publicDir = path.join(RES_BASE, "public");
 
-// Start Express server
-createServer(port, publicDir);
+app.whenReady().then(async () => {
+  // Bind the server BEFORE creating the window: the window's URL depends on the
+  // port the OS actually gave us, and a bind failure must surface as a dialog
+  // rather than a window pointing at nothing.
+  try {
+    const started = await startServer(requestedPort ?? 0, publicDir);
+    port = started.port;
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    dialog.showErrorBox(
+      "Storage Navigator could not start",
+      `${detail}\n\n` +
+        (requestedPort !== null
+          ? `Retry without --port to let the app pick a free port automatically.`
+          : `The local server could not bind to a port on 127.0.0.1.`)
+    );
+    app.quit();
+    return;
+  }
 
-app.whenReady().then(() => {
   const iconPath = path.join(ASSET_BASE, "assets", "icon.png");
 
   // Set macOS dock icon
@@ -206,7 +237,18 @@ app.whenReady().then(() => {
     },
   });
 
-  win.loadURL(`http://localhost:${port}`);
+  // A failed first load used to leave an unexplained blank window. Report it
+  // instead — the renderer's own origin is the only thing being loaded here, so
+  // a failure means the embedded server or its files are unreachable.
+  win.webContents.once("did-fail-load", (_e, errorCode, errorDescription, validatedURL) => {
+    dialog.showErrorBox(
+      "Storage Navigator could not load its interface",
+      `Failed to load ${validatedURL}\n\n${errorDescription} (${errorCode})\n\n` +
+        `Expected the interface files at:\n${publicDir}`
+    );
+  });
+
+  win.loadURL(`http://127.0.0.1:${port}`);
 
   // Any <a target="_blank"> or window.open() from the renderer (including from
   // inside the sandboxed iframe used by the HTML viewer) would otherwise spawn

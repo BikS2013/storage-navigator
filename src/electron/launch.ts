@@ -14,7 +14,12 @@ const require = createRequire(import.meta.url);
  * Strategy: Use tsx to compile the Electron main.ts to a temp JS file,
  * then launch the Electron binary with that JS file.
  */
-export function launchElectronApp(port: number): void {
+/**
+ * @param port Optional. When omitted, the Electron main process asks the OS for
+ *             a free port — the same path a Finder/dock launch of the packaged
+ *             app takes. When given, that exact port is bound or startup fails.
+ */
+export function launchElectronApp(port?: number): void {
   const projectRoot = path.resolve(__dirname, "..", "..");
   const electronMainTs = path.join(__dirname, "main.ts");
 
@@ -109,9 +114,14 @@ export function launchElectronApp(port: number): void {
     }
   }
 
-  console.log(`Launching Storage Navigator (Electron) on port ${port}...`);
+  console.log(
+    port === undefined
+      ? "Launching Storage Navigator (Electron) on an OS-assigned port..."
+      : `Launching Storage Navigator (Electron) on port ${port}...`
+  );
 
-  const child = spawn(launchBin, [outFile, "--port", String(port)], {
+  const args = port === undefined ? [outFile] : [outFile, "--port", String(port)];
+  const child = spawn(launchBin, args, {
     stdio: "inherit",
     cwd: projectRoot,
     env: { ...process.env },

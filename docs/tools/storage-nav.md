@@ -169,7 +169,43 @@
 
             Exit codes: 0=in sync, 1=differences found, 2=fatal error
 
-          ui           Launch web/Electron UI (--port <port>, default 3100)
+          ui           Launch the Electron desktop app
+            --port <port>       Bind this exact port. Omit it (the default) to
+                                 let the OS assign a free one — the same path a
+                                 Finder/dock launch of the packaged .app takes.
+                                 When given, the port is never substituted: if
+                                 it is busy, startup fails with an error dialog
+                                 naming the port instead of opening a window.
+
+                       Running from the OS: `npm run dist:mac` builds
+                       release/mac-arm64/Storage Navigator.app plus a DMG; copy
+                       the .app into /Applications and launch it from Finder,
+                       Spotlight or the dock. It embeds its own server on an
+                       OS-assigned port, so it never collides with a running
+                       `npm run ui` instance. The renderer ships as
+                       extraResources (a copy of src/electron/public), so
+                       renderer changes require a repackage to reach the .app.
+
+                       In-place editing: files the server marks editable
+                       (x-editable response header) get an Edit button in the
+                       content header. Inside the editor:
+
+                         Cmd/Ctrl+F        open the find bar (seeded from the
+                                            current single-line selection)
+                         Enter / Shift+Enter    next / previous match
+                         Cmd/Ctrl+G / F3        next match (+Shift = previous)
+                         Escape                 close, leaving the caret on the
+                                                 match last visited
+                         Aa / ab / .*      match case / whole word / regex
+                                            (persist across files)
+
+                       Every match is highlighted live; the active one is
+                       highlighted distinctly and scrolled into view. The count
+                       reads "3 of 67", "No results", or "Invalid pattern" for a
+                       malformed regex. Highlighting stops after 5000 matches —
+                       the count then reads "N+" and says so in its tooltip.
+                       Find is available in edit mode only (see FR-ED-FIND-* in
+                       docs/design/project-functions.md).
 
           add-api      Register a Storage Navigator API as a backend
             --name <name>         Display name

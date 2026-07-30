@@ -128,6 +128,7 @@ Shared resolution logic is in `src/cli/commands/shared.ts` (`resolveStorageEntry
 - Custom app icon and "Storage Navigator" branding in macOS dock
 - Sync badge on containers that mirror a repository
 - Sync confirmation modal showing repo URL, branch, last sync time, and file count
+- In-place text editing of editable files, with a Cmd/Ctrl+F find bar that highlights every match (see FR-ED-FIND-*)
 
 ## RBAC API (`API/`)
 
@@ -524,3 +525,46 @@ Provenance: refined request `docs/reference/refined-request-macos-ui-redesign.md
 | FR-UI14-7 | Zero functional/behavioral change to any existing feature; `index.html` contains no inline `style="…"` attributes; scrollbars revert to native macOS overlay behavior (no `::-webkit-scrollbar` styling). |
 
 Status: implemented (2026-07-04, plan-014 executed; verified via `npm run build`, `test_scripts/check-dom-contract.mjs`, `npm test` (685 green), light+dark visual smoke, and computed WCAG contrast checks).
+
+---
+
+## Editor Find & Highlight (FR-ED-FIND-*, registered 2026-07-30)
+
+Design: `docs/design/project-design.md` § "2026-07-30 — Editor find bar with live match highlighting". Harness: `test_scripts/serve-editor-harness.mjs`.
+
+### Functional Requirements (FR-ED-FIND-*)
+
+| ID | Requirement |
+|---|---|
+| FR-ED-FIND-1 | While a file is open in edit mode, Cmd/Ctrl+F opens a find bar floating at the top-right of the editor. When the textarea holds a single-line selection, that text seeds the query. Pressing Cmd/Ctrl+F again re-focuses and selects the query input. The shortcut calls `preventDefault()`, so the host browser's own find-in-page never opens over the app. |
+| FR-ED-FIND-2 | Every instance of the query is highlighted in place as the user types; the active match is highlighted distinctly from the others. Highlights track the textarea exactly — same wrapping, same scroll position, correct through resizes, tabs, HTML-special characters and wrapped long lines. |
+| FR-ED-FIND-3 | The bar reports position and total ("3 of 67"), "No results" when nothing matches, and "Invalid pattern" for a malformed regular expression (input and count marked in red, navigation disabled). |
+| FR-ED-FIND-4 | Enter / Shift+Enter, Cmd/Ctrl+G / Shift+Cmd/Ctrl+G, F3 / Shift+F3, and the ‹ › buttons step to the next/previous match with wraparound; the active match is scrolled into view when it is off-screen or behind the find bar. |
+| FR-ED-FIND-5 | Three toggles: match case (`Aa`), whole word (`ab`), regular expression (`.*`). Literal queries are regex-escaped. The query and all three toggles persist across files for the session; matches are recomputed per file. |
+| FR-ED-FIND-6 | Escape (or the × button) closes the bar, clears the highlights, returns focus to the textarea, and leaves the caret selecting the match the user was last on. |
+| FR-ED-FIND-7 | Editing the file with the bar open recomputes and repaints the matches without losing the current position; the existing dirty-tracking, Save/Cancel state and ETag save path are unaffected. |
+| FR-ED-FIND-8 | Highlighting is capped at 5000 matches (one DOM node per match is created per keystroke). When the cap is reached the count reads "N+" and its tooltip states the limit — the truncation is never silent. |
+| FR-ED-FIND-9 | Find is scoped to edit mode. Read-only viewers (markdown, JSON, text, DOCX, HTML, PDF) are unchanged. |
+| FR-ED-FIND-11 | Edit mode shows a find affordance in the content header (magnifier + the platform-correct shortcut label, `⌘F` on macOS / `Ctrl+F` elsewhere) so the shortcut is discoverable. It doubles as the toggle: click opens the bar and focuses the query input, click again closes it, and it renders accent-filled while the bar is open. It is present only in edit mode. |
+| FR-ED-FIND-10 | No new runtime dependency; no change to the DOM contract enforced by `test_scripts/check-dom-contract.mjs`; works in both light and dark themes and honors `prefers-reduced-transparency`. |
+
+Status: implemented (2026-07-30) — verified end-to-end in Chrome via `test_scripts/serve-editor-harness.mjs`; `test_scripts/check-dom-contract.mjs` green (145 IDs).
+
+---
+
+## Desktop launch from the OS (FR-OS-*, registered 2026-07-30)
+
+Design: `docs/design/project-design.md` § "2026-07-30 addendum — Find affordance, and reliable launch from the OS". Packaging: `docs/design/plan-013-macos-standalone-app.md`.
+
+### Functional Requirements (FR-OS-*)
+
+| ID | Requirement |
+|---|---|
+| FR-OS-1 | The packaged macOS `.app` launches from Finder, Spotlight or the dock with no arguments and no configuration, and reaches a working window. |
+| FR-OS-2 | With no `--port`, the embedded server binds an OS-assigned free port and the window URL is built from the port actually bound. A launch therefore never fails because another process (including a running `npm run ui`) holds a particular port. |
+| FR-OS-3 | With an explicit `--port N`, exactly that port is bound. A busy port is a hard failure with an error dialog naming it — a configured value is never silently substituted (project no-fallback rule). |
+| FR-OS-4 | Startup failures are visible, never a blank window: a bind failure shows an error dialog and quits before any window opens; a first-load failure shows a dialog naming the failed URL and the directory the interface files were expected in. |
+| FR-OS-5 | `buildApp()` constructs the Express app without binding, so the binding policy belongs to the caller and tests can build the app without occupying a port. |
+| FR-OS-6 | The server binds the loopback interface only (`127.0.0.1`), and the window loads that same origin. |
+
+Status: implemented (2026-07-30) — `tests/unit/server-start.test.ts` (5 tests); verified live by rebuilding (`npm run dist:mac`), installing to `/Applications`, and launching via `open -a "Storage Navigator"` while port 3100 was held by another instance: bound 56824 and served the renderer (HTTP 200).

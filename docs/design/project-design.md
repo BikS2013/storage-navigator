@@ -7196,3 +7196,100 @@ All design decisions trace to:
 ### 2026-07-04 addendum — Application icon refresh
 
 The AI-raster app icon was replaced with hand-authored vector art matching the plan-014 design language: a macOS Big-Sur-grid squircle (824×824 on the 1024 canvas, baked drop shadow) with the app's azure gradient, carrying a unified white cloud silhouette (circle-union geometry, single userSpaceOnUse gradient) and a two-tone accent compass needle (NE heading, white hub) — the same cloud+navigation identity as the previous icon, redrawn cleanly. Source of truth: `assets/icon.svg`; rendered via QuickLook (`qlmanage`) to `assets/icon.png` (2048², alpha) and `assets/icon.icns` (full 16→1024 iconset via `iconutil`); `src/electron/public/favicon.png` regenerated at 64². Needle sized for 32–64 px dock legibility. Packaged app rebuilt (`npm run dist:mac`) so the .app/DMG embed the new `.icns`.
+
+---
+
+## 2026-07-30 — Editor find bar with live match highlighting
+
+**Request:** add find inside the file editor, and have it highlight the detected instances of the searched text.
+
+**Constraint that drives the whole design:** the in-place editor is a plain `<textarea>` (`.text-editor`, created in `app.js enterEditMode`). A textarea renders one uniform text run — it cannot style a sub-range, so match highlighting cannot be done inside it. Replacing it with a `contenteditable` surface or a third-party editor component (CodeMirror / Monaco) was rejected: it would rewrite the save path, the dirty-tracking, and the ETag round-trip for a read-mostly viewer, and would add a runtime dependency to a renderer that currently has none of its own.
+
+**Approach — highlight mirror behind the textarea.** `enterEditMode` now builds a three-layer surface instead of a bare textarea (`buildEditorSurface`):
+
+```
+.editor-wrap                 position: relative, carries the field fill
+├── .editor-highlights       z-index 0 — the mirror (aria-hidden, pointer-events: none)
+│   └── .editor-mirror       same text, with <mark> around every match
+├── textarea.text-editor     z-index 1 — background: transparent
+└── .editor-find             z-index 3 — the find bar (floating, top-right)
+```
+
+The textarea is transparent, so the mirror's `<mark>` boxes read as highlights underneath the real caret and the real native selection. Correctness reduces to the two boxes wrapping text identically:
+
+- `syncHighlightMetrics()` copies the live computed font metrics, padding, border widths and wrapping properties (`MIRROR_STYLE_PROPS`) off the textarea onto the mirror, rather than duplicating them in CSS — a later change to `.text-editor` cannot silently drift the two apart. The CSS declarations on `.editor-highlights` are first-paint fallbacks only.
+- The mirror's border-box width is set to `textarea.clientWidth + horizontal borders`. `clientWidth` excludes the scrollbar gutter, so the mirror wraps over exactly the width the textarea has available — the case a fixed `inset: 0` would get wrong the moment a scrollbar appears.
+- A `ResizeObserver` on the textarea re-runs the sync on panel/window resize.
+- `syncHighlightScroll()` mirrors `scrollTop`/`scrollLeft` on every textarea `scroll` event (the mirror is `overflow: hidden` but still programmatically scrollable).
+- A textarea renders the empty line after a trailing newline; `white-space: pre-wrap` in a div does not. `renderHighlights()` appends a zero-width space when the text ends in `\n` to keep the two scroll heights equal.
+
+**Match navigation needs no text measurement.** Because every match exists as a real `<mark>` element in the mirror, `revealCurrentMatch()` scrolls by reading `markEl.offsetTop` — no canvas measuring, no line-height arithmetic. The find bar floats over the top of the viewport, so a match inside that band counts as hidden and gets centered; at the very start of the file, where scrolling cannot help, `.editor-wrap.find-open` reserves the bar's height as textarea `padding-top` instead (the mirror inherits it through the metric copy).
+
+**Search engine** (`computeMatches`): literal queries are regex-escaped; `wholeWord` wraps the source in `\b(?:…)\b`; flags are `gm` / `gmi`. Zero-length matches advance `lastIndex` manually so a pattern like `a*` cannot spin. An invalid user regex is caught and surfaced as "Invalid pattern" (red input + count, navigation disabled) rather than thrown. Matches are capped at `FIND_MATCH_CAP = 5000` because one `<mark>` node is created per match on every keystroke; hitting the cap is reported in the count ("N+") and its tooltip, never silently.
+
+**State split:** the query and the three option toggles live in the module-level `findState` and survive editor teardown, so Cmd+F in the next file starts where the user left off. Matches, `<mark>` references and the open flag are per-surface and are cleared by `teardownEditorSurface()`, which also disconnects the `ResizeObserver`; it is called from both `exitEditMode()` and `resetEditor()`, so switching files mid-edit cannot leak an observer or leave stale nodes referenced.
+
+**Keys:** Cmd/Ctrl+F opens (seeded from a single-line textarea selection) or re-focuses the input; Enter / Shift+Enter and Cmd/Ctrl+G / F3 step forward/back with wraparound; Escape closes, returns focus to the textarea and parks the caret on the match the user was looking at. The handler sits on `.editor-wrap` and calls `preventDefault()` on Cmd+F so the host browser's own find-in-page does not open when the UI is served in a browser rather than Electron.
+
+**Scope:** edit mode only — the read-only viewers (markdown, JSON, `pre.text-view`, DOCX, HTML, PDF) are unchanged and still fall through to the browser's native find.
+
+**Verification:** `test_scripts/serve-editor-harness.mjs` serves the real `index.html` / `app.js` / `styles.css` with fixed `/api` fixtures (no Azure account, no credential store), so the whole path — tree → view → Edit → find → save — is exercised end-to-end. Confirmed in Chrome against a fixture mixing short lines, a long wrapping line, tabs, HTML-special characters and a trailing newline: mirror width identical to the textarea's (657px = 657px), scroll heights within 1px, scroll synced at maximum scroll, 67/67 marks aligned including inside the wrapped line; case-sensitive 2→1, whole-word `uick` 2→0, regex `alpha-\d+` 0→60, `alpha(` → "Invalid pattern", `a*` terminates at 225 matches, 9000-match input caps at "1 of 5000+" with the tooltip; Enter/Shift+Enter wrap the count; Escape closes and selects the match; editing with find open re-highlights (2→3) and keeps Save/dirty state; save round-trip persists and tears the surface down; verified in both light and dark themes.
+
+### 2026-07-30 addendum — Find affordance, and reliable launch from the OS
+
+**Find affordance (`#edit-find`).** A keyboard shortcut nobody is told about is a
+feature nobody uses, so the edit-controls row now carries a magnifier + shortcut
+chip next to the `Editing…` status, left of Save/Cancel. It is:
+
+- **Discoverable** — visible for the whole of edit mode (shown in
+  `enterEditMode`, hidden in `clearEditControls`, `arm` and `exitEditMode`, so
+  it never survives into view mode).
+- **Platform-correct** — the label is `⌘F` on macOS/iOS and `Ctrl+F` elsewhere,
+  computed once from `navigator.userAgentData.platform ?? navigator.platform`.
+  The test is case-insensitive on purpose: `userAgentData` reports `"macOS"`
+  while the legacy `navigator.platform` reports `"MacIntel"`, and a `/Mac/`
+  test silently mislabels the shortcut on every modern Chromium.
+- **Actionable** — it is the find toggle, not just a hint: click opens the bar
+  (focusing the query input), click again closes it, and it renders
+  accent-filled (`.active`) whenever the bar is open, so the header always
+  reflects the bar's state.
+
+**Reliable launch from the OS.** The packaged `.app` hardcoded port 3100 and
+called `app.listen` with no error handling, so a Finder/dock launch while
+anything else held 3100 produced an unhandled `EADDRINUSE` and a window pointing
+at a dead origin — a blank app with no explanation (previously registered as a
+pending defect). Three changes:
+
+- `server.ts` splits app construction from binding: `buildApp()` builds and
+  returns the Express instance without listening; `createServer()` keeps its old
+  build-and-listen behavior for existing callers; the new `startServer()`
+  resolves with `{ app, server, port }` once the socket is listening and
+  **rejects** on bind failure (EADDRINUSE is re-thrown as
+  `Port N is already in use.`).
+- The port is now **optional**, and the two cases are deliberately different.
+  With no `--port` — every Finder/dock launch, since nothing is configured there
+  — the app binds port 0 and asks the OS for a free port, then builds the window
+  URL from the port actually bound. With an explicit `--port N` the app binds
+  exactly that port and **fails loudly** if it is taken: a configured value is
+  never silently substituted (project rule — no fallbacks for configuration
+  settings). `--port`'s commander default was dropped so `npm run ui` takes the
+  OS-assigned path rather than being implicitly "configured" to 3100.
+- Startup failures are now visible: a bind failure shows an error dialog naming
+  the port and quits instead of opening a window, and a first-load failure shows
+  a dialog naming the failed URL and the `publicDir` it expected the interface
+  files in, instead of the previous unexplained blank window.
+
+`main.ts` also moved server startup inside `app.whenReady()` (the window URL now
+depends on the bound port) and loads `127.0.0.1` rather than `localhost`, so the
+origin matches the interface the server binds.
+
+**Verification:** `tests/unit/server-start.test.ts` (5 tests) covers
+OS-assigned-port binding and its reported value, exact-port binding, rejection
+rather than rebinding when the port is busy, loopback-only binding, and that
+`buildApp` binds nothing. Confirmed live with port 3100 genuinely held by another
+instance: `npx tsx src/cli/index.ts ui` logged
+`Storage Navigator server running on http://127.0.0.1:56310` and came up, where
+the old code would have died on EADDRINUSE. Find affordance verified through the
+harness: hidden in view mode, visible in edit mode, `⌘F` on this machine
+(`platform: "macOS"`), toggles the bar both ways, goes `.active` only while open,
+and hidden again after Cancel — in both light and dark themes.

@@ -820,10 +820,18 @@ commonStorageOpts(program.command('file-delete-folder').description('Delete a di
 program
   .command("ui")
   .description("Launch the Electron desktop app")
-  .option("--port <port>", "Server port", "3100")
+  .option("--port <port>", "Server port (omit to let the OS pick a free one)")
   .action(async (opts) => {
     const { launchElectronApp } = await import("../electron/launch.js");
-    launchElectronApp(parseInt(opts.port, 10));
+    let port: number | undefined;
+    if (opts.port !== undefined) {
+      port = Number.parseInt(opts.port, 10);
+      if (!Number.isInteger(port) || port < 0 || port > 65535) {
+        console.error(`Invalid --port value: ${opts.port}`);
+        process.exit(3);
+      }
+    }
+    launchElectronApp(port);
   });
 
 // LangGraph ReAct agent

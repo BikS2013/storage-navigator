@@ -573,6 +573,31 @@ button:disabled { opacity: 0.45; cursor: default; }
 
 .edit-status { font-size: 12px; color: var(--label-2); margin-right: 4px; }
 .edit-status.error { color: var(--sys-red); }
+
+/* Find affordance in the edit-controls row: the only place the user is told
+   the shortcut exists, so it shows the platform-correct key (set in app.js)
+   and doubles as the toggle for the bar. */
+.edit-find-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 9px;
+}
+.edit-find-btn svg { width: 13px; height: 13px; flex: none; }
+.edit-find-hint {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  color: var(--label-2);
+}
+.edit-find-btn:hover .edit-find-hint { color: var(--label); }
+.edit-find-btn.active {
+  color: var(--accent-text);
+  background: var(--accent-fill);
+  border-color: transparent;
+}
+.edit-find-btn.active .edit-find-hint,
+.edit-find-btn.active:hover .edit-find-hint { color: var(--accent-text); }
 .content-edit-controls { display: flex; align-items: center; gap: 6px; }
 
 /* --- Selects (macOS popup buttons) --------------------------------------- */
@@ -881,6 +906,136 @@ button:disabled { opacity: 0.45; cursor: default; }
   box-shadow: 0 0 0 3.5px color-mix(in srgb, var(--accent) 25%, transparent);
 }
 
+/* --- Editor find bar + match highlighting ---------------------------------
+   A <textarea> cannot render styled ranges, so matches are painted by the
+   .editor-highlights mirror sitting exactly behind it: identical font metrics,
+   padding, border and wrapping rules, scroll-synced from app.js. The textarea
+   is transparent so the mirror's <mark> boxes show through it; .editor-wrap
+   carries the field fill that .text-editor used to paint itself.            */
+
+.editor-wrap {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 300px;
+  background: var(--codeblock-bg);
+  border-radius: 8px;
+}
+.editor-wrap .text-editor {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+}
+/* While the find bar is open the first lines would sit underneath it, hiding
+   their highlights. Reserve the bar's height instead — the mirror copies
+   padding off the textarea, so it follows without a second rule. */
+.editor-wrap.find-open .text-editor { padding-top: 46px; }
+.editor-highlights {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  color: transparent;
+  border-radius: 8px;
+  /* Metrics below are first-paint fallbacks only — syncHighlightMetrics()
+     copies the live computed values off the textarea so a future change to
+     .text-editor cannot silently drift the two boxes apart.                */
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  padding: 12px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  tab-size: 2;
+}
+.editor-highlights mark {
+  color: transparent;
+  background: color-mix(in srgb, var(--sys-orange) 38%, transparent);
+  border-radius: 2px;
+}
+.editor-highlights mark.current {
+  background: color-mix(in srgb, var(--accent) 55%, transparent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.editor-find {
+  position: absolute;
+  top: 8px;
+  right: 14px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 6px;
+  background: var(--menu-bg);
+  border: 0.5px solid var(--control-border);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  backdrop-filter: blur(24px) saturate(180%);
+}
+.editor-find-input {
+  width: 190px;
+  height: 24px;
+  padding: 0 8px;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--label);
+  background: var(--control-bg);
+  border: 0.5px solid var(--control-border);
+  border-radius: 6px;
+  outline: none;
+}
+.editor-find-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.editor-find-input.error { border-color: var(--sys-red); }
+.editor-find-count {
+  min-width: 76px;
+  font-size: 11px;
+  color: var(--label-2);
+  text-align: right;
+  white-space: nowrap;
+}
+.editor-find-count.error { color: var(--sys-red); }
+.editor-find-toggles { display: flex; gap: 2px; }
+.editor-find-toggle,
+.editor-find-nav,
+.editor-find-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 4px;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--label-2);
+  background: transparent;
+  border: 0.5px solid transparent;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.editor-find-nav,
+.editor-find-close { font-size: 15px; }
+.editor-find-toggle:hover,
+.editor-find-nav:hover,
+.editor-find-close:hover { background: var(--hover-fill); color: var(--label); }
+.editor-find-toggle.active {
+  color: var(--accent-text);
+  background: var(--accent-fill);
+  border-color: transparent;
+}
+.editor-find-nav:disabled,
+.editor-find-nav:disabled:hover {
+  color: var(--label-3);
+  background: transparent;
+  cursor: default;
+}
+
 #content-body pre {
   font-family: var(--font-mono);
   font-size: 12px;
@@ -1143,6 +1298,7 @@ iframe.html-view {
   #tree-panel,
   .context-menu,
   .zip-dl-box,
+  .editor-find,
   .modal {
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
@@ -1150,7 +1306,8 @@ iframe.html-view {
   header       { background: var(--window-bg); }
   #tree-panel  { background: var(--window-bg); }
   .context-menu,
-  .zip-dl-box  { background: var(--window-bg); }
+  .zip-dl-box,
+  .editor-find { background: var(--window-bg); }
   body         { background: var(--window-bg); }
 }
 

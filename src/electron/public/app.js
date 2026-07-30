@@ -21,6 +21,8 @@
   const editSaveBtn = document.getElementById("edit-save");
   const editCancelBtn = document.getElementById("edit-cancel");
   const editStatusEl = document.getElementById("edit-status");
+  const editFindBtn = document.getElementById("edit-find");
+  const editFindHint = document.getElementById("edit-find-hint");
   const modal = document.getElementById("add-modal");
   const modalCancel = document.getElementById("modal-cancel");
   const modalSave = document.getElementById("modal-save");
@@ -900,16 +902,64 @@
   // a previous file can't fire against the new path.
   let currentEditor = null;
 
+  // Find-bar state and constants live here — above resetEditor(), which runs
+  // during the first panel render and reaches teardownEditorSurface().
+  //
+  // Ceiling on highlighted matches. A one-character query against a large file
+  // would otherwise create tens of thousands of <mark> nodes on every keystroke.
+  // When the cap is hit the count reads "N+" and says so in its tooltip — the
+  // truncation is never silent.
+  const FIND_MATCH_CAP = 5000;
+
+  // Properties that must be identical on the textarea and the highlight mirror
+  // for the two to wrap text the same way.
+  const MIRROR_STYLE_PROPS = [
+    "fontFamily", "fontSize", "fontWeight", "fontStyle", "fontVariant",
+    "letterSpacing", "lineHeight", "textTransform", "wordSpacing", "textIndent",
+    "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
+    "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth",
+    "boxSizing", "whiteSpace", "overflowWrap", "wordBreak", "tabSize", "direction",
+  ];
+
+  // The query and the option toggles survive editor teardown (so Cmd+F in the
+  // next file starts where the user left off); matches and marks do not.
+  const findState = {
+    open: false,
+    query: "",
+    caseSensitive: false,
+    wholeWord: false,
+    regex: false,
+    matches: [],
+    marks: [],
+    index: -1,
+    capped: false,
+    error: false,
+  };
+
+  // Platform-correct label for the find shortcut. It is the only place the user
+  // is told the shortcut exists, so it must match the key they actually press.
+  // Case-insensitive on purpose: userAgentData reports "macOS", the legacy
+  // navigator.platform reports "MacIntel".
+  const IS_MAC = /mac|iphone|ipad|ipod/i.test(
+    (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || navigator.userAgent
+  );
+  const FIND_SHORTCUT_LABEL = IS_MAC ? "⌘F" : "Ctrl+F";
+  editFindHint.textContent = FIND_SHORTCUT_LABEL;
+  editFindBtn.title = `Find in this file (${FIND_SHORTCUT_LABEL})`;
+
   function clearEditControls() {
     editControls.hidden = true;
     editBtn.hidden = true;
     editSaveBtn.hidden = true;
     editCancelBtn.hidden = true;
+    editFindBtn.hidden = true;
+    editFindBtn.classList.remove("active");
     editStatusEl.textContent = "";
     editStatusEl.classList.remove("error");
   }
 
   function resetEditor() {
+    teardownEditorSurface();
     currentEditor = null;
     clearEditControls();
   }
@@ -932,24 +982,31 @@
     editBtn.hidden = false;
     editSaveBtn.hidden = true;
     editCancelBtn.hidden = true;
+    editFindBtn.hidden = true; // find is an edit-mode affordance only
+    editFindBtn.classList.remove("active");
     editStatusEl.textContent = "";
     editStatusEl.classList.remove("error");
   }
 
   function enterEditMode() {
     if (!currentEditor) return;
-    const ta = document.createElement("textarea");
-    ta.className = "text-editor";
-    ta.spellcheck = false;
-    ta.value = currentEditor.originalText;
+
+    // Editing surface: [highlight mirror] + [textarea] + [find bar], all inside
+    // one wrapper so the whole thing is discarded together when the panel
+    // reloads. See buildEditorSurface() for why the mirror exists.
+    const surface = buildEditorSurface(currentEditor.originalText);
     contentBody.innerHTML = "";
-    contentBody.appendChild(ta);
-    currentEditor.textarea = ta;
-    currentEditor.modified = false;
+    contentBody.appendChild(surface.wrap);
+
+    const ta = surface.textarea;
+    Object.assign(currentEditor, surface, { modified: false });
+
     editBtn.hidden = true;
     editSaveBtn.hidden = false;
     editSaveBtn.disabled = true;
     editCancelBtn.hidden = false;
+    editFindBtn.hidden = false; // announces that find exists, and opens it
+    editFindBtn.classList.remove("active");
     editStatusEl.textContent = "Editing…";
     editStatusEl.classList.remove("error");
     ta.addEventListener("input", () => {
@@ -957,15 +1014,392 @@
       currentEditor.modified = changed;
       editSaveBtn.disabled = !changed;
       editStatusEl.textContent = changed ? "Unsaved changes" : "Editing…";
+      // Matches are offsets into the text — every edit invalidates them.
+      if (findState.open) runFind({ keepIndex: true });
     });
+    ta.addEventListener("scroll", syncHighlightScroll);
+    surface.wrap.addEventListener("keydown", onEditorKeydown);
+    surface.findBar.addEventListener("click", onFindBarClick);
+    surface.findInput.addEventListener("input", () => {
+      findState.query = surface.findInput.value;
+      runFind({ preferFrom: ta.selectionStart });
+    });
+
+    // The mirror must re-wrap exactly when the textarea does, so its box is
+    // re-measured on every size change (panel resize, window resize).
+    syncHighlightMetrics();
+    if (typeof ResizeObserver === "function") {
+      currentEditor.resizeObs = new ResizeObserver(() => {
+        syncHighlightMetrics();
+        syncHighlightScroll();
+      });
+      currentEditor.resizeObs.observe(ta);
+    }
+
+    // The find bar always starts closed; the query and the option toggles
+    // persist across files, the way a real editor's find does.
+    findState.open = false;
+    findState.matches = [];
+    findState.marks = [];
+    findState.index = -1;
+
     ta.focus();
+  }
+
+  // --- Editor find (Cmd/Ctrl+F) ----------------------------------------------
+  // A textarea cannot render styled ranges, so matches are painted by a mirror
+  // <div> positioned exactly behind it — same font metrics, padding, border and
+  // wrapping rules, scroll-synced — holding the same text with <mark> around
+  // every hit. The textarea itself is transparent (see .editor-wrap in
+  // styles.css), so the marks show through underneath the real caret and
+  // selection. Match navigation scrolls by reading the current <mark>'s
+  // offsetTop out of the mirror, which needs no text measurement of its own.
+
+  function buildEditorSurface(text) {
+    const wrap = document.createElement("div");
+    wrap.className = "editor-wrap";
+
+    const highlights = document.createElement("div");
+    highlights.className = "editor-highlights";
+    highlights.setAttribute("aria-hidden", "true");
+    const mirror = document.createElement("div");
+    mirror.className = "editor-mirror";
+    highlights.appendChild(mirror);
+
+    const ta = document.createElement("textarea");
+    ta.className = "text-editor";
+    ta.spellcheck = false;
+    ta.value = text;
+
+    const findBar = document.createElement("div");
+    findBar.className = "editor-find";
+    findBar.hidden = true;
+    findBar.innerHTML =
+      '<input type="text" class="editor-find-input" placeholder="Find" spellcheck="false" aria-label="Find in file">' +
+      '<span class="editor-find-count" aria-live="polite"></span>' +
+      '<span class="editor-find-toggles">' +
+        '<button type="button" class="editor-find-toggle" data-opt="caseSensitive" title="Match case" aria-pressed="false">Aa</button>' +
+        '<button type="button" class="editor-find-toggle" data-opt="wholeWord" title="Whole word" aria-pressed="false">ab</button>' +
+        '<button type="button" class="editor-find-toggle" data-opt="regex" title="Regular expression" aria-pressed="false">.*</button>' +
+      '</span>' +
+      '<button type="button" class="editor-find-nav" data-nav="prev" title="Previous match (Shift+Enter)">‹</button>' +
+      '<button type="button" class="editor-find-nav" data-nav="next" title="Next match (Enter)">›</button>' +
+      '<button type="button" class="editor-find-close" title="Close (Esc)" aria-label="Close find">×</button>';
+
+    // Mirror first (z-index 0), textarea over it, find bar on top.
+    wrap.appendChild(highlights);
+    wrap.appendChild(ta);
+    wrap.appendChild(findBar);
+
+    return {
+      wrap,
+      highlights,
+      mirror,
+      textarea: ta,
+      findBar,
+      findInput: findBar.querySelector(".editor-find-input"),
+      findCount: findBar.querySelector(".editor-find-count"),
+      findNavs: Array.prototype.slice.call(findBar.querySelectorAll(".editor-find-nav")),
+      findToggles: Array.prototype.slice.call(findBar.querySelectorAll(".editor-find-toggle")),
+    };
+  }
+
+  function teardownEditorSurface() {
+    const ed = currentEditor;
+    findState.open = false;
+    findState.matches = [];
+    findState.marks = [];
+    findState.index = -1;
+    if (!ed) return;
+    if (ed.resizeObs) {
+      ed.resizeObs.disconnect();
+      ed.resizeObs = null;
+    }
+    // Drop the DOM references; the nodes themselves go away with contentBody.
+    ed.wrap = ed.highlights = ed.mirror = null;
+    ed.findBar = ed.findInput = ed.findCount = ed.findNavs = ed.findToggles = null;
+  }
+
+  function syncHighlightMetrics() {
+    const ed = currentEditor;
+    if (!ed || !ed.highlights) return;
+    const cs = getComputedStyle(ed.textarea);
+    for (const prop of MIRROR_STYLE_PROPS) ed.highlights.style[prop] = cs[prop];
+    ed.highlights.style.borderStyle = "solid";
+    ed.highlights.style.borderColor = "transparent";
+    ed.borderTop = parseFloat(cs.borderTopWidth) || 0;
+    const borderX = (parseFloat(cs.borderLeftWidth) || 0) + (parseFloat(cs.borderRightWidth) || 0);
+    const borderY = ed.borderTop + (parseFloat(cs.borderBottomWidth) || 0);
+    // clientWidth/clientHeight exclude the borders AND the scrollbar gutter, so
+    // adding the borders back gives the mirror a border box that wraps text over
+    // exactly the width the textarea has available.
+    ed.highlights.style.width = (ed.textarea.clientWidth + borderX) + "px";
+    ed.highlights.style.height = (ed.textarea.clientHeight + borderY) + "px";
+  }
+
+  function syncHighlightScroll() {
+    const ed = currentEditor;
+    if (!ed || !ed.highlights) return;
+    ed.highlights.scrollTop = ed.textarea.scrollTop;
+    ed.highlights.scrollLeft = ed.textarea.scrollLeft;
+  }
+
+  function escapeRegExp(str) {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  function computeMatches(text) {
+    findState.capped = false;
+    findState.error = false;
+    if (!findState.query) return [];
+    let re;
+    try {
+      let source = findState.regex ? findState.query : escapeRegExp(findState.query);
+      if (findState.wholeWord) source = "\\b(?:" + source + ")\\b";
+      re = new RegExp(source, findState.caseSensitive ? "gm" : "gmi");
+    } catch {
+      findState.error = true;
+      return [];
+    }
+    const out = [];
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      // A pattern that can match empty (e.g. "a*") would never advance.
+      if (m[0].length === 0) {
+        re.lastIndex += 1;
+        if (re.lastIndex > text.length) break;
+        continue;
+      }
+      out.push({ start: m.index, end: m.index + m[0].length });
+      if (out.length >= FIND_MATCH_CAP) {
+        findState.capped = true;
+        break;
+      }
+    }
+    return out;
+  }
+
+  function renderHighlights() {
+    const ed = currentEditor;
+    if (!ed || !ed.mirror) return;
+    const text = ed.textarea.value;
+    const matches = findState.matches;
+    let html = "";
+    let last = 0;
+    for (let i = 0; i < matches.length; i++) {
+      const m = matches[i];
+      html += escapeHtml(text.slice(last, m.start));
+      html += i === findState.index
+        ? '<mark class="current">' + escapeHtml(text.slice(m.start, m.end)) + "</mark>"
+        : "<mark>" + escapeHtml(text.slice(m.start, m.end)) + "</mark>";
+      last = m.end;
+    }
+    html += escapeHtml(text.slice(last));
+    // A textarea renders the empty line after a trailing newline; pre-wrap in a
+    // div does not. The zero-width space keeps the two scroll heights equal.
+    if (text.endsWith("\n")) html += "\u200b";
+    ed.mirror.innerHTML = html;
+    findState.marks = Array.prototype.slice.call(ed.mirror.querySelectorAll("mark"));
+  }
+
+  function markCurrent() {
+    for (let i = 0; i < findState.marks.length; i++) {
+      findState.marks[i].classList.toggle("current", i === findState.index);
+    }
+  }
+
+  function updateFindStatus() {
+    const ed = currentEditor;
+    if (!ed || !ed.findCount) return;
+    const count = ed.findCount;
+    const bad = findState.error;
+    ed.findInput.classList.toggle("error", bad);
+    count.classList.toggle("error", bad);
+    const total = findState.matches.length;
+    const hasNav = total > 0;
+    ed.findNavs.forEach((b) => { b.disabled = !hasNav; });
+    if (bad) {
+      count.textContent = "Invalid pattern";
+      count.title = "";
+    } else if (!findState.query) {
+      count.textContent = "";
+      count.title = "";
+    } else if (total === 0) {
+      count.textContent = "No results";
+      count.title = "";
+    } else {
+      count.textContent = (findState.index + 1) + " of " + total + (findState.capped ? "+" : "");
+      count.title = findState.capped
+        ? "Only the first " + FIND_MATCH_CAP + " matches are highlighted"
+        : "";
+    }
+  }
+
+  // opts.keepIndex — hold the current position (used while the file is edited).
+  // opts.preferFrom — otherwise select the first match at/after this offset.
+  function runFind(opts) {
+    const ed = currentEditor;
+    if (!ed || !ed.textarea) return;
+    const options = opts || {};
+    findState.matches = computeMatches(ed.textarea.value);
+    const total = findState.matches.length;
+    if (total === 0) {
+      findState.index = -1;
+    } else if (options.keepIndex) {
+      findState.index = Math.min(Math.max(findState.index, 0), total - 1);
+    } else {
+      const from = typeof options.preferFrom === "number" ? options.preferFrom : 0;
+      let i = -1;
+      for (let k = 0; k < total; k++) {
+        if (findState.matches[k].start >= from) { i = k; break; }
+      }
+      findState.index = i === -1 ? 0 : i;
+    }
+    renderHighlights();
+    updateFindStatus();
+    if (!options.keepIndex) revealCurrentMatch();
+    else syncHighlightScroll();
+  }
+
+  function stepFind(delta) {
+    const total = findState.matches.length;
+    if (total === 0) return;
+    findState.index = (findState.index + delta + total) % total;
+    markCurrent();
+    updateFindStatus();
+    revealCurrentMatch();
+  }
+
+  function revealCurrentMatch() {
+    const ed = currentEditor;
+    const el = findState.marks[findState.index];
+    if (!ed || !el) return;
+    const ta = ed.textarea;
+    // offsetTop is measured from the mirror's border-box top in unscrolled
+    // content coordinates, so subtracting the border gives the textarea's
+    // equivalent scrollTop for that line.
+    const top = el.offsetTop - (ed.borderTop || 0);
+    const bottom = top + el.offsetHeight;
+    // The find bar floats over the top of the viewport, so a match in that band
+    // counts as hidden even though it is technically scrolled in. Centering the
+    // match clears the band. (At the very start of the file, where scrolling
+    // cannot help, .find-open's reserved padding keeps the text clear instead.)
+    const occluded = ed.findBar && !ed.findBar.hidden ? ed.findBar.offsetHeight + 10 : 0;
+    if (top < ta.scrollTop + occluded || bottom > ta.scrollTop + ta.clientHeight) {
+      ta.scrollTop = Math.max(0, top - (ta.clientHeight - el.offsetHeight) / 2);
+    }
+    syncHighlightScroll();
+  }
+
+  function syncFindToggles() {
+    const ed = currentEditor;
+    if (!ed || !ed.findToggles) return;
+    ed.findToggles.forEach((btn) => {
+      const on = !!findState[btn.dataset.opt];
+      btn.classList.toggle("active", on);
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+  }
+
+  function openFind() {
+    const ed = currentEditor;
+    if (!ed || !ed.findBar) return;
+    // Seed from the selection, like every other editor's Cmd+F.
+    const selection = ed.textarea.value.slice(ed.textarea.selectionStart, ed.textarea.selectionEnd);
+    if (selection && !selection.includes("\n")) findState.query = selection;
+    findState.open = true;
+    ed.findBar.hidden = false;
+    editFindBtn.classList.add("active");
+    ed.wrap.classList.add("find-open"); // reserves the bar's height in the textarea
+    syncHighlightMetrics();
+    ed.findInput.value = findState.query;
+    syncFindToggles();
+    runFind({ preferFrom: ed.textarea.selectionStart });
+    ed.findInput.focus();
+    ed.findInput.select();
+  }
+
+  function closeFind() {
+    const ed = currentEditor;
+    const match = findState.matches[findState.index];
+    findState.open = false;
+    findState.matches = [];
+    findState.marks = [];
+    findState.index = -1;
+    editFindBtn.classList.remove("active");
+    if (!ed || !ed.findBar) return;
+    ed.findBar.hidden = true;
+    ed.wrap.classList.remove("find-open");
+    syncHighlightMetrics();
+    ed.mirror.textContent = "";
+    ed.findInput.classList.remove("error");
+    ed.textarea.focus();
+    // Leave the caret on the match the user was looking at.
+    if (match) ed.textarea.setSelectionRange(match.start, match.end);
+  }
+
+  function onEditorKeydown(e) {
+    const ed = currentEditor;
+    if (!ed || !ed.findBar) return;
+    const mod = e.metaKey || e.ctrlKey;
+
+    if (mod && (e.key === "f" || e.key === "F")) {
+      e.preventDefault(); // suppress the host browser's own find-in-page
+      if (findState.open) {
+        ed.findInput.focus();
+        ed.findInput.select();
+      } else {
+        openFind();
+      }
+      return;
+    }
+    if (!findState.open) return;
+
+    if (e.key === "Escape") {
+      e.preventDefault();
+      closeFind();
+      return;
+    }
+    if (e.key === "F3" || (mod && (e.key === "g" || e.key === "G"))) {
+      e.preventDefault();
+      stepFind(e.shiftKey ? -1 : 1);
+      return;
+    }
+    if (e.key === "Enter" && e.target === ed.findInput) {
+      e.preventDefault();
+      stepFind(e.shiftKey ? -1 : 1);
+    }
+  }
+
+  function onFindBarClick(e) {
+    const ed = currentEditor;
+    const btn = e.target.closest("button");
+    if (!ed || !btn) return;
+    if (btn.classList.contains("editor-find-close")) {
+      closeFind();
+      return;
+    }
+    if (btn.dataset.nav) {
+      stepFind(btn.dataset.nav === "prev" ? -1 : 1);
+      ed.findInput.focus();
+      return;
+    }
+    if (btn.dataset.opt) {
+      findState[btn.dataset.opt] = !findState[btn.dataset.opt];
+      syncFindToggles();
+      runFind({ preferFrom: ed.textarea.selectionStart });
+      ed.findInput.focus();
+    }
   }
 
   function exitEditMode() {
     if (!currentEditor) return;
+    teardownEditorSurface();
     editBtn.hidden = false;
     editSaveBtn.hidden = true;
     editCancelBtn.hidden = true;
+    editFindBtn.hidden = true;
+    editFindBtn.classList.remove("active");
     editStatusEl.textContent = "";
     editStatusEl.classList.remove("error");
     // Re-render the viewer with whatever original text is now current. The
@@ -1034,6 +1468,12 @@
   editBtn.addEventListener("click", enterEditMode);
   editCancelBtn.addEventListener("click", () => { exitEditMode(); });
   editSaveBtn.addEventListener("click", () => { saveEdit(); });
+  // Acts as a toggle so the button reflects, and controls, the bar's state.
+  editFindBtn.addEventListener("click", () => {
+    if (!currentEditor || !currentEditor.findBar) return;
+    if (findState.open) closeFind();
+    else openFind();
+  });
 
   // --- Export ---
   exportBtn.addEventListener("click", async () => {

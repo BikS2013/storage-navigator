@@ -1,4 +1,5 @@
 import express from "express";
+import type * as http from "node:http";
 import * as path from "path";
 import { fileURLToPath } from "url";
 import mammoth from "mammoth";
@@ -72,7 +73,14 @@ function requireDirect(entry: StorageEntry, res: express.Response): DirectStorag
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-export function createServer(port: number, publicDirOverride?: string): express.Express {
+/**
+ * Build the Express app WITHOUT binding a port.
+ *
+ * Split out from createServer so the caller decides the binding policy — the
+ * packaged desktop app needs the bound port back (it may be ephemeral), which
+ * a function that returns only the Express instance cannot provide.
+ */
+export function buildApp(publicDirOverride?: string): express.Express {
   const app = express();
   // Express auto-generates a weak content-hash ETag for res.send() responses.
   // For the editor we rely on the backend's strong ETag (Azure) to detect
@@ -1495,11 +1503,57 @@ export function createServer(port: number, publicDirOverride?: string): express.
   app.get("/api/reverse-diff/:storage/:container/:linkId", handleReverseDiff);
   app.get("/api/reverse-diff/:storage/:linkId", handleReverseDiff);
 
+  return app;
+}
+
+/**
+ * Build the app and bind it, the original all-in-one entry point.
+ * Retained for callers that do not need the bound port back.
+ */
+export function createServer(port: number, publicDirOverride?: string): express.Express {
+  const app = buildApp(publicDirOverride);
   app.listen(port, "127.0.0.1", () => {
     console.log(`Storage Navigator server running on http://127.0.0.1:${port}`);
   });
-
   return app;
+}
+
+export interface StartedServer {
+  app: express.Express;
+  server: http.Server;
+  /** The port actually bound — differs from the request when `port` was 0. */
+  port: number;
+}
+
+/**
+ * Build the app and bind it to `port`, resolving once the socket is listening.
+ *
+ * `port: 0` asks the OS for a free port — this is what a Finder/dock launch of
+ * the packaged app uses, since no port has been configured there and a
+ * hardcoded one makes the app unlaunchable whenever something else holds it.
+ *
+ * A port the caller DID configure is never silently substituted: if it is busy
+ * the returned promise rejects (EADDRINUSE) so the caller can surface the real
+ * failure instead of the user getting a blank window.
+ */
+export function startServer(port: number, publicDirOverride?: string): Promise<StartedServer> {
+  const app = buildApp(publicDirOverride);
+  return new Promise<StartedServer>((resolve, reject) => {
+    const server = app.listen(port, "127.0.0.1");
+    server.once("listening", () => {
+      const address = server.address();
+      const boundPort = typeof address === "object" && address !== null ? address.port : port;
+      console.log(`Storage Navigator server running on http://127.0.0.1:${boundPort}`);
+      resolve({ app, server, port: boundPort });
+    });
+    server.once("error", (err: NodeJS.ErrnoException) => {
+      reject(
+        err.code === "EADDRINUSE"
+          ? new Error(`Port ${port} is already in use.`, { cause: err })
+          : err
+      );
+    });
+  });
 }
 
 // Strip optional W/ prefix and surrounding double quotes so we can compare
