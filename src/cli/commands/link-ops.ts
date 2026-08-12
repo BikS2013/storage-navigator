@@ -1,10 +1,9 @@
-import { BlobClient } from "../../core/blob-client.js";
 import { GitHubClient } from "../../core/github-client.js";
 import { DevOpsClient } from "../../core/devops-client.js";
 import { SshGitClient } from "../../core/ssh-git-client.js";
 import { createLink, removeLink, resolveLinks, findLinkByPrefix } from "../../core/sync-engine.js";
 import type { RepoLink } from "../../core/types.js";
-import { resolveStorageEntry, resolvePatToken, promptYesNo, type StorageOpts, type PatOpts } from "./shared.js";
+import { resolveStorageBackend, resolvePatToken, promptYesNo, type StorageOpts, type PatOpts } from "./shared.js";
 
 /**
  * Create a metadata-only link from a GitHub repository to a container (no file download).
@@ -18,11 +17,10 @@ export async function linkGitHub(
   repoPath?: string,
   patOpts: PatOpts = {}
 ): Promise<void> {
-  const { store, entry } = await resolveStorageEntry(storageOpts);
+  const { store, backend } = await resolveStorageBackend(storageOpts, storageOpts.account);
   const pat = await resolvePatToken(store, "github", patOpts);
   const { owner, repo } = GitHubClient.parseRepoUrl(repoUrl);
   const client = new GitHubClient(pat);
-  const blobClient = new BlobClient(entry);
 
   const targetBranch = branch ?? await client.getDefaultBranch(owner, repo);
 
@@ -30,7 +28,7 @@ export async function linkGitHub(
   if (prefix) console.log(`  Target prefix: ${prefix}`);
   if (repoPath) console.log(`  Repository sub-path: ${repoPath}`);
 
-  const { link, warning } = await createLink(blobClient, container, {
+  const { link, warning } = await createLink(backend, container, {
     provider: "github",
     repoUrl,
     branch: targetBranch,
@@ -56,11 +54,10 @@ export async function linkDevOps(
   repoPath?: string,
   patOpts: PatOpts = {}
 ): Promise<void> {
-  const { store, entry } = await resolveStorageEntry(storageOpts);
+  const { store, backend } = await resolveStorageBackend(storageOpts, storageOpts.account);
   const pat = await resolvePatToken(store, "azure-devops", patOpts);
   const { org, project, repo } = DevOpsClient.parseRepoUrl(repoUrl);
   const client = new DevOpsClient(pat, org);
-  const blobClient = new BlobClient(entry);
 
   const targetBranch = branch ?? await client.getDefaultBranch(project, repo);
 
@@ -68,7 +65,7 @@ export async function linkDevOps(
   if (prefix) console.log(`  Target prefix: ${prefix}`);
   if (repoPath) console.log(`  Repository sub-path: ${repoPath}`);
 
-  const { link, warning } = await createLink(blobClient, container, {
+  const { link, warning } = await createLink(backend, container, {
     provider: "azure-devops",
     repoUrl,
     branch: targetBranch,
@@ -94,14 +91,13 @@ export async function linkSsh(
   prefix?: string,
   repoPath?: string
 ): Promise<void> {
-  const { entry } = await resolveStorageEntry(storageOpts);
-  const blobClient = new BlobClient(entry);
+  const { backend } = await resolveStorageBackend(storageOpts, storageOpts.account);
 
   // Resolve default branch via git ls-remote (uses SSH)
   const sshClient = new SshGitClient();
   const targetBranch = branch ?? await sshClient.getDefaultBranch(repoUrl);
 
-  const { link, warning } = await createLink(blobClient, container, {
+  const { link, warning } = await createLink(backend, container, {
     provider: "ssh",
     repoUrl,
     branch: targetBranch,
@@ -126,10 +122,9 @@ export async function unlinkContainer(
   linkId?: string,
   prefix?: string
 ): Promise<void> {
-  const { entry } = await resolveStorageEntry(storageOpts);
-  const blobClient = new BlobClient(entry);
+  const { backend } = await resolveStorageBackend(storageOpts, storageOpts.account);
 
-  const registry = await resolveLinks(blobClient, container);
+  const registry = await resolveLinks(backend, container);
   if (registry.links.length === 0) {
     console.error(`Container '${container}' has no repository links.`);
     process.exit(1);
@@ -167,7 +162,7 @@ export async function unlinkContainer(
     return;
   }
 
-  const removed = await removeLink(blobClient, container, targetLink.id);
+  const removed = await removeLink(backend, container, targetLink.id);
   if (removed) {
     console.log("Link removed successfully.");
   } else {
@@ -183,10 +178,9 @@ export async function listLinks(
   container: string,
   storageOpts: StorageOpts
 ): Promise<void> {
-  const { entry } = await resolveStorageEntry(storageOpts);
-  const blobClient = new BlobClient(entry);
+  const { backend } = await resolveStorageBackend(storageOpts, storageOpts.account);
 
-  const registry = await resolveLinks(blobClient, container);
+  const registry = await resolveLinks(backend, container);
   if (registry.links.length === 0) {
     console.log("No repository links found.");
     return;

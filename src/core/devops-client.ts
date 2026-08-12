@@ -1,6 +1,10 @@
 import type { RepoFileEntry } from "./types.js";
 import { rateLimitedFetch } from "./repo-utils.js";
 
+function emptyRepoMessage(repo: string): string {
+  return `Repository '${repo}' has no branches yet (empty repository). Push an initial commit before syncing.`;
+}
+
 export class DevOpsClient {
   private headers: Record<string, string>;
   private org: string;
@@ -34,7 +38,10 @@ export class DevOpsClient {
       this.headers
     );
     if (!res.ok) throw new Error(`Azure DevOps API error: ${res.status} ${await res.text()}`);
-    const data = await res.json() as { defaultBranch: string };
+    const data = await res.json() as { defaultBranch?: string };
+    // A repo with no commits has no defaultBranch at all; without this the
+    // `.replace` below would fail with an opaque TypeError.
+    if (!data.defaultBranch) throw new Error(emptyRepoMessage(repo));
     // defaultBranch comes as "refs/heads/main" — strip the prefix
     return data.defaultBranch.replace("refs/heads/", "");
   }
@@ -45,7 +52,15 @@ export class DevOpsClient {
       `https://dev.azure.com/${this.org}/${project}/_apis/git/repositories/${repo}/items?recursionLevel=Full&versionDescriptor.version=${branch}&api-version=7.1`,
       this.headers
     );
-    if (!res.ok) throw new Error(`Azure DevOps API error: ${res.status} ${await res.text()}`);
+    if (!res.ok) {
+      const body = await res.text();
+      // VS403403 / GitItemNotFoundException means the repo has no commits, so
+      // the requested branch does not exist. Raw ADO JSON is unreadable here.
+      if (res.status === 404 && /VS403403|GitItemNotFoundException/.test(body)) {
+        throw new Error(emptyRepoMessage(repo));
+      }
+      throw new Error(`Azure DevOps API error: ${res.status} ${body}`);
+    }
     const data = await res.json() as {
       value: Array<{ path: string; objectId: string; gitObjectType: string; size?: number }>;
     };

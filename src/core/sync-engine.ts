@@ -1,11 +1,42 @@
 import crypto from "crypto";
 import type { RepoSyncMeta, RepoFileEntry, SyncResult, RepoLink, RepoLinksRegistry, RepoProvider } from "./types.js";
-import { BlobClient } from "./blob-client.js";
+import type { IStorageBackend } from "./backend/backend.js";
 import { processInBatches, inferContentType } from "./repo-utils.js";
+import { streamToBuffer } from "../util/stream.js";
 
 const META_BLOB = ".repo-sync-meta.json";
 const LINKS_BLOB = ".repo-links.json";
 const BATCH_CONCURRENCY = 10;
+
+/**
+ * A missing metadata blob means "not a synced container" and is expected.
+ * Any other failure (401 after the OIDC token expired, 403 from the API's
+ * RBAC) must propagate: swallowing it would render a synced container as
+ * unlinked, and the next writeLinks would then wipe the real registry.
+ *
+ * Duck-typed so the engine stays backend-agnostic — the API backend's
+ * NotFoundError carries `status`, Azure's RestError carries `statusCode`.
+ */
+function isNotFound(err: unknown): boolean {
+  const e = err as { status?: number; statusCode?: number } | null;
+  return e?.status === 404 || e?.statusCode === 404;
+}
+
+async function readJsonBlob<T>(backend: IStorageBackend, container: string, blobName: string): Promise<T | null> {
+  try {
+    const handle = await backend.readBlob(container, blobName);
+    const text = (await streamToBuffer(handle.stream)).toString("utf-8");
+    return JSON.parse(text) as T;
+  } catch (err) {
+    if (isNotFound(err)) return null;
+    throw err;
+  }
+}
+
+async function writeJsonBlob(backend: IStorageBackend, container: string, blobName: string, value: unknown): Promise<void> {
+  const body = Buffer.from(JSON.stringify(value, null, 2), "utf-8");
+  await backend.uploadBlob(container, blobName, body, body.byteLength, "application/json");
+}
 
 // Re-export RepoProvider so existing callers of `import type { RepoProvider } from "./sync-engine.js"` still work
 export type { RepoProvider };
@@ -14,27 +45,15 @@ export type { RepoProvider };
 export interface MappedFileEntry {
   /** Original path in the repository (used for provider.downloadFile) */
   repoPath: string;
-  /** Target path in the container (used for blobClient.createBlob and fileShas keys) */
+  /** Target path in the container (used for backend.uploadBlob and fileShas keys) */
   blobPath: string;
   /** Git object SHA (content hash) */
   sha: string;
 }
 
 /** Read sync metadata from a container (returns null if not a synced container) */
-export async function readSyncMeta(blobClient: BlobClient, container: string): Promise<RepoSyncMeta | null> {
-  try {
-    const blob = await blobClient.getBlobContent(container, META_BLOB);
-    const text = typeof blob.content === "string" ? blob.content : blob.content.toString("utf-8");
-    return JSON.parse(text) as RepoSyncMeta;
-  } catch {
-    return null;
-  }
-}
-
-/** Write sync metadata to a container */
-async function writeSyncMeta(blobClient: BlobClient, container: string, meta: RepoSyncMeta): Promise<void> {
-  const content = JSON.stringify(meta, null, 2);
-  await blobClient.createBlob(container, META_BLOB, content, "application/json");
+export async function readSyncMeta(backend: IStorageBackend, container: string): Promise<RepoSyncMeta | null> {
+  return readJsonBlob<RepoSyncMeta>(backend, container, META_BLOB);
 }
 
 /**
@@ -94,7 +113,7 @@ export function mapToTargetPaths(
  * @returns SyncResult with upload/error counts
  */
 export async function cloneRepo(
-  blobClient: BlobClient,
+  backend: IStorageBackend,
   container: string,
   provider: RepoProvider,
   link: RepoLink,
@@ -117,7 +136,7 @@ export async function cloneRepo(
     try {
       const content = await provider.downloadFile(entry.repoPath);
       const contentType = inferContentType(entry.blobPath);
-      await blobClient.createBlob(container, entry.blobPath, content, contentType);
+      await backend.uploadBlob(container, entry.blobPath, content, content.byteLength, contentType);
       fileShas[entry.blobPath] = entry.sha;
       result.uploaded.push(entry.blobPath);
       onProgress?.(`Uploaded: ${entry.blobPath}`);
@@ -145,7 +164,7 @@ export async function cloneRepo(
  * @returns SyncResult with upload/delete/skip/error counts
  */
 export async function syncRepo(
-  blobClient: BlobClient,
+  backend: IStorageBackend,
   container: string,
   provider: RepoProvider,
   link: RepoLink,
@@ -201,7 +220,7 @@ export async function syncRepo(
     try {
       const content = await provider.downloadFile(entry.repoPath);
       const contentType = inferContentType(entry.blobPath);
-      await blobClient.createBlob(container, entry.blobPath, content, contentType);
+      await backend.uploadBlob(container, entry.blobPath, content, content.byteLength, contentType);
       newShas[entry.blobPath] = entry.sha;
       result.uploaded.push(entry.blobPath);
       onProgress?.(`Uploaded: ${entry.blobPath}`);
@@ -214,7 +233,7 @@ export async function syncRepo(
   // Delete removed files
   for (const blobPath of toDelete) {
     try {
-      await blobClient.deleteBlob(container, blobPath);
+      await backend.deleteBlob(container, blobPath);
       result.deleted.push(blobPath);
       onProgress?.(`Deleted: ${blobPath}`);
     } catch (err) {
@@ -248,28 +267,21 @@ export function normalizePath(path: string | undefined): string {
  * Returns null if .repo-links.json does not exist.
  */
 export async function readLinks(
-  blobClient: BlobClient,
+  backend: IStorageBackend,
   container: string
 ): Promise<RepoLinksRegistry | null> {
-  try {
-    const blob = await blobClient.getBlobContent(container, LINKS_BLOB);
-    const text = typeof blob.content === "string" ? blob.content : blob.content.toString("utf-8");
-    return JSON.parse(text) as RepoLinksRegistry;
-  } catch {
-    return null;
-  }
+  return readJsonBlob<RepoLinksRegistry>(backend, container, LINKS_BLOB);
 }
 
 /**
  * Write the link registry to a container.
  */
 export async function writeLinks(
-  blobClient: BlobClient,
+  backend: IStorageBackend,
   container: string,
   registry: RepoLinksRegistry
 ): Promise<void> {
-  const content = JSON.stringify(registry, null, 2);
-  await blobClient.createBlob(container, LINKS_BLOB, content, "application/json");
+  await writeJsonBlob(backend, container, LINKS_BLOB, registry);
 }
 
 /**
@@ -278,10 +290,10 @@ export async function writeLinks(
  * Does NOT delete the old .repo-sync-meta.json (retained for safety).
  */
 export async function migrateOldMeta(
-  blobClient: BlobClient,
+  backend: IStorageBackend,
   container: string
 ): Promise<RepoLinksRegistry | null> {
-  const oldMeta = await readSyncMeta(blobClient, container);
+  const oldMeta = await readSyncMeta(backend, container);
   if (!oldMeta) return null;
 
   const link: RepoLink = {
@@ -298,7 +310,7 @@ export async function migrateOldMeta(
   };
 
   const registry: RepoLinksRegistry = { version: 1, links: [link] };
-  await writeLinks(blobClient, container, registry);
+  await writeLinks(backend, container, registry);
   return registry;
 }
 
@@ -307,15 +319,15 @@ export async function migrateOldMeta(
  * This is the primary entry point for all callers needing link data.
  */
 export async function resolveLinks(
-  blobClient: BlobClient,
+  backend: IStorageBackend,
   container: string
 ): Promise<RepoLinksRegistry> {
   // 1. Try reading .repo-links.json
-  const existing = await readLinks(blobClient, container);
+  const existing = await readLinks(backend, container);
   if (existing) return existing;
 
   // 2. Try auto-migrating from .repo-sync-meta.json
-  const migrated = await migrateOldMeta(blobClient, container);
+  const migrated = await migrateOldMeta(backend, container);
   if (migrated) return migrated;
 
   // 3. No metadata at all -- return empty registry
@@ -369,7 +381,7 @@ export function detectOverlap(
  * @returns The created RepoLink and an optional warning string
  */
 export async function createLink(
-  blobClient: BlobClient,
+  backend: IStorageBackend,
   container: string,
   linkData: {
     provider: "github" | "azure-devops" | "ssh";
@@ -379,7 +391,7 @@ export async function createLink(
     targetPrefix?: string;
   }
 ): Promise<{ link: RepoLink; warning?: string }> {
-  const registry = await resolveLinks(blobClient, container);
+  const registry = await resolveLinks(backend, container);
 
   // Check for exact prefix conflict
   if (detectExactConflict(registry.links, linkData.targetPrefix)) {
@@ -406,7 +418,7 @@ export async function createLink(
   };
 
   registry.links.push(link);
-  await writeLinks(blobClient, container, registry);
+  await writeLinks(backend, container, registry);
 
   return { link, warning: warning ?? undefined };
 }
@@ -416,17 +428,17 @@ export async function createLink(
  * Returns true if the link was found and removed, false otherwise.
  */
 export async function removeLink(
-  blobClient: BlobClient,
+  backend: IStorageBackend,
   container: string,
   linkId: string
 ): Promise<boolean> {
-  const registry = await resolveLinks(blobClient, container);
+  const registry = await resolveLinks(backend, container);
   const before = registry.links.length;
   registry.links = registry.links.filter((l) => l.id !== linkId);
 
   if (registry.links.length === before) return false;
 
-  await writeLinks(blobClient, container, registry);
+  await writeLinks(backend, container, registry);
   return true;
 }
 

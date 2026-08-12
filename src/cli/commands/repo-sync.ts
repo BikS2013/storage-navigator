@@ -1,11 +1,10 @@
-import { BlobClient } from "../../core/blob-client.js";
 import { GitHubClient } from "../../core/github-client.js";
 import { DevOpsClient } from "../../core/devops-client.js";
 import { SshGitClient } from "../../core/ssh-git-client.js";
-import { cloneRepo, syncRepo, readSyncMeta, resolveLinks, createLink, writeLinks, findLinkByPrefix } from "../../core/sync-engine.js";
+import { cloneRepo, syncRepo, resolveLinks, createLink, writeLinks, findLinkByPrefix } from "../../core/sync-engine.js";
 import type { RepoProvider } from "../../core/sync-engine.js";
 import type { RepoLink } from "../../core/types.js";
-import { resolveStorageEntry, resolvePatToken, type StorageOpts, type PatOpts } from "./shared.js";
+import { resolveStorageBackend, resolvePatToken, type StorageOpts, type PatOpts } from "./shared.js";
 
 export async function cloneGitHub(
   repoUrl: string,
@@ -16,11 +15,10 @@ export async function cloneGitHub(
   prefix?: string,
   repoPath?: string
 ): Promise<void> {
-  const { store, entry } = await resolveStorageEntry(storageOpts);
+  const { store, backend } = await resolveStorageBackend(storageOpts, storageOpts.account);
   const pat = await resolvePatToken(store, "github", patOpts);
   const { owner, repo } = GitHubClient.parseRepoUrl(repoUrl);
   const client = new GitHubClient(pat);
-  const blobClient = new BlobClient(entry);
 
   const targetBranch = branch ?? await client.getDefaultBranch(owner, repo);
   console.log(`Cloning github.com/${owner}/${repo} (branch: ${targetBranch}) into container '${container}'...\n`);
@@ -34,7 +32,7 @@ export async function cloneGitHub(
   if (repoPath) console.log(`  Repository sub-path: ${repoPath}`);
 
   // Create a link in the registry for this clone operation
-  const { link, warning } = await createLink(blobClient, container, {
+  const { link, warning } = await createLink(backend, container, {
     provider: "github",
     repoUrl,
     branch: targetBranch,
@@ -43,13 +41,13 @@ export async function cloneGitHub(
   });
   if (warning) console.error(`\n${warning}\n`);
 
-  const result = await cloneRepo(blobClient, container, provider, link, (msg) => console.log(`  ${msg}`));
+  const result = await cloneRepo(backend, container, provider, link, (msg) => console.log(`  ${msg}`));
 
   // Write updated link (with fileShas and lastSyncAt) back to registry
-  const registry = await resolveLinks(blobClient, container);
+  const registry = await resolveLinks(backend, container);
   const idx = registry.links.findIndex((l) => l.id === link.id);
   if (idx >= 0) registry.links[idx] = link;
-  await writeLinks(blobClient, container, registry);
+  await writeLinks(backend, container, registry);
 
   console.log(`\nDone. Uploaded: ${result.uploaded.length}, Errors: ${result.errors.length}`);
   if (result.errors.length > 0) {
@@ -67,11 +65,10 @@ export async function cloneDevOps(
   prefix?: string,
   repoPath?: string
 ): Promise<void> {
-  const { store, entry } = await resolveStorageEntry(storageOpts);
+  const { store, backend } = await resolveStorageBackend(storageOpts, storageOpts.account);
   const pat = await resolvePatToken(store, "azure-devops", patOpts);
   const { org, project, repo } = DevOpsClient.parseRepoUrl(repoUrl);
   const client = new DevOpsClient(pat, org);
-  const blobClient = new BlobClient(entry);
 
   const targetBranch = branch ?? await client.getDefaultBranch(project, repo);
   console.log(`Cloning ${org}/${project}/${repo} (branch: ${targetBranch}) into container '${container}'...\n`);
@@ -84,7 +81,7 @@ export async function cloneDevOps(
   };
 
   // Create a link in the registry for this clone operation
-  const { link, warning } = await createLink(blobClient, container, {
+  const { link, warning } = await createLink(backend, container, {
     provider: "azure-devops",
     repoUrl,
     branch: targetBranch,
@@ -93,13 +90,13 @@ export async function cloneDevOps(
   });
   if (warning) console.error(`\n${warning}\n`);
 
-  const result = await cloneRepo(blobClient, container, provider, link, (msg) => console.log(`  ${msg}`));
+  const result = await cloneRepo(backend, container, provider, link, (msg) => console.log(`  ${msg}`));
 
   // Write updated link (with fileShas and lastSyncAt) back to registry
-  const registry = await resolveLinks(blobClient, container);
+  const registry = await resolveLinks(backend, container);
   const idx = registry.links.findIndex((l) => l.id === link.id);
   if (idx >= 0) registry.links[idx] = link;
-  await writeLinks(blobClient, container, registry);
+  await writeLinks(backend, container, registry);
 
   console.log(`\nDone. Uploaded: ${result.uploaded.length}, Errors: ${result.errors.length}`);
   if (result.errors.length > 0) {
@@ -116,9 +113,8 @@ export async function cloneSsh(
   prefix?: string,
   repoPath?: string
 ): Promise<void> {
-  const { entry } = await resolveStorageEntry(storageOpts);
+  const { backend } = await resolveStorageBackend(storageOpts, storageOpts.account);
   const sshClient = new SshGitClient();
-  const blobClient = new BlobClient(entry);
 
   const targetBranch = branch ?? await sshClient.getDefaultBranch(repoUrl);
   const { repoName } = SshGitClient.parseRepoUrl(repoUrl);
@@ -132,7 +128,7 @@ export async function cloneSsh(
   };
 
   try {
-    const { link, warning } = await createLink(blobClient, container, {
+    const { link, warning } = await createLink(backend, container, {
       provider: "ssh",
       repoUrl,
       branch: targetBranch,
@@ -141,12 +137,12 @@ export async function cloneSsh(
     });
     if (warning) console.error(`\n${warning}\n`);
 
-    const result = await cloneRepo(blobClient, container, provider, link, (msg) => console.log(`  ${msg}`));
+    const result = await cloneRepo(backend, container, provider, link, (msg) => console.log(`  ${msg}`));
 
-    const registry = await resolveLinks(blobClient, container);
+    const registry = await resolveLinks(backend, container);
     const idx = registry.links.findIndex((l) => l.id === link.id);
     if (idx >= 0) registry.links[idx] = link;
-    await writeLinks(blobClient, container, registry);
+    await writeLinks(backend, container, registry);
 
     console.log(`\nDone. Uploaded: ${result.uploaded.length}, Errors: ${result.errors.length}`);
     if (result.errors.length > 0) {
@@ -167,11 +163,10 @@ export async function syncContainer(
   linkId?: string,
   all: boolean = false
 ): Promise<void> {
-  const { store, entry } = await resolveStorageEntry(storageOpts);
-  const blobClient = new BlobClient(entry);
+  const { store, backend } = await resolveStorageBackend(storageOpts, storageOpts.account);
 
   // Resolve links (auto-migrates from old .repo-sync-meta.json if needed)
-  const registry = await resolveLinks(blobClient, container);
+  const registry = await resolveLinks(backend, container);
   if (registry.links.length === 0) {
     console.error(`Container '${container}' is not a synced repository. No links found.`);
     process.exit(1);
@@ -241,13 +236,13 @@ export async function syncContainer(
     else console.log();
 
     try {
-      const result = await syncRepo(blobClient, container, provider, link, dryRun, (msg) => console.log(`  ${msg}`));
+      const result = await syncRepo(backend, container, provider, link, dryRun, (msg) => console.log(`  ${msg}`));
 
       // Write updated link back to registry
       if (!dryRun) {
         const idx = registry.links.findIndex((l) => l.id === link.id);
         if (idx >= 0) registry.links[idx] = link;
-        await writeLinks(blobClient, container, registry);
+        await writeLinks(backend, container, registry);
       }
 
       console.log(`\nUploaded: ${result.uploaded.length}, Deleted: ${result.deleted.length}, Skipped: ${result.skipped.length}, Errors: ${result.errors.length}`);
